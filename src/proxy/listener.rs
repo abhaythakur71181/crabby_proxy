@@ -1,6 +1,8 @@
 use crate::app_state::AppState;
 use crate::proxy::protocol::ProxyProtocol;
-use crate::stream::{create_bidirectional_tunnel, ClientStream, TunnelStream};
+use crate::stream::{
+    create_bidirectional_tunnel, BufferedClientStream, ClientStream, TunnelStream,
+};
 use crate::utils;
 use base64::Engine;
 use std::net::SocketAddr;
@@ -27,7 +29,16 @@ enum ErrorType {
 }
 
 pub async fn run_proxy_server(state: AppState, addr: SocketAddr) {
-    let listener = TcpListener::bind(addr).await.unwrap();
+    let listener = match TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("Failed to bind to {}: {}", addr, e);
+            return;
+        }
+    };
+
+    tracing::info!("Proxy server listening on {}", addr);
+
     while let Ok((client_stream, client_addr)) = listener.accept().await {
         let state = state.clone();
         tokio::spawn(async move {
@@ -110,7 +121,7 @@ async fn handle_client(mut client_stream: TcpStream, client_addr: SocketAddr, st
     }
 
     // If protocol is HTTPS and we have TLS support, upgrade the connection
-    let mut stream: ClientStream = if protocol == ProxyProtocol::HTTPS {
+    let stream: ClientStream = if protocol == ProxyProtocol::HTTPS {
         match &state.tls_acceptor {
             Some(tls_acceptor) => match tls_acceptor.accept(client_stream).await {
                 Ok(tls_stream) => {
@@ -134,9 +145,12 @@ async fn handle_client(mut client_stream: TcpStream, client_addr: SocketAddr, st
         ClientStream::Plain(client_stream)
     };
 
+    // Wrap stream in buffered wrapper for TLS peek support
+    let mut buffered_stream = BufferedClientStream::new(stream);
+
     // If credentials are required, perform protocol-specific authentication
     if state.require_creds {
-        match authenticate_by_protocol(&mut stream, &protocol, &state).await {
+        match authenticate_by_protocol(&mut buffered_stream, &protocol, &state).await {
             Ok(true) => {
                 tracing::debug!(
                     "{} authenticated successfully via {}",
@@ -162,7 +176,36 @@ async fn handle_client(mut client_stream: TcpStream, client_addr: SocketAddr, st
         tracing::debug!("Skipping authentication (--no-creds)");
     }
 
-    let result = async_handle_client(&mut stream, client_addr, &mut protocol).await;
+    // INFO: For HTTP/HTTPS, we need to parse the target from the buffered stream
+    // to preserve any data read during authentication
+    let (target, mut stream) = if matches!(protocol, ProxyProtocol::HTTP | ProxyProtocol::HTTPS) {
+        match parse_target_from_buffered(&mut buffered_stream, &protocol).await {
+            Ok(t) => (t, buffered_stream.into_inner()),
+            Err(e) => {
+                tracing::error!("Failed to parse target: {}", e);
+                let _ = send_error_response(
+                    &protocol,
+                    &mut buffered_stream.into_inner(),
+                    ErrorType::Handshake,
+                )
+                .await;
+                return;
+            }
+        }
+    } else {
+        let mut stream = buffered_stream.into_inner();
+        match parse_target_by_protocol(&mut stream, &protocol).await {
+            Ok(t) => (t, stream),
+            Err(e) => {
+                tracing::error!("Failed to parse target: {}", e);
+                let _ = send_error_response(&protocol, &mut stream, ErrorType::Handshake).await;
+                return;
+            }
+        }
+    };
+
+    let result =
+        async_handle_client_with_target(&mut stream, client_addr, &mut protocol, target).await;
 
     if let Err((e, error_type)) = result {
         tracing::error!(
@@ -206,7 +249,7 @@ async fn detect_client_protocol(
 }
 
 async fn authenticate_by_protocol(
-    client_stream: &mut ClientStream,
+    client_stream: &mut BufferedClientStream,
     protocol: &ProxyProtocol,
     state: &AppState,
 ) -> AuthResult<bool> {
@@ -229,22 +272,11 @@ async fn authenticate_by_protocol(
 }
 
 async fn authenticate_http_or_https(
-    client_stream: &mut ClientStream,
+    client_stream: &mut BufferedClientStream,
     state: &AppState,
 ) -> AuthResult<bool> {
     let mut buffer = [0u8; 4096];
-
-    // Use peek equivalent for our stream type
-    let n = match client_stream {
-        ClientStream::Plain(stream) => stream.peek(&mut buffer).await?,
-        ClientStream::Tls(stream) => {
-            // For TLS streams, we need to read instead of peek
-            // Save the position and data for later re-use
-            let _pos = stream.get_ref().0.peer_addr()?; // TODO: This is a hack, need a better way
-            stream.read(&mut buffer).await?
-        }
-    };
-
+    let n = client_stream.peek(&mut buffer).await?;
     if n == 0 {
         return Err("Connection closed by client".into());
     }
@@ -273,7 +305,7 @@ fn extract_proxy_auth_header(request_data: &str) -> Option<&str> {
 }
 
 async fn send_http_auth_required_response(
-    client_stream: &mut ClientStream,
+    client_stream: &mut BufferedClientStream,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let response = "HTTP/1.1 407 Proxy Authentication Required\r\n\
                    Proxy-Authenticate: Basic realm=\"Proxy\"\r\n\
@@ -287,7 +319,7 @@ async fn send_http_auth_required_response(
 }
 
 async fn authenticate_socks4(
-    client_stream: &mut ClientStream,
+    client_stream: &mut BufferedClientStream,
     state: &AppState,
 ) -> AuthResult<bool> {
     // Read SOCKS4 request
@@ -330,7 +362,8 @@ async fn authenticate_socks4(
             Err("SOCKS4 authentication failed".into())
         }
     } else {
-        Ok(false)
+        // No credentials required, allow connection
+        Ok(true)
     }
 }
 
@@ -345,7 +378,7 @@ fn validate_socks4_user_id(user_id: &str, state: &AppState) -> bool {
 }
 
 async fn authenticate_socks5(
-    client_stream: &mut ClientStream,
+    client_stream: &mut BufferedClientStream,
     state: &AppState,
 ) -> AuthResult<bool> {
     // Read SOCKS5 handshake
@@ -411,37 +444,101 @@ async fn authenticate_socks5(
     }
 }
 
-async fn async_handle_client(
+/// Parse target from buffered stream (for HTTP/HTTPS to preserve auth data)
+async fn parse_target_from_buffered(
+    stream: &mut BufferedClientStream,
+    protocol: &ProxyProtocol,
+) -> io::Result<ProxyTarget> {
+    match protocol {
+        ProxyProtocol::HTTP => {
+            // Read request line and consume all headers up to \r\n\r\n
+            // This is important because after CONNECT, we switch to raw TCP tunneling
+            let mut request_line = Vec::new();
+            let mut buf = [0u8; 1];
+
+            // Read request line (until \r\n)
+            loop {
+                stream.read_exact(&mut buf).await?;
+                request_line.push(buf[0]);
+                if request_line.len() >= 2
+                    && request_line[request_line.len() - 2..] == [b'\r', b'\n']
+                {
+                    break;
+                }
+            }
+
+            let request_line_str = String::from_utf8(request_line).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "Invalid UTF-8 in request line")
+            })?;
+
+            let parts: Vec<&str> = request_line_str.split_whitespace().collect();
+            if parts.len() < 2 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Invalid HTTP request",
+                ));
+            }
+
+            let method = parts[0];
+            let url = parts[1];
+
+            // For CONNECT requests, we need to consume all headers until \r\n\r\n
+            // to prepare for raw TCP tunneling. Otherwise, leftover headers will
+            // be sent to the target server, breaking the connection.
+            if method == "CONNECT" {
+                // Read and discard headers until we hit the empty line (\r\n\r\n)
+                let mut header_buf = Vec::new();
+                let mut last_four = [0u8; 4];
+
+                loop {
+                    let mut byte = [0u8; 1];
+                    stream.read_exact(&mut byte).await?;
+                    header_buf.push(byte[0]);
+
+                    // Update sliding window
+                    if header_buf.len() >= 4 {
+                        last_four.copy_from_slice(&header_buf[header_buf.len() - 4..]);
+                    }
+
+                    // Check if we've seen \r\n\r\n
+                    if header_buf.len() >= 4 && last_four == [b'\r', b'\n', b'\r', b'\n'] {
+                        break;
+                    }
+                }
+                parse_connect_target(url)
+            } else {
+                parse_http_target(url)
+            }
+        }
+        ProxyProtocol::HTTPS => {
+            // For HTTPS, read from the buffered stream to extract SNI
+            let mut buf = vec![0u8; 512];
+            let n = stream.read(&mut buf).await?;
+            if let Some(sni) = extract_sni_from_tls(&buf[..n]) {
+                Ok(ProxyTarget {
+                    host: sni,
+                    port: 443,
+                })
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Failed to extract SNI from TLS handshake",
+                ))
+            }
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "This function only supports HTTP/HTTPS",
+        )),
+    }
+}
+
+async fn async_handle_client_with_target(
     client_stream: &mut ClientStream,
     client_addr: SocketAddr,
     protocol: &mut ProxyProtocol,
+    target: ProxyTarget,
 ) -> Result<(), (io::Error, ErrorType)> {
-    let mut peek_buf = [0u8; 4];
-    let peek_result = timeout(Duration::from_secs(5), async {
-        match client_stream {
-            ClientStream::Plain(stream) => stream.peek(&mut peek_buf).await,
-            ClientStream::Tls(stream) => {
-                // For TLS streams, we need to read instead of peek
-                // Save the position and data for later re-use
-                let _pos = stream.get_ref().0.peer_addr()?; // TODO: This is a hack, need a better way
-                let n = stream.read(&mut peek_buf).await?;
-                Ok(n)
-            }
-        }
-    })
-    .await;
-
-    *protocol = match peek_result {
-        Ok(Ok(_n)) => detect_protocol(&peek_buf)
-            .await
-            .unwrap_or(ProxyProtocol::TCP),
-        Ok(Err(_)) | Err(_) => ProxyProtocol::TCP,
-    };
-
-    let target = parse_target_by_protocol(client_stream, protocol)
-        .await
-        .map_err(|e| (e, ErrorType::Handshake))?;
-
     let target_addr = format!("{}:{}", target.host, target.port);
     let target_stream = timeout(Duration::from_secs(10), TcpStream::connect(&target_addr))
         .await
@@ -600,8 +697,8 @@ async fn parse_https_target_from_stream(stream: &mut ClientStream) -> io::Result
         ClientStream::Plain(stream) => stream.peek(&mut buf).await?,
         ClientStream::Tls(stream) => {
             // For TLS streams, we need to read instead of peek
-            // Save the position and data for later re-use
-            let _pos = stream.get_ref().0.peer_addr()?; // TODO: This is a hack, need a better way
+            // Note: This consumes data from the stream, but SNI extraction
+            // happens before we need to relay data, so it's acceptable
             stream.read(&mut buf).await?
         }
     };
@@ -612,11 +709,10 @@ async fn parse_https_target_from_stream(stream: &mut ClientStream) -> io::Result
             port: 443,
         })
     } else {
-        // Fallback if SNI extraction fails
-        Ok(ProxyTarget {
-            host: "unknown.host".to_string(),
-            port: 443,
-        })
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Failed to extract SNI from TLS handshake",
+        ))
     }
 }
 
@@ -661,27 +757,8 @@ async fn parse_socks4_target(stream: &mut ClientStream) -> io::Result<ProxyTarge
 }
 
 async fn parse_socks5_target(stream: &mut ClientStream) -> io::Result<ProxyTarget> {
-    // Handle authentication negotiation first
-    let mut buf = [0u8; 2];
-    stream.read_exact(&mut buf).await?;
-
-    let version = buf[0];
-    let n_methods = buf[1];
-
-    if version != 0x05 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Invalid SOCKS5 version",
-        ));
-    }
-
-    // Read authentication methods
-    let mut methods = vec![0u8; n_methods as usize];
-    stream.read_exact(&mut methods).await?;
-
-    // Send "no authentication required" response
-    stream.write_all(&[0x05, 0x00]).await?;
-
+    // Authentication has already been handled in authenticate_socks5,
+    // so we can directly read the connection request
     // Read connection request
     let mut req_buf = [0u8; 4];
     stream.read_exact(&mut req_buf).await?;
@@ -731,7 +808,9 @@ async fn parse_socks5_target(stream: &mut ClientStream) -> io::Result<ProxyTarge
             // IPv6
             let mut addr_buf = [0u8; 18];
             stream.read_exact(&mut addr_buf).await?;
-            let ip_bytes: [u8; 16] = addr_buf[0..16].try_into().unwrap();
+            let ip_bytes: [u8; 16] = addr_buf[0..16].try_into().map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "Invalid IPv6 address length")
+            })?;
             let ip = Ipv6Addr::from(ip_bytes);
             let port = u16::from_be_bytes([addr_buf[16], addr_buf[17]]);
             ProxyTarget {
