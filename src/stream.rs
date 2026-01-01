@@ -14,6 +14,132 @@ pub enum ClientStream {
     Tls(tokio_rustls::server::TlsStream<tokio::net::TcpStream>),
 }
 
+/// A buffered wrapper for ClientStream that allows peeking on TLS streams
+/// by buffering initial reads
+pub struct BufferedClientStream {
+    stream: ClientStream,
+    buffer: Vec<u8>,
+    buffer_pos: usize,
+}
+
+impl BufferedClientStream {
+    pub fn new(stream: ClientStream) -> Self {
+        Self {
+            stream,
+            buffer: Vec::new(),
+            buffer_pos: 0,
+        }
+    }
+
+    /// Read data into the buffer (for TLS streams that don't support peek)
+    pub async fn read_to_buffer(&mut self, size: usize) -> io::Result<usize> {
+        let mut buf = vec![0u8; size];
+        let n = match &mut self.stream {
+            ClientStream::Plain(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "Plain streams support peek, use peek() instead",
+                ))
+            }
+            ClientStream::Tls(stream) => stream.read(&mut buf).await?,
+        };
+        self.buffer.extend_from_slice(&buf[..n]);
+        Ok(n)
+    }
+
+    /// Peek at data without consuming it
+    pub async fn peek(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // If we have buffered data, return it
+        if self.buffer_pos < self.buffer.len() {
+            let available = (self.buffer.len() - self.buffer_pos).min(buf.len());
+            buf[..available]
+                .copy_from_slice(&self.buffer[self.buffer_pos..self.buffer_pos + available]);
+            return Ok(available);
+        }
+
+        // For plain streams, use native peek
+        match &mut self.stream {
+            ClientStream::Plain(stream) => stream.peek(buf).await,
+            ClientStream::Tls(_) => {
+                // For TLS, we need to read into buffer first
+                if self.buffer.is_empty() {
+                    let n = self.read_to_buffer(buf.len()).await?;
+                    if n > 0 {
+                        buf[..n].copy_from_slice(&self.buffer[..n]);
+                    }
+                    Ok(n)
+                } else {
+                    Ok(0)
+                }
+            }
+        }
+    }
+
+    /// Consume the buffered stream, returning the underlying stream
+    pub fn into_inner(self) -> ClientStream {
+        self.stream
+    }
+}
+
+impl AsyncRead for BufferedClientStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        // First, read from buffer if available
+        if self.buffer_pos < self.buffer.len() {
+            let available = self.buffer.len() - self.buffer_pos;
+            let to_read = available.min(buf.remaining());
+            buf.put_slice(&self.buffer[self.buffer_pos..self.buffer_pos + to_read]);
+            self.buffer_pos += to_read;
+
+            // Clean up buffer if fully consumed
+            if self.buffer_pos >= self.buffer.len() {
+                self.buffer.clear();
+                self.buffer_pos = 0;
+            }
+            return Poll::Ready(Ok(()));
+        }
+
+        // Then read from underlying stream
+        match &mut self.stream {
+            ClientStream::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
+            ClientStream::Tls(stream) => Pin::new(stream).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for BufferedClientStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        match &mut self.stream {
+            ClientStream::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
+            ClientStream::Tls(stream) => Pin::new(stream).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        match &mut self.stream {
+            ClientStream::Plain(stream) => Pin::new(stream).poll_flush(cx),
+            ClientStream::Tls(stream) => Pin::new(stream).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        match &mut self.stream {
+            ClientStream::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
+            ClientStream::Tls(stream) => Pin::new(stream).poll_shutdown(cx),
+        }
+    }
+}
+
 impl AsyncRead for ClientStream {
     fn poll_read(
         mut self: std::pin::Pin<&mut Self>,
