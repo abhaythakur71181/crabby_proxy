@@ -46,7 +46,16 @@ async fn main() {
 
     let tls_acceptor =
         if let (Some(cert_path), Some(key_path)) = (&args.tls_certificate, &args.tls_private_key) {
-            Some(create_tls_acceptor(cert_path, key_path).unwrap())
+            match create_tls_acceptor(cert_path, key_path) {
+                Ok(acceptor) => Some(acceptor),
+                Err(e) => {
+                    tracing::error!("Failed to create TLS acceptor: {}", e);
+                    tracing::error!(
+                        "Please check that the certificate and key files exist and are valid"
+                    );
+                    std::process::exit(1);
+                }
+            }
         } else {
             None
         };
@@ -62,7 +71,15 @@ async fn main() {
     let addr: String = format!("0.0.0.0:{}", &args.proxy_port);
     tracing::info!("Starting Proxy Server at: {}", &addr);
 
-    let proxy_handle = tokio::spawn(run_proxy_server(state.clone(), addr.parse().unwrap()));
+    let socket_addr = match addr.parse() {
+        Ok(addr) => addr,
+        Err(e) => {
+            tracing::error!("Invalid address format '{}': {}", addr, e);
+            std::process::exit(1);
+        }
+    };
+
+    let proxy_handle = tokio::spawn(run_proxy_server(state.clone(), socket_addr));
 
     // TODO: make api admin flow
     // let admin_handle = tokio::spawn(run_admin_server(
