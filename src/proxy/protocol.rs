@@ -6,7 +6,7 @@ use tokio::io::{self, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{timeout, Duration};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ProxyProtocol {
     TCP,
     HTTP,
@@ -609,7 +609,7 @@ impl ProxyProtocol {
                 .split('/')
                 .next()
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid HTTP URL"))?;
-            
+
             let parts: Vec<&str> = host_and_port.split(':').collect();
             let host = parts[0].to_string();
             let port = if parts.len() > 1 {
@@ -625,7 +625,6 @@ impl ProxyProtocol {
             ))
         }
     }
-
 
     // Simplified SNI extraction (you'd want a proper TLS parser for production)
     fn extract_sni_from_tls(data: &[u8]) -> Option<String> {
@@ -659,7 +658,7 @@ impl ProxyProtocol {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProxyTarget {
     pub host: String,
     pub port: u16,

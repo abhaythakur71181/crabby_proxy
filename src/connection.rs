@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::proxy::protocol::{ProxyProtocol, ProxyTarget};
 
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ConnectionState {
     Pending,
     Approved,
@@ -14,7 +14,7 @@ pub enum ConnectionState {
 }
 
 // ConnectionType enum
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ConnectionType {
     /// Forward proxy (client -> proxy -> target server)
     Forward {
@@ -29,7 +29,7 @@ pub enum ConnectionType {
 }
 
 // Service types for reverse tunnels
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ServiceType {
     Database(DbType),
     WebService,
@@ -37,7 +37,7 @@ pub enum ServiceType {
     Custom(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum DbType {
     Postgres,
     MySQL,
@@ -46,13 +46,15 @@ pub enum DbType {
     Custom(String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ConnectionRequest {
     pub id: Uuid,
     pub client_addr: SocketAddr,
     pub connection_type: ConnectionType,
-    pub state: ConnectionState,
-    pub decision_tx: Option<oneshot::Sender<ConnectionApproval>>,
+    #[serde(skip, default = "Instant::now")]
+    pub requested_at: Instant,
+    #[serde(skip)]
+    pub response_tx: Option<oneshot::Sender<bool>>,
 }
 
 // Expanded approval response
@@ -75,22 +77,6 @@ pub enum ConnectionError {
     InvalidState,
 }
 
-impl ConnectionRequest {
-    pub fn new(
-        client_addr: SocketAddr,
-        connection_type: ConnectionType,
-        decision_tx: Option<oneshot::Sender<ConnectionApproval>>,
-    ) -> Self {
-        Self {
-            id: Uuid::new_v4(),
-            client_addr,
-            connection_type,
-            decision_tx,
-            state: ConnectionState::Pending,
-        }
-    }
-}
-
 impl ConnectionManager {
     pub fn new() -> Self {
         Self {
@@ -99,56 +85,55 @@ impl ConnectionManager {
         }
     }
 
+    pub fn new_connection(
+        &mut self,
+        client_addr: SocketAddr,
+        connection_type: ConnectionType,
+    ) -> (Uuid, oneshot::Receiver<bool>) {
+        let id = Uuid::new_v4();
+        let (tx, rx) = oneshot::channel();
+
+        let request = ConnectionRequest {
+            id,
+            client_addr,
+            connection_type,
+            requested_at: Instant::now(),
+            response_tx: Some(tx),
+        };
+
+        self.pending.insert(id, request);
+        (id, rx)
+    }
+
     pub fn add_pending(&mut self, request: ConnectionRequest) {
         self.pending.insert(request.id, request);
     }
 
-    pub fn approve_connection(&mut self, id: Uuid) -> Result<(), ConnectionError> {
-        let request = self.pending.get_mut(&id).ok_or(ConnectionError::NotFound)?;
+    pub fn approve_connection(&mut self, id: Uuid) -> bool {
+        if let Some(mut request) = self.pending.remove(&id) {
+            // Notify the waiting task
+            if let Some(tx) = request.response_tx.take() {
+                let _ = tx.send(true);
+            }
 
-        if !matches!(request.state, ConnectionState::Pending) {
-            return Err(ConnectionError::InvalidState);
+            // Mark as active
+            self.active.insert(id, Instant::now());
+            true
+        } else {
+            false
         }
-
-        request.state = ConnectionState::Approved;
-
-        if let Some(tx) = request.decision_tx.take() {
-            let _ = tx.send(ConnectionApproval::Approved); // Ignore send errors
-        }
-
-        Ok(())
     }
 
-    pub fn reject_connection(
-        &mut self,
-        id: Uuid,
-        rejection_reason: String,
-    ) -> Result<(), ConnectionError> {
-        let mut request = self.pending.remove(&id).ok_or(ConnectionError::NotFound)?;
-
-        if !matches!(request.state, ConnectionState::Pending) {
-            return Err(ConnectionError::InvalidState);
+    pub fn reject_connection(&mut self, id: Uuid, _reason: String) -> bool {
+        if let Some(mut request) = self.pending.remove(&id) {
+            // Notify the waiting task
+            if let Some(tx) = request.response_tx.take() {
+                let _ = tx.send(false);
+            }
+            true
+        } else {
+            false
         }
-
-        request.state = ConnectionState::Rejected;
-
-        if let Some(tx) = request.decision_tx.take() {
-            let _ = tx.send(ConnectionApproval::Rejected(rejection_reason));
-        }
-
-        // Optionally drop or store rejected connections
-        Ok(())
-    }
-
-    pub fn activate_connection(&mut self, id: Uuid) -> Result<(), ConnectionError> {
-        let request = self.pending.remove(&id).ok_or(ConnectionError::NotFound)?;
-
-        if !matches!(request.state, ConnectionState::Approved) {
-            return Err(ConnectionError::InvalidState);
-        }
-
-        self.active.insert(id, Instant::now());
-        Ok(())
     }
 
     pub fn close_connection(&mut self, id: Uuid) -> Result<(), ConnectionError> {
