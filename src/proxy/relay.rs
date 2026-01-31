@@ -13,10 +13,11 @@ lazy_static! {
     static ref BUFFER_POOL: BytePool::<Vec<u8>> = BytePool::<Vec<u8>>::new();
 }
 
-pub async fn handShake(
+pub async fn hand_shake(
     mut client_stream: TcpStream,
     target: ProxyTarget,
 ) -> Result<Vec<u8>, ProxyError> {
+
     let str_addr = target.host;
     let mut buffer = BUFFER_POOL.alloc(INITIAL_HTTP_HEADER_SIZE);
     buffer.extend_from_slice("CONNECT ".as_bytes());
@@ -35,7 +36,6 @@ pub async fn handShake(
         let len = utils::read_from_stream(&mut client_stream, &mut tmp_buffer).await?;
         buffer.extend_from_slice(&tmp_buffer[..len]);
         let len = buffer.len();
-        eprintln!("DEBUGPRINT[320]: relay.rs:37: len={:#?}", len);
         if len > 4 {
             let start_index = len - 4;
             if &buffer[start_index..len] == b"\r\n\r\n" {
@@ -49,6 +49,7 @@ pub async fn handShake(
             }
         }
     }
+
 
     if let Some(index) = partially_read_body_start_index {
         if buffer[..].starts_with("HTTP/1.1 200 OK".as_bytes()) {

@@ -605,12 +605,12 @@ impl ProxyProtocol {
     fn parse_http_target(url: &str) -> io::Result<ProxyTarget> {
         if url.starts_with("http://") {
             let url_without_scheme = &url[7..];
-            let parts: Vec<&str> = url_without_scheme
+            let host_and_port = url_without_scheme
                 .split('/')
                 .next()
-                .unwrap()
-                .split(':')
-                .collect();
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid HTTP URL"))?;
+            
+            let parts: Vec<&str> = host_and_port.split(':').collect();
             let host = parts[0].to_string();
             let port = if parts.len() > 1 {
                 parts[1].parse::<u16>().unwrap_or(80)
@@ -625,6 +625,7 @@ impl ProxyProtocol {
             ))
         }
     }
+
 
     // Simplified SNI extraction (you'd want a proper TLS parser for production)
     fn extract_sni_from_tls(data: &[u8]) -> Option<String> {
