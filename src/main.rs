@@ -3,6 +3,7 @@ mod config;
 mod connection;
 mod error;
 mod proxy;
+mod state;
 mod stream;
 mod tunnel;
 mod utils;
