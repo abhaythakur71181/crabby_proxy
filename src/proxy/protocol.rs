@@ -105,8 +105,8 @@ impl ProxyProtocol {
 
         // Check if username/password auth is supported by client
         let supports_auth = methods_buf.contains(&0x02);
-
-        if state.require_creds && supports_auth {
+        let auth_required = state.username.is_some() && state.password.is_some();
+        if auth_required && supports_auth {
             // Tell client to use username/password auth
             client_stream.write_all(&[0x05, 0x02]).await?;
 
@@ -141,7 +141,7 @@ impl ProxyProtocol {
                 client_stream.write_all(&[0x01, 0x01]).await?; // Failure
                 Err("SOCKS5 authentication failed".into())
             }
-        } else if state.require_creds {
+        } else if auth_required {
             // Client doesn't support auth but we require it
             client_stream.write_all(&[0x05, 0xFF]).await?; // No acceptable methods
             Err("SOCKS5 authentication required but not supported by client".into())
