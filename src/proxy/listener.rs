@@ -103,7 +103,8 @@ async fn handle_client(mut client_stream: TcpStream, client_addr: SocketAddr, st
     let mut buffered_stream = BufferedClientStream::new(stream);
 
     // If credentials are required, perform protocol-specific authentication
-    if state.require_creds {
+    let auth_required = state.username.is_some() && state.password.is_some();
+    if auth_required {
         match protocol.authenticate(&mut buffered_stream, &state).await {
             Ok(true) => {
                 tracing::debug!(
@@ -271,4 +272,3 @@ where
     tunnel.shutdown().await?;
     Ok(total)
 }
-
