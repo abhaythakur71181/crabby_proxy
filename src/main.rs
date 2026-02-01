@@ -9,85 +9,77 @@ mod tunnel;
 mod utils;
 
 use crate::app_state::AppState;
+use crate::config::Config;
 use crate::proxy::listener::run_proxy_server;
-use crate::utils::create_tls_acceptor;
 use clap::Parser;
-use tokio::sync::mpsc;
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    /// Path to configuration file
+    #[arg(short, long, default_value = "crabby-proxy.toml")]
+    config: PathBuf,
+
+    /// Override proxy bind address
     #[arg(long)]
-    no_creds: bool,
+    proxy_bind: Option<String>,
 
-    #[arg(short = 'u', long, required_unless_present = "no_creds")]
-    username: Option<String>,
-
-    #[arg(short = 'p', long, required_unless_present = "no_creds")]
-    password: Option<String>,
-
-    #[arg(short = 'P', long, default_value = "8080")]
-    proxy_port: u32,
-
-    #[arg(short = 't', long)]
-    tls_certificate: Option<String>,
-
-    #[arg(short = 'k', long, requires = "tls_certificate")]
-    tls_private_key: Option<String>,
+    /// Override admin bind address
+    #[arg(long)]
+    admin_bind: Option<String>,
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+        .with_max_level(tracing::Level::TRACE)
         .init();
-    let (notify_tx, _) = mpsc::channel(100);
-
     let args = Args::parse();
-
-    let tls_acceptor =
-        if let (Some(cert_path), Some(key_path)) = (&args.tls_certificate, &args.tls_private_key) {
-            match create_tls_acceptor(cert_path, key_path) {
-                Ok(acceptor) => Some(acceptor),
-                Err(e) => {
-                    tracing::error!("Failed to create TLS acceptor: {}", e);
-                    tracing::error!(
-                        "Please check that the certificate and key files exist and are valid"
-                    );
-                    std::process::exit(1);
-                }
-            }
-        } else {
-            None
-        };
-
-    let state = AppState::new(
-        notify_tx,
-        !args.no_creds,
-        args.username,
-        args.password,
-        tls_acceptor,
-    );
-
-    let addr: String = format!("0.0.0.0:{}", &args.proxy_port);
-    tracing::info!("Starting Proxy Server at: {}", &addr);
-
-    let socket_addr = match addr.parse() {
-        Ok(addr) => addr,
-        Err(e) => {
-            tracing::error!("Invalid address format '{}': {}", addr, e);
-            std::process::exit(1);
-        }
+    let mut config = if args.config.exists() {
+        tracing::info!("Loading configuration from: {}", args.config.display());
+        Config::from_file(&args.config)?
+    } else {
+        tracing::warn!("Configuration file not found, using defaults");
+        Config::default()
     };
 
-    let proxy_handle = tokio::spawn(run_proxy_server(state.clone(), socket_addr));
+    // Apply CLI overrides
+    if let Some(proxy_bind) = args.proxy_bind {
+        config.server.proxy_bind = proxy_bind;
+    }
+    if let Some(admin_bind) = args.admin_bind {
+        config.server.admin_bind = admin_bind;
+    }
 
-    // TODO: make api admin flow
-    // let admin_handle = tokio::spawn(run_admin_server(
-    //     state.clone(),
-    //     "0.0.0.0:8081".parse().unwrap(),
-    // ));
+    tracing::info!("Configuration loaded successfully");
+    tracing::info!("  Proxy: {}", config.server.proxy_bind);
+    tracing::info!("  Admin: {}", config.server.admin_bind);
+    tracing::info!("  State backend: {}", config.state.backend);
+    tracing::info!("  Auth enabled: {}", config.authentication.enabled);
+
+    // Create application state
+    let state = AppState::new(config.clone()).await?;
+    let proxy_addr = config.server.proxy_bind.parse()?;
+    tracing::info!("🚀 Starting Crabby Proxy");
+    tracing::info!("  Proxy server: {}", proxy_addr);
+    tracing::info!("  Protocols: HTTP/HTTPS, SOCKS4/5");
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to listen for Ctrl+C");
+        tracing::info!("Received shutdown signal");
+        state_clone.shutdown().await;
+        std::process::exit(0);
+    });
+    let proxy_handle = tokio::spawn(run_proxy_server(state.clone(), proxy_addr));
+
+    // TODO: Start admin server when implemented
+    // let admin_addr = config.server.admin_bind.parse()?;
+    // let admin_handle = tokio::spawn(run_admin_server(state.clone(), admin_addr));
 
     // Wait for servers
     let _ = tokio::join!(proxy_handle);
+    Ok(())
 }
