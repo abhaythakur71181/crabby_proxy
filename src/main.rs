@@ -1,3 +1,4 @@
+mod admin;
 mod app_state;
 mod config;
 mod connection;
@@ -60,10 +61,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create application state
     let state = AppState::new(config.clone()).await?;
+
+    // Parse socket addresses
     let proxy_addr = config.server.proxy_bind.parse()?;
+    let admin_addr = config.server.admin_bind.parse()?;
+
     tracing::info!("🚀 Starting Crabby Proxy");
     tracing::info!("  Proxy server: {}", proxy_addr);
+    tracing::info!("  Admin API: {}", admin_addr);
     tracing::info!("  Protocols: HTTP/HTTPS, SOCKS4/5");
+
+    // graceful shutdown
     let state_clone = state.clone();
     tokio::spawn(async move {
         tokio::signal::ctrl_c()
@@ -73,13 +81,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         state_clone.shutdown().await;
         std::process::exit(0);
     });
+
     let proxy_handle = tokio::spawn(run_proxy_server(state.clone(), proxy_addr));
+    let admin_handle = tokio::spawn(admin::run_admin_server(state.clone(), admin_addr));
+    let _ = tokio::join!(proxy_handle, admin_handle);
 
-    // TODO: Start admin server when implemented
-    // let admin_addr = config.server.admin_bind.parse()?;
-    // let admin_handle = tokio::spawn(run_admin_server(state.clone(), admin_addr));
-
-    // Wait for servers
-    let _ = tokio::join!(proxy_handle);
     Ok(())
 }
