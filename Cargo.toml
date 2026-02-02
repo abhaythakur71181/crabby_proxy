@@ -5,18 +5,21 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.98"
+argon2 = { version = "0.5.3", features = ["std"] }
 async-trait = "0.1.89"
 axum = "0.7"
 base64 = "0.22.1"
 byte-pool = "0.2.4"
-chrono = "0.4.41"
+chrono = { version = "0.4.41", features = ["serde"] }
 clap = { version = "4.5.53", features = ["derive"] }
 config = "0.15.19"
+jsonwebtoken = "10.3.0"
 lazy_static = "1.5.0"
 notify = "8.2.0"
 rustls-pemfile = "2.2.0"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0"
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite", "migrate"] }
 thiserror = "2.0.12"
 tokio = { version = "1.45.1", features = ["full"] }
 tokio-rustls = "0.26.4"
