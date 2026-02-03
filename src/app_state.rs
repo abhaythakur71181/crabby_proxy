@@ -42,10 +42,16 @@ pub struct AppState {
     // Authentication credentials (cached from config)
     pub username: Option<String>,
     pub password: Option<String>,
+
+    // Config file path
+    pub config_path: Option<String>,
 }
 
 impl AppState {
-    pub async fn new(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn new(
+        config: Config,
+        config_path: Option<String>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let state: Arc<dyn StateBackend> = match config.state.backend.as_str() {
             "redis" => {
                 tracing::info!(
@@ -103,6 +109,7 @@ impl AppState {
             start_time: Instant::now(),
             username,
             password,
+            config_path,
         })
     }
 
@@ -111,12 +118,16 @@ impl AppState {
         self.start_time.elapsed()
     }
 
-    /// Hot-Reload configuration from file
-    pub async fn reload_config(&self, new_config: Config) {
-        tracing::info!("Reloading configuration");
-        let mut config = self.config.write().await;
-        *config = new_config;
-        // NOTE: Some config changes may require restart (like state backend change)
+    /// Reload configuration from file
+    pub async fn reload_config(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(path) = &self.config_path {
+            let new_config = Config::from_file(path)?;
+            *self.config.write().await = new_config;
+            tracing::info!("Configuration reloaded from {}", path);
+            Ok(())
+        } else {
+            Err("Config path not available for reload".into())
+        }
     }
 
     pub async fn shutdown(&self) {
