@@ -2,6 +2,7 @@ mod admin;
 mod app_state;
 mod config;
 mod connection;
+mod db;
 mod error;
 mod proxy;
 mod state;
@@ -59,8 +60,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("  State backend: {}", config.state.backend);
     tracing::info!("  Auth enabled: {}", config.authentication.enabled);
 
-    // Create application state
-    let state = AppState::new(config.clone()).await?;
+    let config_path = if args.config.exists() {
+        Some(args.config.to_string_lossy().to_string())
+    } else {
+        None
+    };
+    let state = AppState::new(config.clone(), config_path).await?;
 
     // Parse socket addresses
     let proxy_addr = config.server.proxy_bind.parse()?;

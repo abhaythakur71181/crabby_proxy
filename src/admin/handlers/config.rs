@@ -54,30 +54,23 @@ pub async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
     })
 }
 
-/// TODO: Reload configuration from file
+/// Reload configuration from file
 pub async fn reload_config(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
 ) -> Result<Json<ReloadResponse>, StatusCode> {
-    // TODO: store the config path in AppState
-
     tracing::info!("Configuration reload requested");
 
-    Ok(Json(ReloadResponse {
-        success: false,
-        message: "Config reload not fully implemented - needs config path in AppState".to_string(),
-    }))
-
-    // When implemented:
-    // match Config::from_file(&config_path) {
-    //     Ok(new_config) => {
-    //         state.reload_config(new_config).await;
-    //         Ok(Json(ReloadResponse {
-    //             success: true,
-    //             message: "Configuration reloaded successfully".to_string(),
-    //         }))
-    //     }
-    //     Err(e) => {
-    //         Err(StatusCode::INTERNAL_SERVER_ERROR)
-    //     }
-    // }
+    match state.reload_config().await {
+        Ok(_) => Ok(Json(ReloadResponse {
+            success: true,
+            message: "Configuration reloaded successfully".to_string(),
+        })),
+        Err(e) => {
+            tracing::error!("Failed to reload configuration: {}", e);
+            Ok(Json(ReloadResponse {
+                success: false,
+                message: format!("Failed to reload configuration: {}", e),
+            }))
+        }
+    }
 }
