@@ -4,6 +4,7 @@ use std::path::Path;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub server: ServerConfig,
+    pub database: DatabaseConfig,
     pub authentication: AuthConfig,
     pub protocols: ProtocolConfig,
     pub features: FeatureConfig,
@@ -25,6 +26,12 @@ pub struct ServerConfig {
     pub tls_enabled: bool,
     pub tls_cert_path: String,
     pub tls_key_path: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DatabaseConfig {
+    pub path: String,
+    pub max_connections: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -155,6 +162,10 @@ impl Config {
                 tls_enabled: false,
                 tls_cert_path: String::new(),
                 tls_key_path: String::new(),
+            },
+            database: DatabaseConfig {
+                path: "sqlite:proxy.db".to_string(),
+                max_connections: 10,
             },
             authentication: AuthConfig {
                 enabled: true,
