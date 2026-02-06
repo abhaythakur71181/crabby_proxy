@@ -60,12 +60,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("  State backend: {}", config.state.backend);
     tracing::info!("  Auth enabled: {}", config.authentication.enabled);
 
+    // Initialize database
+    tracing::info!("Initializing database...");
+    let db_pool = db::create_pool(&config.database.path).await?;
+    
+    // Run migrations
+    tracing::info!("Running database migrations...");
+    db::run_migrations(&db_pool).await?;
+    
+    // Ensure root admin exists
+    if db::users::ensure_root_admin(&db_pool).await? {
+        tracing::info!("Root admin account created");
+    }
+
     let config_path = if args.config.exists() {
         Some(args.config.to_string_lossy().to_string())
     } else {
         None
     };
-    let state = AppState::new(config.clone(), config_path).await?;
+    let state = AppState::new(config.clone(), config_path, db_pool).await?;
 
     // Parse socket addresses
     let proxy_addr = config.server.proxy_bind.parse()?;
