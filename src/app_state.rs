@@ -26,6 +26,9 @@ pub struct AppState {
 
     // Pluggable state (memory or Redis)
     pub state: Arc<dyn StateBackend>,
+    
+    // Database pool for user management
+    pub db_pool: sqlx::SqlitePool,
 
     // Tunnel manager for reverse tunnels
     pub tunnels: Arc<RwLock<TunnelManager>>,
@@ -51,6 +54,7 @@ impl AppState {
     pub async fn new(
         config: Config,
         config_path: Option<String>,
+        db_pool: sqlx::SqlitePool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let state: Arc<dyn StateBackend> = match config.state.backend.as_str() {
             "redis" => {
@@ -100,6 +104,7 @@ impl AppState {
         Ok(Self {
             config: Arc::new(RwLock::new(config.clone())),
             state,
+            db_pool,
             tunnels: Arc::new(RwLock::new(TunnelManager::new(
                 config.features.tunnel_port_start,
                 config.features.tunnel_port_end,
