@@ -13,7 +13,7 @@ byte-pool = "0.2.4"
 chrono = { version = "0.4.41", features = ["serde"] }
 clap = { version = "4.5.53", features = ["derive"] }
 config = "0.15.19"
-jsonwebtoken = "10.3.0"
+jsonwebtoken = { version = "10.3.0", features = ["default"] }
 lazy_static = "1.5.0"
 notify = "8.2.0"
 rustls-pemfile = "2.2.0"
