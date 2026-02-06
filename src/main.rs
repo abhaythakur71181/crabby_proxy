@@ -1,5 +1,6 @@
 mod admin;
 mod app_state;
+mod auth;
 mod config;
 mod connection;
 mod db;
@@ -63,11 +64,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize database
     tracing::info!("Initializing database...");
     let db_pool = db::create_pool(&config.database.path).await?;
-    
+
     // Run migrations
     tracing::info!("Running database migrations...");
     db::run_migrations(&db_pool).await?;
-    
+
     // Ensure root admin exists
     if db::users::ensure_root_admin(&db_pool).await? {
         tracing::info!("Root admin account created");
