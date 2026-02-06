@@ -1,9 +1,10 @@
 use crate::app_state::AppState;
+use crate::db::{api_keys, users};
 use crate::stream::{BufferedClientStream, ClientStream};
 use base64::Engine;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use tokio::io::{self, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -67,7 +68,7 @@ impl ProxyProtocol {
         let request_data = String::from_utf8_lossy(&buffer[..n]);
         // Extract Proxy-Authorization header from HTTP request
         if let Some(auth_header) = Self::extract_proxy_auth_header(&request_data) {
-            if Self::validate_auth_header(auth_header, state).is_ok() {
+            if Self::validate_auth_header(auth_header, state).await.is_ok() {
                 return Ok(true);
             }
         }
@@ -105,8 +106,14 @@ impl ProxyProtocol {
 
         // Check if username/password auth is supported by client
         let supports_auth = methods_buf.contains(&0x02);
-        let auth_required = state.username.is_some() && state.password.is_some();
-        if auth_required && supports_auth {
+
+        // Check if auth is enabled in config
+        let auth_enabled = {
+            let config = state.config.read().await;
+            config.authentication.enabled
+        };
+
+        if auth_enabled && supports_auth {
             // Tell client to use username/password auth
             client_stream.write_all(&[0x05, 0x02]).await?;
 
@@ -134,14 +141,14 @@ impl ProxyProtocol {
             let password = String::from_utf8(password_buf)?;
 
             // Validate credentials
-            if Self::validate_credentials(&username, &password, state) {
+            if Self::validate_credentials(&username, &password, state).await {
                 client_stream.write_all(&[0x01, 0x00]).await?; // Success
                 Ok(true)
             } else {
                 client_stream.write_all(&[0x01, 0x01]).await?; // Failure
                 Err("SOCKS5 authentication failed".into())
             }
-        } else if auth_required {
+        } else if auth_enabled {
             // Client doesn't support auth but we require it
             client_stream.write_all(&[0x05, 0xFF]).await?; // No acceptable methods
             Err("SOCKS5 authentication required but not supported by client".into())
@@ -175,7 +182,7 @@ impl ProxyProtocol {
         Ok(())
     }
 
-    fn validate_auth_header(
+    async fn validate_auth_header(
         auth_header: &str,
         state: &AppState,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -192,7 +199,7 @@ impl ProxyProtocol {
             let username = parts.next().ok_or("Missing username")?;
             let password = parts.next().ok_or("Missing password")?;
 
-            if Self::validate_credentials(username, password, state) {
+            if Self::validate_credentials(username, password, state).await {
                 Ok(())
             } else {
                 Err("Invalid credentials".into())
@@ -202,14 +209,38 @@ impl ProxyProtocol {
         }
     }
 
-    fn validate_credentials(username: &str, password: &str, state: &AppState) -> bool {
-        let (expected_username, expected_password) = match (&state.username, &state.password) {
-            (Some(user), Some(pass)) => (user, pass),
-            _ => return false,
+    async fn validate_credentials(username: &str, password: &str, state: &AppState) -> bool {
+        // Check for API Key format: user@apikey
+        if username.ends_with("@apikey") {
+            let actual_username = username.trim_end_matches("@apikey");
+            if let Ok(Some(user)) =
+                users::get_user_by_username(&state.db_pool, actual_username).await
+            {
+                // Verify API key (password is the key)
+                if let Ok(true) = api_keys::verify_api_key(&state.db_pool, user.id, password).await
+                {
+                    return true;
+                }
+            }
+        } else {
+            if let Ok(Some(_user)) =
+                users::verify_password(&state.db_pool, username, password).await
+            {
+                return true;
+            }
+        }
+        // Fallback to Config credentials if enabled?
+        let (config_user, config_pass) = {
+            let config = state.config.read().await;
+            (
+                config.authentication.username.clone(),
+                config.authentication.password.clone(),
+            )
         };
-        let username_ok = bool::from(expected_username.as_bytes().eq(username.as_bytes()));
-        let password_ok = bool::from(expected_password.as_bytes().eq(password.as_bytes()));
-        username_ok && password_ok
+        if username == config_user && password == config_pass {
+            return true;
+        }
+        false
     }
 
     /// Detect the protocol from a client stream
@@ -665,24 +696,13 @@ pub struct ProxyTarget {
 }
 
 pub struct MultiProtocolProxy {
-    listener: TcpListener,
+    listener: tokio::net::TcpListener,
 }
 
 impl MultiProtocolProxy {
     pub async fn new(bind_addr: &str) -> io::Result<Self> {
-        let listener = TcpListener::bind(bind_addr).await?;
+        let listener = tokio::net::TcpListener::bind(bind_addr).await?;
         println!("Multi-protocol proxy listening on {}", bind_addr);
         Ok(Self { listener })
     }
-
-    // pub async fn run(&self) -> io::Result<()> {
-    //     loop {
-    //         let (stream, addr) = self.listener.accept().await?;
-    //         tokio::spawn(async move {
-    //             if let Err(e) = handle_connection(stream, addr).await {
-    //                 eprintln!("Error handling connection from {}: {}", addr, e);
-    //             }
-    //         });
-    //     }
-    // }
 }
