@@ -103,7 +103,7 @@ async fn handle_client(mut client_stream: TcpStream, client_addr: SocketAddr, st
     let mut buffered_stream = BufferedClientStream::new(stream);
 
     // If credentials are required, perform protocol-specific authentication
-    let auth_required = state.username.is_some() && state.password.is_some();
+    let auth_required = state.config.read().await.authentication.enabled;
     if auth_required {
         match protocol.authenticate(&mut buffered_stream, &state).await {
             Ok(true) => {

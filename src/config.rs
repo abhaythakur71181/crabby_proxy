@@ -40,6 +40,8 @@ pub struct AuthConfig {
     pub method: AuthMethod,
     pub username: String,
     pub password: String,
+    pub jwt_secret: String,
+    pub jwt_expiration: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -172,6 +174,8 @@ impl Config {
                 method: AuthMethod::Basic,
                 username: "admin".to_string(),
                 password: "changeme".to_string(),
+                jwt_secret: "change_me_to_a_secure_random_string".to_string(),
+                jwt_expiration: 3600 * 24, // 24 hours
             },
             protocols: ProtocolConfig {
                 enable_http: true,

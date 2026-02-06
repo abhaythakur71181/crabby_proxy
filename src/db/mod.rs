@@ -1,3 +1,4 @@
+pub mod api_keys;
 pub mod connection;
 pub mod models;
 pub mod users;
