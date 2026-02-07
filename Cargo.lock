@@ -541,6 +541,7 @@ dependencies = [
  "jsonwebtoken",
  "lazy_static",
  "notify",
+ "rand",
  "rustls-pemfile",
  "serde",
  "serde_json",

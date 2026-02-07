@@ -12,7 +12,7 @@ use crate::db::users;
 
 pub async fn auth_middleware(
     State(state): State<AppState>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
     let (auth_enabled, jwt_secret) = {
@@ -33,7 +33,9 @@ pub async fn auth_middleware(
         Some(auth) if auth.starts_with("Bearer ") => {
             let token = auth.trim_start_matches("Bearer ");
             match jwt::validate_jwt(token, &jwt_secret) {
-                Ok(_claims) => {
+                Ok(claims) => {
+                    // Attach user_id to request extensions
+                    request.extensions_mut().insert(claims.sub);
                     return Ok(next.run(request).await);
                 }
                 Err(_) => {
@@ -51,7 +53,9 @@ pub async fn auth_middleware(
                     if parts.len() == 2 {
                         let (username, password) = (parts[0], parts[1]);
                         match users::verify_password(&state.db_pool, username, password).await {
-                            Ok(Some(_user)) => {
+                            Ok(Some(user)) => {
+                                // Attach user_id to request extensions
+                                request.extensions_mut().insert(user.id);
                                 return Ok(next.run(request).await);
                             }
                             _ => {
@@ -60,6 +64,8 @@ pub async fn auth_middleware(
                                 if username == config.admin.admin_username
                                     && password == config.admin.admin_password
                                 {
+                                    // For config auth, use root user ID (1)
+                                    request.extensions_mut().insert(1i64);
                                     return Ok(next.run(request).await);
                                 }
                             }
