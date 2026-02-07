@@ -86,15 +86,6 @@ pub async fn get_user_by_id(pool: &SqlitePool, id: i64) -> Result<Option<User>, 
     Ok(user)
 }
 
-/// List all users
-pub async fn list_users(pool: &SqlitePool) -> Result<Vec<User>, sqlx::Error> {
-    let users = sqlx::query_as::<_, User>("SELECT * FROM users ORDER BY created_at DESC")
-        .fetch_all(pool)
-        .await?;
-
-    Ok(users)
-}
-
 /// Verify user password
 pub async fn verify_password(
     pool: &SqlitePool,
@@ -174,4 +165,86 @@ fn verify_password_hash(password: &str, hash: &str) -> bool {
     Argon2::default()
         .verify_password(password.as_bytes(), &parsed_hash)
         .is_ok()
+}
+
+/// Update user details
+pub async fn update_user(
+    pool: &SqlitePool,
+    user_id: i64,
+    password: Option<&str>,
+    role: Option<Role>,
+    max_connections: Option<i32>,
+    bandwidth_limit_mb: Option<i64>,
+    is_active: Option<bool>,
+) -> Result<User, sqlx::Error> {
+    let now = chrono::Utc::now().timestamp();
+
+    // Build update query dynamically based on what fields are provided
+    let user = get_user_by_id(pool, user_id)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)?;
+
+    let password_hash = if let Some(pwd) = password {
+        Some(
+            hash_password(pwd)
+                .map_err(|e| sqlx::Error::Protocol(format!("Password hashing failed: {}", e)))?,
+        )
+    } else {
+        None
+    };
+
+    let role_str = role.map(|r| match r {
+        Role::RootAdmin => "root_admin",
+        Role::Admin => "admin",
+        Role::User => "user",
+    });
+
+    sqlx::query(
+        r#"
+        UPDATE users SET
+            password_hash = COALESCE(?, password_hash),
+            role = COALESCE(?, role),
+            max_connections = COALESCE(?, max_connections),
+            bandwidth_limit_mb = COALESCE(?, bandwidth_limit_mb),
+            is_active = COALESCE(?, is_active),
+            updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(password_hash)
+    .bind(role_str)
+    .bind(max_connections)
+    .bind(bandwidth_limit_mb)
+    .bind(is_active)
+    .bind(now)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+
+    get_user_by_id(pool, user_id)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)
+}
+
+/// Soft delete user (set is_active = false)
+pub async fn delete_user(pool: &SqlitePool, user_id: i64) -> Result<(), sqlx::Error> {
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query("UPDATE users SET is_active = 0, updated_at = ? WHERE id = ?")
+        .bind(now)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    sqlx::query("UPDATE api_keys SET is_active = 0 WHERE user_id = ?")
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// List all users (excluding password hashes)
+pub async fn list_users(pool: &SqlitePool) -> Result<Vec<User>, sqlx::Error> {
+    let users = sqlx::query_as::<_, User>("SELECT * FROM users ORDER BY created_at DESC")
+        .fetch_all(pool)
+        .await?;
+    Ok(users)
 }
