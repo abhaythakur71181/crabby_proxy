@@ -161,8 +161,9 @@ impl ProxyProtocol {
 
     fn extract_proxy_auth_header(request_data: &str) -> Option<&str> {
         for line in request_data.lines() {
-            if line.to_lowercase().starts_with("proxy-authorization:") {
-                return Some(line.trim_start_matches("Proxy-Authorization:").trim());
+            let lower_line = line.to_lowercase();
+            if lower_line.starts_with("proxy-authorization:") {
+                return line.splitn(2, ':').nth(1).map(|v| v.trim());
             }
         }
         None
