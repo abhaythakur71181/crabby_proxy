@@ -118,28 +118,54 @@ pub async fn update_last_login(pool: &SqlitePool, user_id: i64) -> Result<(), sq
     Ok(())
 }
 
+/// Generate a secure random password
+fn generate_secure_password(length: usize) -> String {
+    use rand::Rng;
+    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ\
+                            abcdefghijklmnopqrstuvwxyz\
+                            0123456789!@#$%^&*";
+    let mut rng = rand::thread_rng();
+    (0..length)
+        .map(|_| {
+            let idx = rng.gen_range(0..CHARSET.len());
+            CHARSET[idx] as char
+        })
+        .collect()
+}
+
 /// Create root admin if none exists
 pub async fn ensure_root_admin(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
     let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE role = 'root_admin'")
         .fetch_one(pool)
         .await?;
     if count.0 == 0 {
+        // Try env var first, then generate random password
+        let password =
+            std::env::var("CRABBY_ROOT_PASSWORD").unwrap_or_else(|_| generate_secure_password(16));
+
         let request = CreateUserRequest {
             username: "root".to_string(),
-            password: "changeme123".to_string(),
+            password: password.clone(),
             role: Role::RootAdmin,
             max_connections: Some(100),
             bandwidth_limit_mb: Some(10000),
             rate_limit_enabled: Some(false),
             rate_limit_rps: Some(1000),
             allowed_protocols: None,
-            notes: Some("Default root admin - CHANGE PASSWORD IMMEDIATELY".to_string()),
+            notes: Some("Root admin account".to_string()),
         };
         create_user(pool, &request, None).await?;
-        tracing::warn!("⚠️  Created default root admin account:");
-        tracing::warn!("   Username: root");
-        tracing::warn!("   Password: changeme123");
-        tracing::warn!("   *** CHANGE THIS PASSWORD IMMEDIATELY ***");
+
+        tracing::warn!("╔════════════════════════════════════════════════════════════╗");
+        tracing::warn!("║          ROOT ADMIN ACCOUNT CREATED                        ║");
+        tracing::warn!("╠════════════════════════════════════════════════════════════╣");
+        tracing::warn!("║  Username: root                                            ║");
+        tracing::warn!("║  Password: {:<48}║", password);
+        tracing::warn!("╠════════════════════════════════════════════════════════════╣");
+        tracing::warn!("║  *** SAVE THIS PASSWORD - IT WON'T BE SHOWN AGAIN ***      ║");
+        tracing::warn!("║  To set a custom password, use env var:                    ║");
+        tracing::warn!("║  CRABBY_ROOT_PASSWORD=yourpassword                         ║");
+        tracing::warn!("╚════════════════════════════════════════════════════════════╝");
 
         Ok(true)
     } else {
