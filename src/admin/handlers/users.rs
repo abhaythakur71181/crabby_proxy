@@ -23,9 +23,8 @@ pub async fn create_user(
     if current_user.get_role() != Role::RootAdmin {
         return Err(StatusCode::FORBIDDEN);
     }
-    if request.username.is_empty() || request.password.len() < 8 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
+    crate::validation::validate_username(&request.username).map_err(|_| StatusCode::BAD_REQUEST)?;
+    crate::validation::validate_password(&request.password).map_err(|_| StatusCode::BAD_REQUEST)?;
     if let Ok(Some(_)) = users::get_user_by_username(&state.db_pool, &request.username).await {
         return Err(StatusCode::CONFLICT);
     }

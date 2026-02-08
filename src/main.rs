@@ -10,6 +10,7 @@ mod state;
 mod stream;
 mod tunnel;
 mod utils;
+mod validation;
 
 use crate::app_state::AppState;
 use crate::config::Config;
