@@ -146,6 +146,9 @@ pub async fn update_user(
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Invalidate rate limit cache for this user to pick up new settings
+    state.user_rate_limiter.invalidate_user(user_id).await;
+
     Ok(Json(UserResponse::from(updated_user)))
 }
 

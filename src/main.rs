@@ -6,6 +6,7 @@ mod connection;
 mod db;
 mod error;
 mod proxy;
+mod rate_limit;
 mod state;
 mod stream;
 mod tunnel;
