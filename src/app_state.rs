@@ -26,7 +26,7 @@ pub struct AppState {
 
     // Pluggable state (memory or Redis)
     pub state: Arc<dyn StateBackend>,
-    
+
     // Database pool for user management
     pub db_pool: sqlx::SqlitePool,
 
@@ -48,6 +48,10 @@ pub struct AppState {
 
     // Config file path
     pub config_path: Option<String>,
+
+    // Rate limiters
+    pub ip_rate_limiter: crate::rate_limit::IpRateLimiter,
+    pub user_rate_limiter: crate::rate_limit::UserRateLimiter,
 }
 
 impl AppState {
@@ -101,6 +105,14 @@ impl AppState {
         } else {
             None
         };
+
+        // Initialize rate limiters
+        let ip_rate_limiter = crate::rate_limit::IpRateLimiter::new(
+            config.rate_limiting.requests_per_second,
+            config.rate_limiting.burst_size,
+        );
+        let user_rate_limiter = crate::rate_limit::UserRateLimiter::new();
+
         Ok(Self {
             config: Arc::new(RwLock::new(config.clone())),
             state,
@@ -115,6 +127,8 @@ impl AppState {
             username,
             password,
             config_path,
+            ip_rate_limiter,
+            user_rate_limiter,
         })
     }
 

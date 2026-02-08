@@ -34,9 +34,22 @@ pub async fn auth_middleware(
             let token = auth.trim_start_matches("Bearer ");
             match jwt::validate_jwt(token, &jwt_secret) {
                 Ok(claims) => {
-                    // Attach user_id to request extensions
-                    request.extensions_mut().insert(claims.sub);
-                    return Ok(next.run(request).await);
+                    // JWT claims.sub contains username, need to fetch user_id
+                    let username = claims.sub;
+                    match users::get_user_by_username(&state.db_pool, &username).await {
+                        Ok(Some(user)) => {
+                            let user_id = user.id;
+                            request.extensions_mut().insert(user_id);
+                            if let Err(e) = check_user_rate_limit(&state, user_id).await {
+                                tracing::warn!("Rate limit exceeded for user {}: {}", user_id, e);
+                                return Err(StatusCode::TOO_MANY_REQUESTS);
+                            }
+                            return Ok(next.run(request).await);
+                        }
+                        _ => {
+                            return Err(StatusCode::UNAUTHORIZED);
+                        }
+                    }
                 }
                 Err(_) => {
                     return Err(StatusCode::UNAUTHORIZED);
@@ -55,7 +68,17 @@ pub async fn auth_middleware(
                         match users::verify_password(&state.db_pool, username, password).await {
                             Ok(Some(user)) => {
                                 // Attach user_id to request extensions
-                                request.extensions_mut().insert(user.id);
+                                let user_id = user.id;
+                                request.extensions_mut().insert(user_id);
+                                if let Err(e) = check_user_rate_limit(&state, user_id).await {
+                                    tracing::warn!(
+                                        "Rate limit exceeded for user {}: {}",
+                                        user_id,
+                                        e
+                                    );
+                                    return Err(StatusCode::TOO_MANY_REQUESTS);
+                                }
+
                                 return Ok(next.run(request).await);
                             }
                             _ => {
@@ -65,7 +88,10 @@ pub async fn auth_middleware(
                                     && password == config.admin.admin_password
                                 {
                                     // For config auth, use root user ID (1)
-                                    request.extensions_mut().insert(1i64);
+                                    let user_id = 1i64;
+                                    request.extensions_mut().insert(user_id);
+
+                                    // Root admin bypasses rate limiting
                                     return Ok(next.run(request).await);
                                 }
                             }
@@ -79,6 +105,52 @@ pub async fn auth_middleware(
     }
 
     Err(StatusCode::UNAUTHORIZED)
+}
+
+/// Check if user has exceeded their rate limit (optimized with cache)
+async fn check_user_rate_limit(state: &AppState, user_id: i64) -> Result<(), &'static str> {
+    if let Some(cached_config) = state.user_rate_limiter.get_cached_config(user_id).await {
+        let allowed = state
+            .user_rate_limiter
+            .check_user_cached(user_id, cached_config)
+            .await;
+
+        return if allowed {
+            Ok(())
+        } else {
+            Err("Rate limit exceeded")
+        };
+    }
+    let user = users::get_user_by_id(&state.db_pool, user_id)
+        .await
+        .map_err(|_| "Failed to fetch user")?
+        .ok_or("User not found")?;
+    state
+        .user_rate_limiter
+        .cache_config(
+            user_id,
+            user.rate_limit_rps as u32,
+            user.rate_limit_burst as u32,
+            user.rate_limit_enabled,
+        )
+        .await;
+    // Check if rate limiting is enabled for this user
+    if !user.rate_limit_enabled {
+        return Ok(());
+    }
+    let allowed = state
+        .user_rate_limiter
+        .check_user(
+            user_id,
+            user.rate_limit_rps as u32,
+            user.rate_limit_burst as u32,
+        )
+        .await;
+    if allowed {
+        Ok(())
+    } else {
+        Err("Rate limit exceeded")
+    }
 }
 
 /// Public endpoints
