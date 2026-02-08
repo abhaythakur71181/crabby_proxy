@@ -1,1 +1,30 @@
-/target
+# Database files
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+*.log
+/logs/
+
+# Configuration (may contain secrets)
+config.toml
+/config/*.toml
+
+# Build artifacts
+/target/
+**/*.rs.bk
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+/tmp/
+*.tmp
