@@ -10,24 +10,29 @@ pub async fn verify_api_key(
     user_id: i64,
     key_value: &str,
 ) -> Result<bool, sqlx::Error> {
-    // TODO:
-    // 1. Get all active API keys for the user
-    // We have to check all of them because we don't know which one it is (hashes are salted)
-    // unless we required a prefix in the input, but the design didn't strictly mandate that for the auth input.
-    // Optimally, the input key would be `prefix.secret` and we could filter by prefix.
-    // Let's assume for now we check all active keys.
-
+    let prefix = match key_value.split_once('.') {
+        Some((p, _)) => p,
+        None => {
+            tracing::debug!("API key missing prefix separator");
+            return Ok(false);
+        }
+    };
     let keys = sqlx::query_as::<_, ApiKey>(
         r#"
         SELECT * FROM api_keys 
-        WHERE user_id = ? AND is_active = 1 
+        WHERE user_id = ? 
+        AND prefix = ?
+        AND is_active = 1 
         AND (expires_at IS NULL OR expires_at > ?)
         "#,
     )
     .bind(user_id)
+    .bind(prefix)
     .bind(chrono::Utc::now().timestamp())
     .fetch_all(pool)
     .await?;
+
+    // Verify against matching keys (typically 0 or 1 result)
     for key in keys {
         if verify_hash(key_value, &key.key_hash) {
             let _ = update_last_used(pool, key.id).await;

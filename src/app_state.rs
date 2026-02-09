@@ -52,6 +52,9 @@ pub struct AppState {
     // Rate limiters
     pub ip_rate_limiter: crate::rate_limit::IpRateLimiter,
     pub user_rate_limiter: crate::rate_limit::UserRateLimiter,
+
+    // Graceful shutdown signal
+    pub shutdown_tx: tokio::sync::broadcast::Sender<()>,
 }
 
 impl AppState {
@@ -113,6 +116,9 @@ impl AppState {
         );
         let user_rate_limiter = crate::rate_limit::UserRateLimiter::new();
 
+        // Create graceful shutdown channel
+        let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
+
         Ok(Self {
             config: Arc::new(RwLock::new(config.clone())),
             state,
@@ -129,6 +135,7 @@ impl AppState {
             config_path,
             ip_rate_limiter,
             user_rate_limiter,
+            shutdown_tx,
         })
     }
 
