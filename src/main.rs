@@ -18,6 +18,7 @@ use crate::config::Config;
 use crate::proxy::listener::run_proxy_server;
 use clap::Parser;
 use std::path::PathBuf;
+use tokio::signal;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -92,20 +93,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("  Admin API: {}", admin_addr);
     tracing::info!("  Protocols: HTTP/HTTPS, SOCKS4/5");
 
-    // graceful shutdown
-    let state_clone = state.clone();
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to listen for Ctrl+C");
-        tracing::info!("Received shutdown signal");
-        state_clone.shutdown().await;
-        std::process::exit(0);
+    let proxy_state = state.clone();
+    let admin_state = state.clone();
+    let proxy_handle = tokio::spawn(async move {
+        run_proxy_server(proxy_state, proxy_addr).await;
     });
+    let admin_handle =
+        tokio::spawn(async move { admin::run_admin_server(admin_state, admin_addr).await });
 
-    let proxy_handle = tokio::spawn(run_proxy_server(state.clone(), proxy_addr));
-    let admin_handle = tokio::spawn(admin::run_admin_server(state.clone(), admin_addr));
-    let _ = tokio::join!(proxy_handle, admin_handle);
+    // Wait for EITHER shutdown signal OR server crash
+    tokio::select! {
+        _ = shutdown_signal() => {
+            tracing::info!("Shutdown signal received");
+        }
+        result = proxy_handle => {
+            tracing::error!("Proxy server exited unexpectedly: {:?}", result);
+        }
+        result = admin_handle => {
+            tracing::error!("Admin server exited unexpectedly: {:?}", result);
+        }
+    }
 
+    // Signal shutdown to all servers
+    tracing::info!("Initiating graceful shutdown...");
+    let _ = state.shutdown_tx.send(());
+    tracing::info!("Waiting for active connections to drain (max 30s)...");
+    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+    tracing::info!("Graceful shutdown complete");
     Ok(())
+}
+
+/// Wait for shutdown signal (SIGTERM or Ctrl+C)
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {
+            tracing::info!("Received Ctrl+C signal");
+        },
+        _ = terminate => {
+            tracing::info!("Received SIGTERM signal");
+        },
+    }
 }

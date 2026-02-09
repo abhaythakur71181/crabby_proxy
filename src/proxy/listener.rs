@@ -30,14 +30,32 @@ pub async fn run_proxy_server(state: AppState, addr: SocketAddr) {
         }
     };
 
+    let mut shutdown_rx = state.shutdown_tx.subscribe();
     tracing::info!("Proxy server listening on {}", addr);
-
-    while let Ok((client_stream, client_addr)) = listener.accept().await {
-        let state = state.clone();
-        tokio::spawn(async move {
-            handle_client(client_stream, client_addr, state).await;
-        });
+    loop {
+        tokio::select! {
+            // Accept new connections
+            Ok((client_stream, client_addr)) = listener.accept() => {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    // Generate unique connection ID for tracking
+                    let conn_id = uuid::Uuid::new_v4();
+                    // Notify: New connection accepted
+                    let _ = state.notify_tx.send(crate::app_state::ConnectionEvent::NewConnection(conn_id)).await;
+                    // Handle the client connection
+                    handle_client(client_stream, client_addr, state.clone(), conn_id).await;
+                    // Notify: Connection closed
+                    let _ = state.notify_tx.send(crate::app_state::ConnectionEvent::ConnectionClosed(conn_id)).await;
+                });
+            }
+            // Shutdown signal received
+            _ = shutdown_rx.recv() => {
+                tracing::info!("Proxy listener stopping - no longer accepting new connections");
+                break;
+            }
+        }
     }
+    tracing::info!("Proxy listener stopped");
 }
 
 // Helper function to send error responses
@@ -64,7 +82,12 @@ async fn send_error_response(
     }
 }
 
-async fn handle_client(mut client_stream: TcpStream, client_addr: SocketAddr, state: AppState) {
+async fn handle_client(
+    mut client_stream: TcpStream,
+    client_addr: SocketAddr,
+    state: AppState,
+    conn_id: uuid::Uuid,
+) {
     let mut protocol;
     let protocol_detection_result = ProxyProtocol::detect_from_stream(&mut client_stream).await;
     if let Err(e) = protocol_detection_result {
@@ -161,7 +184,18 @@ async fn handle_client(mut client_stream: TcpStream, client_addr: SocketAddr, st
             }
         }
     };
-
+    // INFO: for tracking
+    let conn_info = crate::state::backend::ConnectionInfo {
+        id: conn_id,
+        client_addr,
+        target_addr: format!("{:?}", target),
+        protocol: protocol.clone(),
+        state: crate::connection::ConnectionState::Active,
+        bytes_sent: 0,
+        bytes_received: 0,
+        created_at: chrono::Utc::now().timestamp(),
+    };
+    let _ = state.state.set_connection(conn_id, conn_info).await;
     let result =
         async_handle_client_with_target(&mut stream, client_addr, &mut protocol, target).await;
 
