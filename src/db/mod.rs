@@ -2,6 +2,7 @@ pub mod api_keys;
 pub mod api_keys_crud;
 pub mod connection;
 pub mod models;
+pub mod usage;
 pub mod users;
 
 pub use connection::{create_pool, run_migrations};

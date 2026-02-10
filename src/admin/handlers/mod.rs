@@ -5,4 +5,5 @@ pub mod health;
 pub mod metrics;
 pub mod models;
 pub mod tunnels;
+pub mod usage;
 pub mod users;
