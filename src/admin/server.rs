@@ -45,6 +45,19 @@ pub async fn run_admin_server(state: AppState, addr: SocketAddr) -> Result<(), s
             axum::routing::put(handlers::users::update_user),
         )
         .route("/api/users/:id", delete(handlers::users::delete_user))
+        // Usage tracking routes
+        .route(
+            "/api/users/:id/usage",
+            get(handlers::usage::get_user_usage_stats),
+        )
+        .route(
+            "/api/users/:id/usage/recent",
+            get(handlers::usage::get_recent_usage),
+        )
+        .route(
+            "/api/users/:id/usage/all-time",
+            get(handlers::usage::get_all_time_usage),
+        )
         // TODO: Fix Handler trait issue with 4 extractors in Axum 0.7
         // API key management routes (temporarily disabled)
         // .route("/api/users/:id/api-keys", post(handlers::users::create_api_key))
