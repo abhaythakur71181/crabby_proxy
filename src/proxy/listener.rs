@@ -88,6 +88,26 @@ async fn handle_client(
     state: AppState,
     conn_id: uuid::Uuid,
 ) {
+    // Check IP filter first (before any processing)
+    let config = state.config.read().await;
+    if config.filtering.ip_filter_enabled {
+        drop(config); // Release config lock
+
+        let ip_filter = state.ip_filter.read().await;
+        if !ip_filter.is_allowed(client_addr.ip()) {
+            tracing::warn!("Connection from {} blocked by IP filter", client_addr.ip());
+            crate::metrics::IP_FILTER_ACTIONS
+                .with_label_values(&["blocked"])
+                .inc();
+            return; // Drop connection silently
+        }
+        crate::metrics::IP_FILTER_ACTIONS
+            .with_label_values(&["allowed"])
+            .inc();
+    } else {
+        drop(config);
+    }
+
     let mut protocol;
     let protocol_detection_result = ProxyProtocol::detect_from_stream(&mut client_stream).await;
     if let Err(e) = protocol_detection_result {
@@ -196,8 +216,22 @@ async fn handle_client(
         created_at: chrono::Utc::now().timestamp(),
     };
     let _ = state.state.set_connection(conn_id, conn_info).await;
+
+    // Increment active connections metric
+    crate::metrics::ACTIVE_CONNECTIONS
+        .with_label_values(&[&protocol.to_string()])
+        .inc();
+    crate::metrics::REQUESTS_TOTAL
+        .with_label_values(&[&protocol.to_string(), "started"])
+        .inc();
+
     let result =
         async_handle_client_with_target(&mut stream, client_addr, &mut protocol, target).await;
+
+    // Decrement active connections metric when done
+    crate::metrics::ACTIVE_CONNECTIONS
+        .with_label_values(&[&protocol.to_string()])
+        .dec();
 
     if let Err((e, error_type)) = result {
         tracing::error!(
@@ -213,9 +247,19 @@ async fn handle_client(
             e
         );
 
+        // Record error in metrics
+        crate::metrics::REQUESTS_TOTAL
+            .with_label_values(&[&protocol.to_string(), "failed"])
+            .inc();
+
         if error_type != ErrorType::Tunnel {
             let _ = send_error_response(&protocol, &mut stream, error_type).await;
         }
+    } else {
+        // Record successful request
+        crate::metrics::REQUESTS_TOTAL
+            .with_label_values(&[&protocol.to_string(), "success"])
+            .inc();
     }
 }
 

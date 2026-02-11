@@ -5,6 +5,8 @@ mod config;
 mod connection;
 mod db;
 mod error;
+mod ip_filter;
+mod metrics;
 mod proxy;
 mod rate_limit;
 mod state;
