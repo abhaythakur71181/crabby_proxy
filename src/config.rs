@@ -92,6 +92,15 @@ pub struct FilterConfig {
     pub ip_blocklist: Vec<String>,
     pub geo_blocking_enabled: bool,
     pub blocked_countries: Vec<String>,
+    // IP filter mode: "blocklist" (default) or "allow list"
+    #[serde(default = "default_ip_filter_mode")]
+    pub ip_filter_mode: String,
+    #[serde(default)]
+    pub ip_filter_enabled: bool,
+}
+
+fn default_ip_filter_mode() -> String {
+    "blocklist".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -209,6 +218,8 @@ impl Config {
                 ip_blocklist: vec![],
                 geo_blocking_enabled: false,
                 blocked_countries: vec![],
+                ip_filter_mode: "blocklist".to_string(),
+                ip_filter_enabled: false,
             },
             logging: LoggingConfig {
                 level: "info".to_string(),

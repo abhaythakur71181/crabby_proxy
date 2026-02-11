@@ -53,6 +53,9 @@ pub struct AppState {
     pub ip_rate_limiter: crate::rate_limit::IpRateLimiter,
     pub user_rate_limiter: crate::rate_limit::UserRateLimiter,
 
+    // IP filter
+    pub ip_filter: Arc<RwLock<crate::ip_filter::IpFilter>>,
+
     // Graceful shutdown signal
     pub shutdown_tx: tokio::sync::broadcast::Sender<()>,
 }
@@ -116,6 +119,26 @@ impl AppState {
         );
         let user_rate_limiter = crate::rate_limit::UserRateLimiter::new();
 
+        // Initialize IP filter
+        let ip_filter = {
+            use crate::ip_filter::{FilterMode, IpFilter};
+
+            let mode = if config.filtering.ip_filter_mode == "allowlist" {
+                FilterMode::AllowList
+            } else {
+                FilterMode::BlockList
+            };
+
+            let filter = IpFilter::new(
+                mode,
+                config.filtering.ip_blocklist.clone(),
+                config.filtering.ip_allowlist.clone(),
+            )
+            .map_err(|e| format!("Failed to create IP filter: {}", e))?;
+
+            Arc::new(RwLock::new(filter))
+        };
+
         // Create graceful shutdown channel
         let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
 
@@ -135,6 +158,7 @@ impl AppState {
             config_path,
             ip_rate_limiter,
             user_rate_limiter,
+            ip_filter,
             shutdown_tx,
         })
     }
