@@ -15,7 +15,7 @@ pub async fn check_quota(pool: &SqlitePool, user_id: i64) -> Result<bool, sqlx::
     let row: (Option<i64>, i64) = sqlx::query_as(
         r#"
         SELECT 
-            quota_bytes,
+            monthly_bandwidth_quota as quota_bytes,
             COALESCE((SELECT SUM(bytes_sent + bytes_received) FROM usage WHERE user_id = ?), 0) as used_bytes
         FROM users 
         WHERE id = ?
@@ -38,7 +38,7 @@ pub async fn get_quota_stats(pool: &SqlitePool, user_id: i64) -> Result<QuotaSta
     let row: (Option<i64>, i64) = sqlx::query_as(
         r#"
         SELECT 
-            quota_bytes,
+            monthly_bandwidth_quota as quota_bytes,
             COALESCE((SELECT SUM(bytes_sent + bytes_received) FROM usage WHERE user_id = ?), 0) as used_bytes
         FROM users 
         WHERE id = ?
@@ -70,7 +70,7 @@ pub async fn update_quota(
     user_id: i64,
     quota_bytes: Option<i64>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE users SET quota_bytes = ? WHERE id = ?")
+    sqlx::query("UPDATE users SET monthly_bandwidth_quota = ? WHERE id = ?")
         .bind(quota_bytes)
         .bind(user_id)
         .execute(pool)
@@ -90,7 +90,7 @@ mod tests {
             CREATE TABLE users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL UNIQUE,
-                quota_bytes INTEGER
+                monthly_bandwidth_quota INTEGER
             )
             "#,
         )
@@ -121,7 +121,7 @@ mod tests {
         let pool = setup_test_db().await;
 
         // User with no quota limit
-        sqlx::query("INSERT INTO users (username, quota_bytes) VALUES ('test', NULL)")
+        sqlx::query("INSERT INTO users (username, monthly_bandwidth_quota) VALUES ('test', NULL)")
             .execute(&pool)
             .await
             .unwrap();
@@ -135,10 +135,12 @@ mod tests {
         let pool = setup_test_db().await;
 
         // User with 1MB quota
-        sqlx::query("INSERT INTO users (username, quota_bytes) VALUES ('test', 1048576)")
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO users (username, monthly_bandwidth_quota) VALUES ('test', 1048576)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         // Use 500KB
         sqlx::query(
@@ -157,10 +159,12 @@ mod tests {
         let pool = setup_test_db().await;
 
         // User with 1MB quota
-        sqlx::query("INSERT INTO users (username, quota_bytes) VALUES ('test', 1048576)")
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO users (username, monthly_bandwidth_quota) VALUES ('test', 1048576)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         // Use 1.5MB
         sqlx::query(
@@ -178,10 +182,12 @@ mod tests {
     async fn test_get_quota_stats() {
         let pool = setup_test_db().await;
 
-        sqlx::query("INSERT INTO users (username, quota_bytes) VALUES ('test', 1048576)")
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO users (username, monthly_bandwidth_quota) VALUES ('test', 1048576)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         sqlx::query(
             "INSERT INTO usage (user_id, bytes_sent, bytes_received) VALUES (1, 262144, 262144)",

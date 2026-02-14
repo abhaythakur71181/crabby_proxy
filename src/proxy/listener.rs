@@ -77,11 +77,11 @@ async fn send_error_response(
                 .write_all(b"HTTP/1.1 504 Gateway Timeout\r\n\r\n")
                 .await
         }
-        (ProxyProtocol::HTTP, ErrorType::QuotaExceeded) => {
-            stream
-                .write_all(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 18\r\n\r\nQuota exceeded\r\n")
-                .await
-        }
+        (ProxyProtocol::HTTP, ErrorType::QuotaExceeded) => stream
+            .write_all(
+                b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 18\r\n\r\nQuota exceeded\r\n",
+            )
+            .await,
         (ProxyProtocol::SOCKS4, _) => utils::send_socks4_response(stream, false).await,
         (ProxyProtocol::SOCKS5, _) => utils::send_socks5_response(stream, false).await,
         _ => Ok(()), // Unknown protocols don't send responses
@@ -232,6 +232,27 @@ async fn handle_client(
     crate::metrics::REQUESTS_TOTAL
         .with_label_values(&[&protocol.to_string(), "started"])
         .inc();
+
+    // Check quota if user is authenticated
+    if let Some(uid) = user_id {
+        match crate::db::quota::check_quota(&state.db_pool, uid).await {
+            Ok(true) => {
+                tracing::debug!("User {} has remaining quota", uid);
+            }
+            Ok(false) => {
+                tracing::warn!("Quota exceeded for user {}", uid);
+                crate::metrics::ACTIVE_CONNECTIONS
+                    .with_label_values(&[&protocol.to_string()])
+                    .dec();
+                let _ = send_error_response(&protocol, &mut stream, ErrorType::QuotaExceeded).await;
+                return;
+            }
+            Err(e) => {
+                tracing::error!("Error checking quota for user {}: {}", uid, e);
+                // Allow connection on error (fail open)
+            }
+        }
+    }
 
     let result =
         async_handle_client_with_target(&mut stream, client_addr, &mut protocol, target).await;
