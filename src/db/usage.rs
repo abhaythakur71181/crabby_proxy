@@ -129,3 +129,242 @@ pub async fn get_all_time_usage(
         total_bandwidth: row.get(3),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::SqlitePool;
+
+    async fn setup_test_db() -> SqlitePool {
+        let pool = SqlitePool::connect(":memory:").await.unwrap();
+
+        // Create usage table
+        sqlx::query(
+            r#"
+            CREATE TABLE usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                connection_id TEXT NOT NULL,
+                client_ip TEXT NOT NULL,
+                target_host TEXT NOT NULL,
+                protocol TEXT NOT NULL,
+                started_at INTEGER NOT NULL,
+                ended_at INTEGER NOT NULL,
+                duration_seconds INTEGER NOT NULL,
+                bytes_sent INTEGER NOT NULL,
+                bytes_received INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                created_at INTEGER DEFAULT (strftime('%s', 'now'))
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        pool
+    }
+
+    #[tokio::test]
+    async fn test_record_usage() {
+        let pool = setup_test_db().await;
+
+        let id = record_usage(
+            &pool,
+            1,
+            "conn123",
+            "127.0.0.1",
+            "example.com",
+            "http",
+            1000,
+            2000,
+            1024,
+            2048,
+            "success",
+        )
+        .await
+        .unwrap();
+
+        assert!(id > 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_user_usage_empty() {
+        let pool = setup_test_db().await;
+
+        let stats = get_user_usage(&pool, 1, 30).await.unwrap();
+
+        assert_eq!(stats.connection_count, 0);
+        assert_eq!(stats.total_bytes_sent, 0);
+        assert_eq!(stats.total_bytes_received, 0);
+        assert_eq!(stats.total_bandwidth, 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_user_usage_with_data() {
+        let pool = setup_test_db().await;
+        let now = chrono::Utc::now().timestamp();
+
+        // Record some usage
+        record_usage(
+            &pool,
+            1,
+            "conn1",
+            "127.0.0.1",
+            "example.com",
+            "http",
+            now - 100,
+            now,
+            1000,
+            2000,
+            "success",
+        )
+        .await
+        .unwrap();
+        record_usage(
+            &pool,
+            1,
+            "conn2",
+            "127.0.0.1",
+            "test.com",
+            "https",
+            now - 50,
+            now,
+            500,
+            1500,
+            "success",
+        )
+        .await
+        .unwrap();
+
+        let stats = get_user_usage(&pool, 1, 1).await.unwrap();
+
+        assert_eq!(stats.connection_count, 2);
+        assert_eq!(stats.total_bytes_sent, 1500);
+        assert_eq!(stats.total_bytes_received, 3500);
+        assert_eq!(stats.total_bandwidth, 5000);
+    }
+
+    #[tokio::test]
+    async fn test_get_recent_usage_records() {
+        let pool = setup_test_db().await;
+        let now = chrono::Utc::now().timestamp();
+
+        // Insert 5 records
+        for i in 0..5 {
+            record_usage(
+                &pool,
+                1,
+                &format!("conn{}", i),
+                "127.0.0.1",
+                "example.com",
+                "http",
+                now - (100 * i),
+                now - (90 * i),
+                100,
+                200,
+                "success",
+            )
+            .await
+            .unwrap();
+        }
+
+        let records = get_recent_usage_records(&pool, 1, 3).await.unwrap();
+
+        assert_eq!(records.len(), 3);
+        // Should be in descending order (most recent first)
+        assert_eq!(records[0].connection_id, "conn0");
+    }
+
+    #[tokio::test]
+    async fn test_get_all_time_usage() {
+        let pool = setup_test_db().await;
+        let now = chrono::Utc::now().timestamp();
+
+        // Record usage across different time periods
+        record_usage(
+            &pool,
+            1,
+            "conn1",
+            "127.0.0.1",
+            "example.com",
+            "http",
+            now - 86400 * 100,
+            now - 86400 * 99,
+            1000,
+            2000,
+            "success",
+        )
+        .await
+        .unwrap();
+        record_usage(
+            &pool,
+            1,
+            "conn2",
+            "127.0.0.1",
+            "test.com",
+            "https",
+            now - 100,
+            now,
+            500,
+            1500,
+            "success",
+        )
+        .await
+        .unwrap();
+
+        let stats = get_all_time_usage(&pool, 1).await.unwrap();
+
+        assert_eq!(stats.connection_count, 2);
+        assert_eq!(stats.total_bytes_sent, 1500);
+        assert_eq!(stats.total_bytes_received, 3500);
+        assert_eq!(stats.total_bandwidth, 5000);
+    }
+
+    #[tokio::test]
+    async fn test_get_user_usage_different_users() {
+        let pool = setup_test_db().await;
+        let now = chrono::Utc::now().timestamp();
+
+        // Record for two different users
+        record_usage(
+            &pool,
+            1,
+            "conn1",
+            "127.0.0.1",
+            "example.com",
+            "http",
+            now,
+            now + 10,
+            1000,
+            2000,
+            "success",
+        )
+        .await
+        .unwrap();
+        record_usage(
+            &pool,
+            2,
+            "conn2",
+            "127.0.0.1",
+            "test.com",
+            "https",
+            now,
+            now + 10,
+            500,
+            1500,
+            "success",
+        )
+        .await
+        .unwrap();
+
+        let stats1 = get_user_usage(&pool, 1, 1).await.unwrap();
+        let stats2 = get_user_usage(&pool, 2, 1).await.unwrap();
+
+        assert_eq!(stats1.connection_count, 1);
+        assert_eq!(stats1.total_bytes_sent, 1000);
+
+        assert_eq!(stats2.connection_count, 1);
+        assert_eq!(stats2.total_bytes_sent, 500);
+    }
+}
