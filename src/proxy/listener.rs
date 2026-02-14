@@ -19,6 +19,7 @@ enum ErrorType {
     Response,
     Timeout,
     Tunnel,
+    QuotaExceeded,
 }
 
 pub async fn run_proxy_server(state: AppState, addr: SocketAddr) {
@@ -74,6 +75,11 @@ async fn send_error_response(
         (ProxyProtocol::HTTP, ErrorType::Timeout) => {
             stream
                 .write_all(b"HTTP/1.1 504 Gateway Timeout\r\n\r\n")
+                .await
+        }
+        (ProxyProtocol::HTTP, ErrorType::QuotaExceeded) => {
+            stream
+                .write_all(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 18\r\n\r\nQuota exceeded\r\n")
                 .await
         }
         (ProxyProtocol::SOCKS4, _) => utils::send_socks4_response(stream, false).await,
@@ -147,16 +153,17 @@ async fn handle_client(
 
     // If credentials are required, perform protocol-specific authentication
     let auth_required = state.config.read().await.authentication.enabled;
-    if auth_required {
+    let user_id = if auth_required {
         match protocol.authenticate(&mut buffered_stream, &state).await {
-            Ok(true) => {
+            Ok((true, uid)) => {
                 tracing::debug!(
                     "{} authenticated successfully via {}",
                     &client_addr,
                     protocol
                 );
+                uid
             }
-            Ok(false) => {
+            Ok((false, _)) => {
                 // Authentication required for this protocol
                 tracing::error!(
                     "Authentication required for {} via {}",
@@ -172,7 +179,8 @@ async fn handle_client(
         }
     } else {
         tracing::debug!("Skipping authentication (--no-creds)");
-    }
+        None // No auth required
+    };
 
     // INFO: For HTTP/HTTPS, we need to parse the target from the buffered stream
     // to preserve any data read during authentication
@@ -242,6 +250,7 @@ async fn handle_client(
                 ErrorType::Response => "response",
                 ErrorType::Timeout => "timeout",
                 ErrorType::Tunnel => "tunnel",
+                ErrorType::QuotaExceeded => "quota_exceeded",
             },
             client_addr,
             e

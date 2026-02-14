@@ -33,11 +33,12 @@ type AuthResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 impl ProxyProtocol {
     /// Authenticate client based on the protocol
+    /// Returns (authenticated, user_id)
     pub async fn authenticate(
         &self,
         client_stream: &mut BufferedClientStream,
         state: &AppState,
-    ) -> AuthResult<bool> {
+    ) -> AuthResult<(bool, Option<i64>)> {
         match self {
             ProxyProtocol::HTTP | ProxyProtocol::HTTPS => {
                 Self::authenticate_http_or_https(client_stream, state).await
@@ -51,7 +52,7 @@ impl ProxyProtocol {
                     "Protocol {} doesn't support proxy, rejecting connection",
                     self
                 );
-                Ok(false)
+                Ok((false, None))
             }
         }
     }
@@ -59,7 +60,7 @@ impl ProxyProtocol {
     async fn authenticate_http_or_https(
         client_stream: &mut BufferedClientStream,
         state: &AppState,
-    ) -> AuthResult<bool> {
+    ) -> AuthResult<(bool, Option<i64>)> {
         let mut buffer = [0u8; 4096];
         let n = client_stream.peek(&mut buffer).await?;
         if n == 0 {
@@ -68,8 +69,10 @@ impl ProxyProtocol {
         let request_data = String::from_utf8_lossy(&buffer[..n]);
         // Extract Proxy-Authorization header from HTTP request
         if let Some(auth_header) = Self::extract_proxy_auth_header(&request_data) {
-            if Self::validate_auth_header(auth_header, state).await.is_ok() {
-                return Ok(true);
+            // Try to get user_id from auth
+            let user_id = Self::extract_user_id_from_header(auth_header, state).await;
+            if user_id.is_some() || Self::validate_auth_header(auth_header, state).await.is_ok() {
+                return Ok((true, user_id));
             }
         }
 
@@ -81,15 +84,15 @@ impl ProxyProtocol {
     async fn authenticate_socks4(
         _client_stream: &mut BufferedClientStream,
         _state: &AppState,
-    ) -> AuthResult<bool> {
+    ) -> AuthResult<(bool, Option<i64>)> {
         // SOCKS4 doesn't have proper authentication mechanism.
-        Ok(true)
+        Ok((true, None))
     }
 
     async fn authenticate_socks5(
         client_stream: &mut BufferedClientStream,
         state: &AppState,
-    ) -> AuthResult<bool> {
+    ) -> AuthResult<(bool, Option<i64>)> {
         // Read SOCKS5 handshake
         let mut handshake_buf = [0u8; 2];
         client_stream.read_exact(&mut handshake_buf).await?;
@@ -140,13 +143,11 @@ impl ProxyProtocol {
             let username = String::from_utf8(username_buf)?;
             let password = String::from_utf8(password_buf)?;
 
-            // Validate credentials
-            if Self::validate_credentials(&username, &password, state)
-                .await
-                .is_some()
-            {
+            // Validate credentials and capture user_id
+            let user_id = Self::validate_credentials(&username, &password, state).await;
+            if user_id.is_some() {
                 client_stream.write_all(&[0x01, 0x00]).await?; // Success
-                Ok(true)
+                Ok((true, user_id))
             } else {
                 client_stream.write_all(&[0x01, 0x01]).await?; // Failure
                 Err("SOCKS5 authentication failed".into())
@@ -158,7 +159,7 @@ impl ProxyProtocol {
         } else {
             // No auth required
             client_stream.write_all(&[0x05, 0x00]).await?; // No authentication
-            Ok(false)
+            Ok((false, None))
         }
     }
 
@@ -214,6 +215,22 @@ impl ProxyProtocol {
         } else {
             Err("Unsupported authentication method".into())
         }
+    }
+
+    /// Helper to extract user_id from HTTP auth header
+    async fn extract_user_id_from_header(auth_header: &str, state: &AppState) -> Option<i64> {
+        if auth_header.starts_with("Basic ") {
+            let encoded = &auth_header[6..];
+            if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded) {
+                if let Ok(credentials) = String::from_utf8(decoded) {
+                    let mut parts = credentials.splitn(2, ':');
+                    if let (Some(username), Some(password)) = (parts.next(), parts.next()) {
+                        return Self::validate_credentials(username, password, state).await;
+                    }
+                }
+            }
+        }
+        None
     }
 
     async fn validate_credentials(username: &str, password: &str, state: &AppState) -> Option<i64> {
