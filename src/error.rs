@@ -8,4 +8,5 @@ pub enum ProxyError {
     PayloadTooLarge,
     BadGateway(anyhow::Error),
     Disconnected(anyhow::Error),
+    QuotaExceeded,
 }

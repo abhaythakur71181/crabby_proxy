@@ -141,7 +141,10 @@ impl ProxyProtocol {
             let password = String::from_utf8(password_buf)?;
 
             // Validate credentials
-            if Self::validate_credentials(&username, &password, state).await {
+            if Self::validate_credentials(&username, &password, state)
+                .await
+                .is_some()
+            {
                 client_stream.write_all(&[0x01, 0x00]).await?; // Success
                 Ok(true)
             } else {
@@ -200,7 +203,10 @@ impl ProxyProtocol {
             let username = parts.next().ok_or("Missing username")?;
             let password = parts.next().ok_or("Missing password")?;
 
-            if Self::validate_credentials(username, password, state).await {
+            if Self::validate_credentials(username, password, state)
+                .await
+                .is_some()
+            {
                 Ok(())
             } else {
                 Err("Invalid credentials".into())
@@ -210,27 +216,28 @@ impl ProxyProtocol {
         }
     }
 
-    async fn validate_credentials(username: &str, password: &str, state: &AppState) -> bool {
+    async fn validate_credentials(username: &str, password: &str, state: &AppState) -> Option<i64> {
         // Check for API Key format: user@apikey
         if username.ends_with("@apikey") {
-            let actual_username = username.trim_end_matches("@apikey");
+            let actual_username = username.trim_end_matches("apikey");
             if let Ok(Some(user)) =
                 users::get_user_by_username(&state.db_pool, actual_username).await
             {
                 // Verify API key (password is the key)
                 if let Ok(true) = api_keys::verify_api_key(&state.db_pool, user.id, password).await
                 {
-                    return true;
+                    return Some(user.id);
                 }
             }
         } else {
-            if let Ok(Some(_user)) =
-                users::verify_password(&state.db_pool, username, password).await
+            // Regular password authentication
+            if let Ok(Some(user)) = users::verify_password(&state.db_pool, username, password).await
             {
-                return true;
+                return Some(user.id);
             }
         }
-        // Fallback to Config credentials if enabled?
+
+        // Fallback to Config credentials if enabled (config user has no user_id, return None)
         let (config_user, config_pass) = {
             let config = state.config.read().await;
             (
@@ -239,9 +246,11 @@ impl ProxyProtocol {
             )
         };
         if username == config_user && password == config_pass {
-            return true;
+            // Config-based auth doesn't have a user_id
+            return None;
         }
-        false
+
+        None
     }
 
     /// Detect the protocol from a client stream
