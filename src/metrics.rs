@@ -54,3 +54,65 @@ pub fn export_metrics() -> String {
     encoder.encode(&metric_families, &mut buffer).unwrap();
     String::from_utf8(buffer).unwrap()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_metrics_initialization() {
+        // Just accessing the metrics should not panic
+        let _ = &*ACTIVE_CONNECTIONS;
+        let _ = &*REQUESTS_TOTAL;
+        let _ = &*AUTH_TOTAL;
+        let _ = &*BYTES_TRANSFERRED;
+        let _ = &*IP_FILTER_ACTIONS;
+    }
+
+    #[test]
+    fn test_active_connections_gauge() {
+        // Test increment and decrement
+        ACTIVE_CONNECTIONS.with_label_values(&["http"]).inc();
+        ACTIVE_CONNECTIONS.with_label_values(&["http"]).inc();
+        ACTIVE_CONNECTIONS.with_label_values(&["http"]).dec();
+
+        // Can't easily assert exact value due to global state,
+        // but we can verify it doesn't panic
+    }
+
+    #[test]
+    fn test_requests_total_counter() {
+        // Test incrementing
+        REQUESTS_TOTAL.with_label_values(&["http", "success"]).inc();
+        REQUESTS_TOTAL.with_label_values(&["https", "failed"]).inc();
+
+        // Verify no panic
+    }
+
+    #[test]
+    fn test_auth_total_counter() {
+        AUTH_TOTAL.with_label_values(&["socks5", "success"]).inc();
+        AUTH_TOTAL.with_label_values(&["socks5", "failed"]).inc();
+    }
+
+    #[test]
+    fn test_ip_filter_actions_counter() {
+        IP_FILTER_ACTIONS.with_label_values(&["allowed"]).inc();
+        IP_FILTER_ACTIONS.with_label_values(&["blocked"]).inc();
+    }
+
+    #[test]
+    fn test_export_metrics() {
+        // Record some metrics
+        ACTIVE_CONNECTIONS.with_label_values(&["test"]).inc();
+        REQUESTS_TOTAL.with_label_values(&["test", "success"]).inc();
+
+        let output = export_metrics();
+
+        // Should be in Prometheus format
+        assert!(output.contains("proxy_active_connections"));
+        assert!(output.contains("proxy_requests_total"));
+        assert!(output.contains("TYPE"));
+        assert!(output.contains("HELP"));
+    }
+}
