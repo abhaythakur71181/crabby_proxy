@@ -58,6 +58,15 @@ pub async fn run_admin_server(state: AppState, addr: SocketAddr) -> Result<(), s
             "/api/users/:id/usage/all-time",
             get(handlers::usage::get_all_time_usage),
         )
+        // Quota management routes
+        .route(
+            "/api/users/:id/quota",
+            get(handlers::quotas::get_user_quota),
+        )
+        .route(
+            "/api/users/:id/quota",
+            axum::routing::put(handlers::quotas::update_user_quota),
+        )
         // TODO: Fix Handler trait issue with 4 extractors in Axum 0.7
         // API key management routes (temporarily disabled)
         // .route("/api/users/:id/api-keys", post(handlers::users::create_api_key))
