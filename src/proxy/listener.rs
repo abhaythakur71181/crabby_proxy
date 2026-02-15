@@ -114,6 +114,22 @@ async fn handle_client(
         drop(config);
     }
 
+    // Check IP rate limiting
+    let config = state.config.read().await;
+    if config.rate_limiting.enabled {
+        drop(config);
+
+        if !state.ip_rate_limiter.check_ip(client_addr.ip()).await {
+            tracing::warn!("Rate limit exceeded for {}", client_addr.ip());
+            crate::metrics::RATE_LIMIT_EXCEEDED
+                .with_label_values(&["ip"])
+                .inc();
+            return; // Drop connection
+        }
+    } else {
+        drop(config);
+    }
+
     let mut protocol;
     let protocol_detection_result = ProxyProtocol::detect_from_stream(&mut client_stream).await;
     if let Err(e) = protocol_detection_result {
@@ -182,6 +198,36 @@ async fn handle_client(
         None // No auth required
     };
 
+    // Check SOCKS4 protocol restrictions (config-based with admin bypass)
+    if protocol == ProxyProtocol::SOCKS4 {
+        let config = state.config.read().await;
+        let socks4_enabled = config.protocols.enable_socks4;
+        drop(config);
+        if !socks4_enabled {
+            // Check if user is admin (admins bypass SOCKS4 restriction)
+            let is_admin = if let Some(uid) = user_id {
+                match crate::db::users::get_user_by_id(&state.db_pool, uid).await {
+                    Ok(Some(user)) => user.role == "root_admin" || user.role == "admin",
+                    _ => false,
+                }
+            } else {
+                false
+            };
+            if is_admin {
+                tracing::debug!("SOCKS4 allowed for admin user {:?}", user_id);
+            } else {
+                tracing::warn!(
+                    "SOCKS4 connection from {} rejected (protocol disabled for non-admin users)",
+                    client_addr
+                );
+                crate::metrics::AUTH_FAILURES
+                    .with_label_values(&["socks4_disabled"])
+                    .inc();
+                return;
+            }
+        }
+    }
+
     // INFO: For HTTP/HTTPS, we need to parse the target from the buffered stream
     // to preserve any data read during authentication
     let (target, mut stream) = if matches!(protocol, ProxyProtocol::HTTP | ProxyProtocol::HTTPS) {
@@ -249,7 +295,11 @@ async fn handle_client(
             }
             Err(e) => {
                 tracing::error!("Error checking quota for user {}: {}", uid, e);
-                // Allow connection on error (fail open)
+                crate::metrics::ACTIVE_CONNECTIONS
+                    .with_label_values(&[&protocol.to_string()])
+                    .dec();
+                let _ = send_error_response(&protocol, &mut stream, ErrorType::Connection).await;
+                return; // Fail-closed: reject on DB error
             }
         }
     }
