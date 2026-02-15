@@ -44,6 +44,22 @@ lazy_static! {
         &["action"] // "allowed" or "blocked"
     )
     .unwrap();
+
+    /// Rate limit exceeded events
+    pub static ref RATE_LIMIT_EXCEEDED: IntCounterVec = register_int_counter_vec!(
+        "proxy_rate_limit_exceeded_total",
+        "Total rate limit exceeded events",
+        &["type"] // "ip" or "user"
+    )
+    .unwrap();
+
+    /// Authentication failures
+    pub static ref AUTH_FAILURES: IntCounterVec = register_int_counter_vec!(
+        "proxy_auth_failures_total",
+        "Total authentication failures",
+        &["reason"] // "invalid_credentials", "socks4_disabled", etc.
+    )
+    .unwrap();
 }
 
 /// Export all metrics in Prometheus format

@@ -44,8 +44,15 @@ pub struct UsageRecordResponse {
 pub async fn get_user_usage_stats(
     State(state): State<AppState>,
     Path(user_id): Path<i64>,
+    axum::Extension(current_user_id): axum::Extension<i64>,
     Query(params): Query<UsageQuery>,
 ) -> Result<Json<UsageStatsResponse>, StatusCode> {
+    // Extract current user and check authorization
+    let current_user =
+        crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
+    if !current_user.can_access_user(user_id) {
+        return Err(StatusCode::FORBIDDEN);
+    }
     let days = params.days.unwrap_or(30);
     let stats = usage::get_user_usage(&state.db_pool, user_id, days)
         .await
@@ -68,8 +75,15 @@ pub async fn get_user_usage_stats(
 pub async fn get_recent_usage(
     State(state): State<AppState>,
     Path(user_id): Path<i64>,
+    axum::Extension(current_user_id): axum::Extension<i64>,
     Query(params): Query<UsageQuery>,
 ) -> Result<Json<Vec<UsageRecordResponse>>, StatusCode> {
+    // Extract current user and check authorization
+    let current_user =
+        crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
+    if !current_user.can_access_user(user_id) {
+        return Err(StatusCode::FORBIDDEN);
+    }
     let limit = params.limit.unwrap_or(100);
 
     let records = usage::get_recent_usage_records(&state.db_pool, user_id, limit)
@@ -103,7 +117,14 @@ pub async fn get_recent_usage(
 pub async fn get_all_time_usage(
     State(state): State<AppState>,
     Path(user_id): Path<i64>,
+    axum::Extension(current_user_id): axum::Extension<i64>,
 ) -> Result<Json<UsageStatsResponse>, StatusCode> {
+    // Extract current user and check authorization
+    let current_user =
+        crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
+    if !current_user.can_access_user(user_id) {
+        return Err(StatusCode::FORBIDDEN);
+    }
     let stats = usage::get_all_time_usage(&state.db_pool, user_id)
         .await
         .map_err(|e| {

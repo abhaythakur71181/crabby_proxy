@@ -157,3 +157,48 @@ async fn check_user_rate_limit(state: &AppState, user_id: i64) -> Result<(), &'s
 pub fn is_public_endpoint(path: &str) -> bool {
     matches!(path, "/health" | "/metrics" | "/api/login")
 }
+
+/// Current authenticated user (extracted from JWT in middleware)
+#[derive(Debug, Clone)]
+pub struct CurrentUser {
+    pub id: i64,
+    pub username: String,
+    pub role: String,
+}
+
+impl CurrentUser {
+    /// Check if user can access another user's data
+    pub fn can_access_user(&self, target_user_id: i64) -> bool {
+        // Admins can access all users
+        if self.role == "root_admin" || self.role == "admin" {
+            return true;
+        }
+        // Regular users can only access their own data
+        self.id == target_user_id
+    }
+
+    /// Require admin role
+    pub fn require_admin(&self) -> Result<(), StatusCode> {
+        if self.role == "root_admin" || self.role == "admin" {
+            Ok(())
+        } else {
+            Err(StatusCode::FORBIDDEN)
+        }
+    }
+
+    /// Extract from request extensions (set by auth middleware)
+    pub async fn from_request_extensions(
+        state: &AppState,
+        user_id: i64,
+    ) -> Result<Self, StatusCode> {
+        let user = users::get_user_by_id(&state.db_pool, user_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::UNAUTHORIZED)?;
+        Ok(CurrentUser {
+            id: user.id,
+            username: user.username,
+            role: user.role,
+        })
+    }
+}
