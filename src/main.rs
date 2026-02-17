@@ -2,6 +2,7 @@ mod admin;
 mod app_state;
 mod auth;
 mod config;
+mod config_env;
 mod connection;
 mod db;
 mod error;
@@ -17,6 +18,7 @@ mod validation;
 
 use crate::app_state::AppState;
 use crate::config::Config;
+use crate::config_env::ConfigEnvExt;  // Import trait for apply_env_overrides
 use crate::proxy::listener::run_proxy_server;
 use clap::Parser;
 use std::path::PathBuf;
@@ -60,6 +62,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.server.admin_bind = admin_bind;
     }
 
+    // Apply environment variable overrides for secrets
+    config.apply_env_overrides();
+
     tracing::info!("Configuration loaded successfully");
     tracing::info!("  Proxy: {}", config.server.proxy_bind);
     tracing::info!("  Admin: {}", config.server.admin_bind);
@@ -68,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize database
     tracing::info!("Initializing database...");
-    let db_pool = db::create_pool(&config.database.path).await?;
+    let db_pool = db::create_pool(&config.database.path, config.database.max_connections).await?;
 
     // Run migrations
     tracing::info!("Running database migrations...");
