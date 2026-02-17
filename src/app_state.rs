@@ -52,6 +52,7 @@ pub struct AppState {
     // Rate limiters
     pub ip_rate_limiter: crate::rate_limit::IpRateLimiter,
     pub user_rate_limiter: crate::rate_limit::UserRateLimiter,
+    pub login_rate_limiter: crate::rate_limit::LoginRateLimiter,
 
     // IP filter
     pub ip_filter: Arc<RwLock<crate::ip_filter::IpFilter>>,
@@ -118,6 +119,7 @@ impl AppState {
             config.rate_limiting.burst_size,
         );
         let user_rate_limiter = crate::rate_limit::UserRateLimiter::new();
+        let login_rate_limiter = crate::rate_limit::LoginRateLimiter::new();
 
         // Initialize IP filter
         let ip_filter = {
@@ -158,6 +160,7 @@ impl AppState {
             config_path,
             ip_rate_limiter,
             user_rate_limiter,
+            login_rate_limiter,
             ip_filter,
             shutdown_tx,
         })

@@ -491,7 +491,8 @@ impl ProxyProtocol {
             ));
         }
 
-        // Read user ID (null-terminated)
+        // Read user ID (null-terminated, max 255 bytes)
+        const MAX_SOCKS4_USER_ID: usize = 255;
         let mut user_id = Vec::new();
         loop {
             let mut byte = [0u8; 1];
@@ -499,6 +500,14 @@ impl ProxyProtocol {
             if byte[0] == 0 {
                 break;
             }
+
+            if user_id.len() >= MAX_SOCKS4_USER_ID {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "SOCKS4 user ID exceeds 255 bytes",
+                ));
+            }
+
             user_id.push(byte[0]);
         }
 
