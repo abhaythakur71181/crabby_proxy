@@ -172,6 +172,65 @@ impl Default for UserRateLimiter {
     }
 }
 
+/// Rate limiter for login attempts (prevents brute force)
+#[derive(Clone)]
+pub struct LoginRateLimiter {
+    limiters: Arc<
+        RwLock<lru::LruCache<String, GovernorRateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
+    >,
+    quota: Quota,
+}
+
+impl LoginRateLimiter {
+    /// Create new login rate limiter
+    /// Default: 5 attempts per minute per IP, max 10,000 tracked IPs
+    pub fn new() -> Self {
+        Self::with_limits(5, 10, 10_000)
+    }
+
+    /// Create login rate limiter with custom limits
+    /// - attempts_per_minute: Number of login attempts allowed per minute
+    /// - burst: Burst size for temporary spikes
+    /// - max_ips: Maximum number of IPs to track (LRU eviction)
+    pub fn with_limits(attempts_per_minute: u32, burst: u32, max_ips: usize) -> Self {
+        let quota = Quota::per_minute(
+            std::num::NonZeroU32::new(attempts_per_minute).unwrap_or(nonzero!(5u32)),
+        )
+        .allow_burst(std::num::NonZeroU32::new(burst).unwrap_or(nonzero!(10u32)));
+        Self {
+            limiters: Arc::new(RwLock::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(max_ips).unwrap(),
+            ))),
+            quota,
+        }
+    }
+
+    /// Check if IP is allowed to attempt login
+    pub async fn check(&self, ip: &str) -> bool {
+        let mut limiters = self.limiters.write().await;
+        let limiter =
+            limiters.get_or_insert(ip.to_string(), || GovernorRateLimiter::direct(self.quota));
+        limiter.check().is_ok()
+    }
+
+    /// Get number of tracked IPs
+    pub async fn count(&self) -> usize {
+        self.limiters.read().await.len()
+    }
+
+    /// Clear all rate limiters (for testing)
+    #[allow(dead_code)]
+    pub async fn clear(&self) {
+        self.limiters.write().await.clear();
+    }
+}
+
+impl Default for LoginRateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
