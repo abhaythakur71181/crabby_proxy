@@ -96,7 +96,7 @@ async fn tunnel_listener_task(port: u16, target_addr: SocketAddr) {
     let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("Failed to bind tunnel port {port}: {e}");
+            tracing::error!("Failed to bind tunnel port {port}: {e}");
             return;
         }
     };
@@ -107,7 +107,7 @@ async fn tunnel_listener_task(port: u16, target_addr: SocketAddr) {
                 tokio::spawn(handle_tunnel_connection(inbound, target_addr));
             }
             Err(e) => {
-                eprintln!("Accept error on port {port}: {e}");
+                tracing::error!("Accept error on port {port}: {e}");
             }
         }
     }
@@ -117,7 +117,7 @@ async fn handle_tunnel_connection(mut inbound: tokio::net::TcpStream, target_add
     let mut outbound = match TcpStream::connect(target_addr).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Failed to connect to client {target_addr}: {e}");
+            tracing::error!("Failed to connect to client {target_addr}: {e}");
             return;
         }
     };
@@ -136,6 +136,6 @@ async fn handle_tunnel_connection(mut inbound: tokio::net::TcpStream, target_add
     };
 
     if let Err(e) = tokio::try_join!(client_to_server, server_to_client) {
-        eprintln!("Tunnel error: {e}");
+        tracing::error!("Tunnel error: {e}");
     }
 }

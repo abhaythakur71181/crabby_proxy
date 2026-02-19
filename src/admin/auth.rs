@@ -87,8 +87,16 @@ pub async fn auth_middleware(
                                 if username == config.admin.admin_username
                                     && password == config.admin.admin_password
                                 {
-                                    // For config auth, use root user ID (1)
-                                    let user_id = 1i64;
+                                    // Look up root admin user from DB for accurate user_id
+                                    let user_id = match crate::db::users::get_user_by_username(
+                                        &state.db_pool,
+                                        "root_admin",
+                                    )
+                                    .await
+                                    {
+                                        Ok(Some(user)) => user.id,
+                                        _ => -1i64, // Sentinel if root_admin not found
+                                    };
                                     request.extensions_mut().insert(user_id);
 
                                     // Root admin bypasses rate limiting

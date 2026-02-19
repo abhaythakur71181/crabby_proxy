@@ -161,9 +161,10 @@ impl Config {
 
         settings.try_deserialize()
     }
+}
 
-    /// Generate default configuration
-    pub fn default() -> Self {
+impl Default for Config {
+    fn default() -> Self {
         Self {
             server: ServerConfig {
                 proxy_bind: "0.0.0.0:8080".to_string(),
