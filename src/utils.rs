@@ -15,7 +15,7 @@ use crate::{error::ProxyError, stream::ClientStream};
 // write from tcp stream
 pub async fn write_to_stream(stream: &mut TcpStream, buf: &[u8]) -> Result<(), ProxyError> {
     stream
-        .write(buf)
+        .write_all(buf)
         .await
         .context(format!(
             "failed to write to stream, addr: {:?}",
