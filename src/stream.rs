@@ -202,7 +202,7 @@ impl<R: AsyncRead, W: AsyncWrite> TunnelStream<R, W> {
         R: AsyncReadExt + Unpin,
         W: AsyncWriteExt + Unpin,
     {
-        let mut buf = [0u8; 1024];
+        let mut buf = [0u8; 8192];
         let mut total = 0;
 
         loop {
