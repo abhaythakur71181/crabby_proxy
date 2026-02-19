@@ -1,9 +1,10 @@
+use axum::http::Method;
 use axum::{
     routing::{delete, get, post},
     Router,
 };
 use std::net::SocketAddr;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 
 use super::handlers;
 use crate::app_state::AppState;
@@ -77,12 +78,21 @@ pub async fn run_admin_server(state: AppState, addr: SocketAddr) -> Result<(), s
             super::auth::auth_middleware,
         ));
 
+    let cors = CorsLayer::new()
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+        .allow_headers(Any)
+        .allow_origin(Any); // TODO: restrict to admin UI origin
     let app = Router::new()
         .merge(public_routes)
         .merge(protected_routes)
-        .layer(CorsLayer::permissive())
-        .with_state(state);
+        .layer(cors)
+        .with_state(state.clone());
 
+    tracing::info!(
+        "Admin API listening on {} with {} routes (health, metrics, login, stats, connections, tunnels, users, quota, config)",
+        addr,
+        "public + protected"
+    );
     tracing::info!("Admin API routes configured");
     tracing::info!("  GET /health - Health check");
     tracing::info!("  GET /metrics - Prometheus metrics");
@@ -95,8 +105,13 @@ pub async fn run_admin_server(state: AppState, addr: SocketAddr) -> Result<(), s
     tracing::info!("  GET /api/config - View configuration");
     tracing::info!("  POST /api/config/reload - Reload configuration");
 
+    let mut shutdown_rx = state.shutdown_tx.subscribe();
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
-
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.recv().await;
+            tracing::info!("Admin API shutting down gracefully");
+        })
+        .await?;
     Ok(())
 }
