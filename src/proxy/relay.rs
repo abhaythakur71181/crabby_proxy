@@ -1,23 +1,23 @@
+use super::protocol::ProxyTarget;
+use crate::error::ProxyError;
+use crate::utils;
 use anyhow::anyhow;
 use byte_pool::BytePool;
 use lazy_static::lazy_static;
 use tokio::net::TcpStream;
 
-use crate::{error::ProxyError, utils};
-
-use super::protocol::ProxyTarget;
-
 const INITIAL_HTTP_HEADER_SIZE: usize = 1024;
+/// Maximum size for HTTP headers when parsing response (16KB)
+const MAX_HEADER_SIZE: usize = 16 * 1024;
 
 lazy_static! {
-    static ref BUFFER_POOL: BytePool::<Vec<u8>> = BytePool::<Vec<u8>>::new();
+    static ref BUFFER_POOL: BytePool<Vec<u8>> = BytePool::<Vec<u8>>::new();
 }
 
 pub async fn hand_shake(
     mut client_stream: TcpStream,
     target: ProxyTarget,
 ) -> Result<Vec<u8>, ProxyError> {
-
     let str_addr = target.host;
     let mut buffer = BUFFER_POOL.alloc(INITIAL_HTTP_HEADER_SIZE);
     buffer.extend_from_slice("CONNECT ".as_bytes());
@@ -32,6 +32,13 @@ pub async fn hand_shake(
 
     let partially_read_body_start_index;
     loop {
+        if buffer.len() >= MAX_HEADER_SIZE {
+            return Err(ProxyError::BadGateway(anyhow!(
+                "Server response headers exceed {} bytes",
+                MAX_HEADER_SIZE
+            )));
+        }
+
         let mut tmp_buffer = [0u8; 256];
         let len = utils::read_from_stream(&mut client_stream, &mut tmp_buffer).await?;
         buffer.extend_from_slice(&tmp_buffer[..len]);
@@ -49,7 +56,6 @@ pub async fn hand_shake(
             }
         }
     }
-
 
     if let Some(index) = partially_read_body_start_index {
         if buffer[..].starts_with("HTTP/1.1 200 OK".as_bytes()) {
