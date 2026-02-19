@@ -1,3 +1,4 @@
+use chrono::Datelike;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
@@ -10,18 +11,27 @@ pub struct QuotaStats {
     pub percentage_used: Option<f64>,
 }
 
-/// Check if user has remaining quota
+/// Check if user has remaining quota (monthly window)
 pub async fn check_quota(pool: &SqlitePool, user_id: i64) -> Result<bool, sqlx::Error> {
+    // Calculate start of current month (Unix timestamp)
+    let now = chrono::Utc::now();
+    let month_start = now.date_naive().with_day(1).unwrap_or(now.date_naive());
+    let month_start_ts = month_start
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp();
     let row: (Option<i64>, i64) = sqlx::query_as(
         r#"
         SELECT 
             monthly_bandwidth_quota as quota_bytes,
-            COALESCE((SELECT SUM(bytes_sent + bytes_received) FROM usage WHERE user_id = ?), 0) as used_bytes
+            COALESCE((SELECT SUM(bytes_sent + bytes_received) FROM usage WHERE user_id = ? AND started_at >= ?), 0) as used_bytes
         FROM users 
         WHERE id = ?
         "#
     )
     .bind(user_id)
+    .bind(month_start_ts)
     .bind(user_id)
     .fetch_one(pool)
     .await?;
@@ -105,7 +115,8 @@ mod tests {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 bytes_sent INTEGER NOT NULL,
-                bytes_received INTEGER NOT NULL
+                bytes_received INTEGER NOT NULL,
+                started_at INTEGER NOT NULL DEFAULT 0
             )
             "#,
         )
@@ -142,10 +153,12 @@ mod tests {
         .await
         .unwrap();
 
-        // Use 500KB
+        // Use 500KB (with current timestamp so it falls in current month)
+        let now = chrono::Utc::now().timestamp();
         sqlx::query(
-            "INSERT INTO usage (user_id, bytes_sent, bytes_received) VALUES (1, 262144, 262144)",
+            "INSERT INTO usage (user_id, bytes_sent, bytes_received, started_at) VALUES (1, 262144, 262144, ?)",
         )
+        .bind(now)
         .execute(&pool)
         .await
         .unwrap();
@@ -166,10 +179,12 @@ mod tests {
         .await
         .unwrap();
 
-        // Use 1.5MB
+        // Use 1.5MB (with current timestamp so it falls in current month)
+        let now = chrono::Utc::now().timestamp();
         sqlx::query(
-            "INSERT INTO usage (user_id, bytes_sent, bytes_received) VALUES (1, 786432, 786432)",
+            "INSERT INTO usage (user_id, bytes_sent, bytes_received, started_at) VALUES (1, 786432, 786432, ?)",
         )
+        .bind(now)
         .execute(&pool)
         .await
         .unwrap();

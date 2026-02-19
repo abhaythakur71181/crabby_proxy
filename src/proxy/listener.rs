@@ -279,31 +279,37 @@ async fn handle_client(
         .with_label_values(&[&protocol.to_string(), "started"])
         .inc();
 
-    // Check quota if user is authenticated
+    // Check quota if user is authenticated (skip for config-based auth sentinel -1)
     if let Some(uid) = user_id {
-        match crate::db::quota::check_quota(&state.db_pool, uid).await {
-            Ok(true) => {
-                tracing::debug!("User {} has remaining quota", uid);
-            }
-            Ok(false) => {
-                tracing::warn!("Quota exceeded for user {}", uid);
-                crate::metrics::ACTIVE_CONNECTIONS
-                    .with_label_values(&[&protocol.to_string()])
-                    .dec();
-                let _ = send_error_response(&protocol, &mut stream, ErrorType::QuotaExceeded).await;
-                return;
-            }
-            Err(e) => {
-                tracing::error!("Error checking quota for user {}: {}", uid, e);
-                crate::metrics::ACTIVE_CONNECTIONS
-                    .with_label_values(&[&protocol.to_string()])
-                    .dec();
-                let _ = send_error_response(&protocol, &mut stream, ErrorType::Connection).await;
-                return; // Fail-closed: reject on DB error
+        if uid > 0 {
+            match crate::db::quota::check_quota(&state.db_pool, uid).await {
+                Ok(true) => {
+                    tracing::debug!("User {} has remaining quota", uid);
+                }
+                Ok(false) => {
+                    tracing::warn!("Quota exceeded for user {}", uid);
+                    crate::metrics::ACTIVE_CONNECTIONS
+                        .with_label_values(&[&protocol.to_string()])
+                        .dec();
+                    let _ =
+                        send_error_response(&protocol, &mut stream, ErrorType::QuotaExceeded).await;
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!("Error checking quota for user {}: {}", uid, e);
+                    crate::metrics::ACTIVE_CONNECTIONS
+                        .with_label_values(&[&protocol.to_string()])
+                        .dec();
+                    let _ =
+                        send_error_response(&protocol, &mut stream, ErrorType::Connection).await;
+                    return; // Fail-closed: reject on DB error
+                }
             }
         }
     }
 
+    let started_at = chrono::Utc::now().timestamp();
+    let target_addr_str = format!("{}:{}", target.host, target.port);
     let result =
         async_handle_client_with_target(&mut stream, client_addr, &mut protocol, target).await;
 
@@ -312,34 +318,61 @@ async fn handle_client(
         .with_label_values(&[&protocol.to_string()])
         .dec();
 
-    if let Err((e, error_type)) = result {
-        tracing::error!(
-            "Error [{}] for {}: {}",
-            match error_type {
-                ErrorType::Handshake => "handshake",
-                ErrorType::Connection => "connection",
-                ErrorType::Response => "response",
-                ErrorType::Timeout => "timeout",
-                ErrorType::Tunnel => "tunnel",
-                ErrorType::QuotaExceeded => "quota_exceeded",
-            },
-            client_addr,
-            e
-        );
-
-        // Record error in metrics
-        crate::metrics::REQUESTS_TOTAL
-            .with_label_values(&[&protocol.to_string(), "failed"])
-            .inc();
-
-        if error_type != ErrorType::Tunnel {
-            let _ = send_error_response(&protocol, &mut stream, error_type).await;
+    let ended_at = chrono::Utc::now().timestamp();
+    match result {
+        Ok((bytes_sent, bytes_received)) => {
+            // Record bytes transferred metrics
+            crate::metrics::BYTES_TRANSFERRED
+                .with_label_values(&["sent"])
+                .inc_by(bytes_sent);
+            crate::metrics::BYTES_TRANSFERRED
+                .with_label_values(&["received"])
+                .inc_by(bytes_received);
+            // Record usage in DB for authenticated users (skip config auth sentinel -1)
+            if let Some(uid) = user_id {
+                if uid > 0 {
+                    let _ = crate::db::usage::record_usage(
+                        &state.db_pool,
+                        uid,
+                        &conn_id.to_string(),
+                        &client_addr.ip().to_string(),
+                        &target_addr_str,
+                        &protocol.to_string(),
+                        started_at,
+                        ended_at,
+                        bytes_sent as i64,
+                        bytes_received as i64,
+                        "success",
+                    )
+                    .await;
+                }
+            }
+            // Record successful request
+            crate::metrics::REQUESTS_TOTAL
+                .with_label_values(&[&protocol.to_string(), "success"])
+                .inc();
         }
-    } else {
-        // Record successful request
-        crate::metrics::REQUESTS_TOTAL
-            .with_label_values(&[&protocol.to_string(), "success"])
-            .inc();
+        Err((e, error_type)) => {
+            tracing::error!(
+                "Error [{}] for {}: {}",
+                match error_type {
+                    ErrorType::Handshake => "handshake",
+                    ErrorType::Connection => "connection",
+                    ErrorType::Response => "response",
+                    ErrorType::Timeout => "timeout",
+                    ErrorType::Tunnel => "tunnel",
+                    ErrorType::QuotaExceeded => "quota_exceeded",
+                },
+                client_addr,
+                e
+            );
+            crate::metrics::REQUESTS_TOTAL
+                .with_label_values(&[&protocol.to_string(), "failed"])
+                .inc();
+            if error_type != ErrorType::Tunnel {
+                let _ = send_error_response(&protocol, &mut stream, error_type).await;
+            }
+        }
     }
 }
 
@@ -348,7 +381,7 @@ async fn async_handle_client_with_target(
     client_addr: SocketAddr,
     protocol: &mut ProxyProtocol,
     target: ProxyTarget,
-) -> Result<(), (io::Error, ErrorType)> {
+) -> Result<(u64, u64), (io::Error, ErrorType)> {
     let target_addr = format!("{}:{}", target.host, target.port);
     let target_stream = timeout(Duration::from_secs(10), TcpStream::connect(&target_addr))
         .await
@@ -392,7 +425,7 @@ async fn async_handle_client_with_target(
                 c2t,
                 t2c
             );
-            Ok(())
+            Ok((c2t, t2c))
         }
         Err(e) => {
             tracing::warn!("[{}]: Tunnel error: {}", &protocol, e);
