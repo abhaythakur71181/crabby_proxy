@@ -233,10 +233,11 @@ impl ProxyProtocol {
         None
     }
 
+    /// Validate credentials and return user_id.
+    /// Returns Some(user_id) for DB users, Some(-1) for config-based auth, None on failure.
     async fn validate_credentials(username: &str, password: &str, state: &AppState) -> Option<i64> {
         // Check for API Key format: user@apikey
-        if username.ends_with("@apikey") {
-            let actual_username = username.trim_end_matches("apikey");
+        if let Some(actual_username) = username.strip_suffix("@apikey") {
             if let Ok(Some(user)) =
                 users::get_user_by_username(&state.db_pool, actual_username).await
             {
@@ -254,7 +255,7 @@ impl ProxyProtocol {
             }
         }
 
-        // Fallback to Config credentials if enabled (config user has no user_id, return None)
+        // Fallback to Config credentials if enabled
         let (config_user, config_pass) = {
             let config = state.config.read().await;
             (
@@ -263,27 +264,25 @@ impl ProxyProtocol {
             )
         };
         if username == config_user && password == config_pass {
-            // Config-based auth doesn't have a user_id
-            return None;
+            // Config-based auth: use sentinel -1 to distinguish from failure (None)
+            return Some(-1);
         }
 
-        None
+        None // Authentication failed
     }
 
     /// Detect the protocol from a client stream
     pub async fn detect_from_stream(client_stream: &mut TcpStream) -> Result<Self, io::Error> {
         let mut peek_buf = [0u8; 4];
         match timeout(Duration::from_secs(5), client_stream.peek(&mut peek_buf)).await {
-            Ok(Ok(_)) => Ok(Self::detect_from_peek(&peek_buf)
-                .await
-                .unwrap_or(ProxyProtocol::TCP)),
+            Ok(Ok(_)) => Ok(Self::detect_from_peek(&peek_buf).unwrap_or(ProxyProtocol::TCP)),
             Ok(Err(e)) => Err(e),
             Err(_) => Ok(ProxyProtocol::TCP),
         }
     }
 
-    /// Detect the protocol from a peek buffer
-    pub async fn detect_from_peek(peek_buf: &[u8; 4]) -> io::Result<Self> {
+    /// Detect the protocol from a peek buffer (synchronous - no I/O needed)
+    pub fn detect_from_peek(peek_buf: &[u8; 4]) -> io::Result<Self> {
         // HTTP methods start with ASCII letters
         if peek_buf.starts_with(b"GET ")
             || peek_buf.starts_with(b"POST")
@@ -371,10 +370,18 @@ impl ProxyProtocol {
                 // be sent to the target server, breaking the connection.
                 if method == "CONNECT" {
                     // Read and discard headers until we hit the empty line (\r\n\r\n)
+                    const MAX_HEADER_SIZE: usize = 16 * 1024; // 16KB limit
                     let mut header_buf = Vec::new();
                     let mut last_four = [0u8; 4];
 
                     loop {
+                        if header_buf.len() >= MAX_HEADER_SIZE {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "HTTP headers exceed 16KB limit",
+                            ));
+                        }
+
                         let mut byte = [0u8; 1];
                         stream.read_exact(&mut byte).await?;
                         header_buf.push(byte[0]);
@@ -693,34 +700,89 @@ impl ProxyProtocol {
         }
     }
 
-    // Simplified SNI extraction (you'd want a proper TLS parser for production)
+    /// Extract SNI (Server Name Indication) from a TLS ClientHello message.
+    /// Follows RFC 5246 (TLS 1.2) / RFC 8446 (TLS 1.3) handshake structure
+    /// and RFC 6066 for the SNI extension format.
     fn extract_sni_from_tls(data: &[u8]) -> Option<String> {
-        // This is a very basic SNI extraction - in production you'd use a proper TLS library
+        // Minimum TLS record: 5 (record header) + 4 (handshake header) + 34 (version + random)
         if data.len() < 43 || data[0] != 0x16 {
-            return None;
+            return None; // Not a TLS handshake record
         }
 
-        // Look for SNI extension in TLS handshake
-        // This is simplified and may not work for all cases
-        for i in 0..data.len().saturating_sub(10) {
-            if data[i..i + 4] == [0x00, 0x00, 0x00, 0x00] {
-                // Server name extension
-                if let Some(len_pos) = i.checked_add(9) {
-                    if len_pos < data.len() {
-                        let name_len = data[len_pos] as usize;
-                        if let Some(name_start) = len_pos.checked_add(1) {
-                            if name_start + name_len <= data.len() {
-                                if let Ok(hostname) = String::from_utf8(
-                                    data[name_start..name_start + name_len].to_vec(),
-                                ) {
-                                    return Some(hostname);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        // TLS Record Header: ContentType(1) + ProtocolVersion(2) + Length(2)
+        // let record_length = u16::from_be_bytes([data[3], data[4]]) as usize;
+
+        // Handshake Header: HandshakeType(1) + Length(3)
+        if data[5] != 0x01 {
+            return None; // Not a ClientHello
         }
+        // let handshake_length = ((data[6] as usize) << 16) | ((data[7] as usize) << 8) | (data[8] as usize);
+
+        // ClientHello: ProtocolVersion(2) + Random(32) = starts at offset 9
+        let mut pos = 9 + 2 + 32; // Skip version + random = offset 43
+
+        // Session ID: Length(1) + Data(variable)
+        if pos >= data.len() {
+            return None;
+        }
+        let session_id_len = data[pos] as usize;
+        pos += 1 + session_id_len;
+
+        // Cipher Suites: Length(2) + Data(variable)
+        if pos + 2 > data.len() {
+            return None;
+        }
+        let cipher_suites_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2 + cipher_suites_len;
+
+        // Compression Methods: Length(1) + Data(variable)
+        if pos >= data.len() {
+            return None;
+        }
+        let compression_len = data[pos] as usize;
+        pos += 1 + compression_len;
+
+        // Extensions: Length(2) + Data(variable)
+        if pos + 2 > data.len() {
+            return None;
+        }
+        let extensions_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2;
+        let extensions_end = pos + extensions_len;
+
+        // Parse extensions looking for SNI (type 0x0000)
+        while pos + 4 <= extensions_end && pos + 4 <= data.len() {
+            let ext_type = u16::from_be_bytes([data[pos], data[pos + 1]]);
+            let ext_len = u16::from_be_bytes([data[pos + 2], data[pos + 3]]) as usize;
+            pos += 4;
+
+            if ext_type == 0x0000 {
+                // SNI extension found
+                // ServerNameList: Length(2)
+                if pos + 2 > data.len() {
+                    return None;
+                }
+                // let _list_len = u16::from_be_bytes([data[pos], data[pos + 1]]);
+                pos += 2;
+
+                // ServerName: NameType(1) + Length(2) + HostName(variable)
+                if pos + 3 > data.len() {
+                    return None;
+                }
+                let name_type = data[pos];
+                let name_len = u16::from_be_bytes([data[pos + 1], data[pos + 2]]) as usize;
+                pos += 3;
+
+                if name_type == 0x00 && pos + name_len <= data.len() {
+                    // host_name type
+                    return String::from_utf8(data[pos..pos + name_len].to_vec()).ok();
+                }
+                return None;
+            }
+
+            pos += ext_len;
+        }
+
         None
     }
 }
