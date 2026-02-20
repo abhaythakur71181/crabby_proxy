@@ -15,18 +15,15 @@ pub async fn create_api_key(
     expires_in_days: Option<i64>,
 ) -> Result<(String, ApiKey), sqlx::Error> {
     use rand::Rng;
-
-    // Generate a random API key with prefix
-    let mut rng = rand::thread_rng();
-    let random_bytes: Vec<u8> = (0..32).map(|_| rng.gen()).collect();
-    let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&random_bytes);
-
-    // Generate a short prefix for identification
-    let prefix_bytes: Vec<u8> = (0..4).map(|_| rng.gen()).collect();
-    let prefix = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&prefix_bytes);
-    let full_key = format!("{}.{}", prefix, secret);
-
-    // Hash the full key
+    let (full_key, prefix) = {
+        let mut rng = rand::thread_rng();
+        let random_bytes: Vec<u8> = (0..32).map(|_| rng.gen()).collect();
+        let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&random_bytes);
+        let prefix_bytes: Vec<u8> = (0..4).map(|_| rng.gen()).collect();
+        let prefix = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&prefix_bytes);
+        let full_key = format!("{}.{}", prefix, secret);
+        (full_key, prefix)
+    };
     let key_hash = hash_api_key(&full_key)
         .map_err(|e| sqlx::Error::Protocol(format!("API key hashing failed: {}", e)))?;
     let now = chrono::Utc::now().timestamp();

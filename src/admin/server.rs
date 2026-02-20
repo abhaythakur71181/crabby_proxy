@@ -68,15 +68,25 @@ pub async fn run_admin_server(state: AppState, addr: SocketAddr) -> Result<(), s
             "/api/users/:id/quota",
             axum::routing::put(handlers::quotas::update_user_quota),
         )
-        // TODO: Fix Handler trait issue with 4 extractors in Axum 0.7
-        // API key management routes (temporarily disabled)
-        // .route("/api/users/:id/api-keys", post(handlers::users::create_api_key))
-        // .route("/api/users/:id/api-keys", get(handlers::users::list_api_keys))
-        // .route("/api/users/:id/api-keys/:key_id", delete(handlers::users::revoke_api_key))
+        // API key management routes
+        .route(
+            "/api/users/:id/api-keys",
+            post(handlers::users::create_api_key),
+        )
+        .route(
+            "/api/users/:id/api-keys",
+            get(handlers::users::list_api_keys),
+        )
+        .route(
+            "/api/users/:id/api-keys/:key_id",
+            delete(handlers::users::revoke_api_key),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             super::auth::auth_middleware,
-        ));
+        ))
+        // Limit request body to 1MB to prevent OOM from large payloads
+        .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024));
 
     let cors = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
