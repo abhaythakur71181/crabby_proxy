@@ -34,22 +34,14 @@ pub async fn auth_middleware(
             let token = auth.trim_start_matches("Bearer ");
             match jwt::validate_jwt(token, &jwt_secret) {
                 Ok(claims) => {
-                    // JWT claims.sub contains username, need to fetch user_id
-                    let username = claims.sub;
-                    match users::get_user_by_username(&state.db_pool, &username).await {
-                        Ok(Some(user)) => {
-                            let user_id = user.id;
-                            request.extensions_mut().insert(user_id);
-                            if let Err(e) = check_user_rate_limit(&state, user_id).await {
-                                tracing::warn!("Rate limit exceeded for user {}: {}", user_id, e);
-                                return Err(StatusCode::TOO_MANY_REQUESTS);
-                            }
-                            return Ok(next.run(request).await);
-                        }
-                        _ => {
-                            return Err(StatusCode::UNAUTHORIZED);
-                        }
+                    // Use user_id directly from JWT claims (avoids DB lookup)
+                    let user_id = claims.user_id;
+                    request.extensions_mut().insert(user_id);
+                    if let Err(e) = check_user_rate_limit(&state, user_id).await {
+                        tracing::warn!("Rate limit exceeded for user {}: {}", user_id, e);
+                        return Err(StatusCode::TOO_MANY_REQUESTS);
                     }
+                    return Ok(next.run(request).await);
                 }
                 Err(_) => {
                     return Err(StatusCode::UNAUTHORIZED);

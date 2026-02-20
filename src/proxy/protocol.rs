@@ -518,10 +518,40 @@ impl ProxyProtocol {
             user_id.push(byte[0]);
         }
 
-        Ok(ProxyTarget {
-            host: ip.to_string(),
-            port,
-        })
+        // SOCKS4a: If IP is 0.0.0.x (x != 0), the hostname follows the user ID
+        let host = if ip.octets()[0] == 0
+            && ip.octets()[1] == 0
+            && ip.octets()[2] == 0
+            && ip.octets()[3] != 0
+        {
+            // Read null-terminated domain name (max 255 bytes)
+            const MAX_DOMAIN_LEN: usize = 255;
+            let mut domain = Vec::new();
+            loop {
+                let mut byte = [0u8; 1];
+                stream.read_exact(&mut byte).await?;
+                if byte[0] == 0 {
+                    break;
+                }
+                if domain.len() >= MAX_DOMAIN_LEN {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "SOCKS4a domain name exceeds 255 bytes",
+                    ));
+                }
+                domain.push(byte[0]);
+            }
+            String::from_utf8(domain).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Invalid SOCKS4a domain name encoding",
+                )
+            })?
+        } else {
+            ip.to_string()
+        };
+
+        Ok(ProxyTarget { host, port })
     }
 
     async fn parse_socks5_target(stream: &mut ClientStream) -> io::Result<ProxyTarget> {
