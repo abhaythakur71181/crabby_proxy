@@ -13,6 +13,7 @@ pub struct ConnectionInfo {
     pub target_addr: String,
     pub protocol: ProxyProtocol,
     pub state: ConnectionState,
+    pub user_id: Option<i64>,
     pub bytes_sent: u64,
     pub bytes_received: u64,
     pub created_at: i64,
@@ -50,6 +51,7 @@ pub trait StateBackend: Send + Sync {
     async fn delete_connection(&self, id: Uuid) -> StateResult<()>;
     async fn list_connections(&self) -> StateResult<Vec<ConnectionInfo>>;
     async fn count_connections(&self) -> StateResult<usize>;
+    async fn count_user_connections(&self, user_id: i64) -> StateResult<usize>;
 
     // Pending connections (TODO: for approval workflow)
     async fn get_pending(&self, id: Uuid) -> StateResult<ConnectionRequest>;

@@ -63,6 +63,15 @@ impl StateBackend for MemoryBackend {
         Ok(self.connections.read().await.len())
     }
 
+    async fn count_user_connections(&self, user_id: i64) -> StateResult<usize> {
+        let connections = self.connections.read().await;
+        let count = connections
+            .values()
+            .filter(|c| c.user_id == Some(user_id))
+            .count();
+        Ok(count)
+    }
+
     async fn get_pending(&self, _id: Uuid) -> StateResult<ConnectionRequest> {
         // Can't return because ConnectionRequest doesn't implement Clone
         // This is a limitation of the in-memory backend

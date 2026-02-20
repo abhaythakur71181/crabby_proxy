@@ -67,6 +67,7 @@ pub(crate) struct UserRateLimitConfig {
     rps: u32,
     burst: u32,
     enabled: bool,
+    pub(crate) max_connections: i32,
     cached_at: std::time::Instant,
 }
 
@@ -130,15 +131,30 @@ impl UserRateLimiter {
         None
     }
 
-    /// Cache user rate limit configuration
-    pub async fn cache_config(&self, user_id: i64, rps: u32, burst: u32, enabled: bool) {
+    /// Cache user rate limit configuration (includes max_connections)
+    pub async fn cache_config(
+        &self,
+        user_id: i64,
+        rps: u32,
+        burst: u32,
+        enabled: bool,
+        max_connections: i32,
+    ) {
         let config = UserRateLimitConfig {
             rps,
             burst,
             enabled,
+            max_connections,
             cached_at: std::time::Instant::now(),
         };
         self.user_configs.write().await.insert(user_id, config);
+    }
+
+    /// Get cached max_connections for a user (returns None if cache miss)
+    pub async fn get_cached_max_connections(&self, user_id: i64) -> Option<i32> {
+        self.get_cached_config(user_id)
+            .await
+            .map(|c| c.max_connections)
     }
 
     /// Invalidate cache for specific user (call when user settings change)

@@ -132,6 +132,7 @@ async fn check_user_rate_limit(state: &AppState, user_id: i64) -> Result<(), &'s
             user.rate_limit_rps as u32,
             user.rate_limit_burst as u32,
             user.rate_limit_enabled,
+            user.max_connections,
         )
         .await;
     // Check if rate limiting is enabled for this user
