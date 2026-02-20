@@ -186,6 +186,10 @@ pub async fn create_api_key(
     Extension(current_user_id): Extension<i64>,
     Json(request): Json<CreateApiKeyRequest>,
 ) -> Result<(StatusCode, Json<CreateApiKeyResponse>), StatusCode> {
+    // Extract fields from request immediately to avoid holding non-Send types across .await
+    let req_name = request.name;
+    let req_expires = request.expires_in_days;
+
     let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -200,15 +204,15 @@ pub async fn create_api_key(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let name = if request.name.is_empty() {
+    let name = if req_name.is_empty() {
         None
     } else {
-        Some(request.name)
+        Some(req_name)
     };
-    let expires_in_days = if request.expires_in_days == 0 {
+    let expires_in_days = if req_expires == 0 {
         None
     } else {
-        Some(request.expires_in_days)
+        Some(req_expires)
     };
 
     let (plaintext_key, api_key) =
