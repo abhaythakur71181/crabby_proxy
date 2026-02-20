@@ -141,3 +141,68 @@ pub async fn get_all_time_usage(
         total_bandwidth: stats.total_bandwidth,
     }))
 }
+
+// --- System-wide usage ---
+
+#[derive(Serialize)]
+pub struct SystemUsageSummaryResponse {
+    pub period_days: i32,
+    pub total_connections: i64,
+    pub total_bytes_sent: i64,
+    pub total_bytes_received: i64,
+    pub total_bandwidth: i64,
+    pub unique_users: i64,
+    pub top_users: Vec<TopUserResponse>,
+}
+
+#[derive(Serialize)]
+pub struct TopUserResponse {
+    pub user_id: i64,
+    pub total_bandwidth: i64,
+    pub connection_count: i64,
+}
+
+/// GET /api/usage/summary - System-wide usage dashboard (admin only)
+pub async fn get_system_usage_summary(
+    State(state): State<AppState>,
+    axum::Extension(current_user_id): axum::Extension<i64>,
+    Query(params): Query<UsageQuery>,
+) -> Result<Json<SystemUsageSummaryResponse>, StatusCode> {
+    let current_user =
+        crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
+    current_user.require_admin()?;
+
+    let days = params.days.unwrap_or(30);
+    let top_limit = params.limit.unwrap_or(10);
+
+    let stats = usage::get_system_usage_stats(&state.db_pool, days)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get system usage stats: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let top_users = usage::get_top_users_by_bandwidth(&state.db_pool, days, top_limit)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get top users: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(Json(SystemUsageSummaryResponse {
+        period_days: days,
+        total_connections: stats.total_connections,
+        total_bytes_sent: stats.total_bytes_sent,
+        total_bytes_received: stats.total_bytes_received,
+        total_bandwidth: stats.total_bandwidth,
+        unique_users: stats.unique_users,
+        top_users: top_users
+            .into_iter()
+            .map(|u| TopUserResponse {
+                user_id: u.user_id,
+                total_bandwidth: u.total_bandwidth,
+                connection_count: u.connection_count,
+            })
+            .collect(),
+    }))
+}

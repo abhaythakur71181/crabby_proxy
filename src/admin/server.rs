@@ -59,6 +59,11 @@ pub async fn run_admin_server(state: AppState, addr: SocketAddr) -> Result<(), s
             "/api/users/:id/usage/all-time",
             get(handlers::usage::get_all_time_usage),
         )
+        // System-wide usage dashboard
+        .route(
+            "/api/usage/summary",
+            get(handlers::usage::get_system_usage_summary),
+        )
         // Quota management routes
         .route(
             "/api/users/:id/quota",

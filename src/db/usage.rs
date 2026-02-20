@@ -130,6 +130,88 @@ pub async fn get_all_time_usage(
     })
 }
 
+/// System-wide usage statistics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemUsageStats {
+    pub total_connections: i64,
+    pub total_bytes_sent: i64,
+    pub total_bytes_received: i64,
+    pub total_bandwidth: i64,
+    pub unique_users: i64,
+}
+
+/// Get system-wide usage statistics for a time period
+pub async fn get_system_usage_stats(
+    pool: &SqlitePool,
+    days: i32,
+) -> Result<SystemUsageStats, sqlx::Error> {
+    let cutoff = chrono::Utc::now().timestamp() - (days as i64 * 86400);
+    let row = sqlx::query(
+        r#"
+        SELECT
+            COUNT(*) as total_connections,
+            COALESCE(SUM(bytes_sent), 0) as total_bytes_sent,
+            COALESCE(SUM(bytes_received), 0) as total_bytes_received,
+            COALESCE(SUM(bytes_sent + bytes_received), 0) as total_bandwidth,
+            COUNT(DISTINCT user_id) as unique_users
+        FROM usage
+        WHERE started_at >= ?
+        "#,
+    )
+    .bind(cutoff)
+    .fetch_one(pool)
+    .await?;
+    Ok(SystemUsageStats {
+        total_connections: row.get(0),
+        total_bytes_sent: row.get(1),
+        total_bytes_received: row.get(2),
+        total_bandwidth: row.get(3),
+        unique_users: row.get(4),
+    })
+}
+
+/// Top users by bandwidth
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopUserUsage {
+    pub user_id: i64,
+    pub total_bandwidth: i64,
+    pub connection_count: i64,
+}
+
+/// Get top N users by bandwidth usage in a time period
+pub async fn get_top_users_by_bandwidth(
+    pool: &SqlitePool,
+    days: i32,
+    limit: i32,
+) -> Result<Vec<TopUserUsage>, sqlx::Error> {
+    let cutoff = chrono::Utc::now().timestamp() - (days as i64 * 86400);
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            user_id,
+            SUM(bytes_sent + bytes_received) as total_bandwidth,
+            COUNT(*) as connection_count
+        FROM usage
+        WHERE started_at >= ?
+        GROUP BY user_id
+        ORDER BY total_bandwidth DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(cutoff)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| TopUserUsage {
+            user_id: r.get(0),
+            total_bandwidth: r.get(1),
+            connection_count: r.get(2),
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,5 +448,99 @@ mod tests {
 
         assert_eq!(stats2.connection_count, 1);
         assert_eq!(stats2.total_bytes_sent, 500);
+    }
+
+    #[tokio::test]
+    async fn test_system_usage_stats() {
+        let pool = setup_test_db().await;
+        let now = chrono::Utc::now().timestamp();
+
+        // Record usage for two different users
+        record_usage(
+            &pool,
+            1,
+            "conn1",
+            "127.0.0.1",
+            "example.com",
+            "http",
+            now - 100,
+            now,
+            1000,
+            2000,
+            "success",
+        )
+        .await
+        .unwrap();
+        record_usage(
+            &pool,
+            2,
+            "conn2",
+            "10.0.0.1",
+            "test.com",
+            "https",
+            now - 50,
+            now,
+            500,
+            1500,
+            "success",
+        )
+        .await
+        .unwrap();
+
+        let stats = get_system_usage_stats(&pool, 1).await.unwrap();
+
+        assert_eq!(stats.total_connections, 2);
+        assert_eq!(stats.total_bytes_sent, 1500);
+        assert_eq!(stats.total_bytes_received, 3500);
+        assert_eq!(stats.total_bandwidth, 5000);
+        assert_eq!(stats.unique_users, 2);
+    }
+
+    #[tokio::test]
+    async fn test_top_users_by_bandwidth() {
+        let pool = setup_test_db().await;
+        let now = chrono::Utc::now().timestamp();
+
+        // User 1: 3000 bytes total bandwidth
+        record_usage(
+            &pool,
+            1,
+            "conn1",
+            "127.0.0.1",
+            "example.com",
+            "http",
+            now - 100,
+            now,
+            1000,
+            2000,
+            "success",
+        )
+        .await
+        .unwrap();
+        // User 2: 8000 bytes total bandwidth
+        record_usage(
+            &pool,
+            2,
+            "conn2",
+            "10.0.0.1",
+            "test.com",
+            "https",
+            now - 50,
+            now,
+            3000,
+            5000,
+            "success",
+        )
+        .await
+        .unwrap();
+
+        let top = get_top_users_by_bandwidth(&pool, 1, 10).await.unwrap();
+
+        assert_eq!(top.len(), 2);
+        // User 2 should be first (higher bandwidth)
+        assert_eq!(top[0].user_id, 2);
+        assert_eq!(top[0].total_bandwidth, 8000);
+        assert_eq!(top[1].user_id, 1);
+        assert_eq!(top[1].total_bandwidth, 3000);
     }
 }

@@ -265,6 +265,7 @@ async fn handle_client(
         target_addr: format!("{:?}", target),
         protocol: protocol.clone(),
         state: crate::connection::ConnectionState::Active,
+        user_id,
         bytes_sent: 0,
         bytes_received: 0,
         created_at: chrono::Utc::now().timestamp(),
@@ -303,6 +304,58 @@ async fn handle_client(
                     let _ =
                         send_error_response(&protocol, &mut stream, ErrorType::Connection).await;
                     return; // Fail-closed: reject on DB error
+                }
+            }
+
+            // Enforce per-user concurrent connection limit
+            match state.state.count_user_connections(uid).await {
+                Ok(active_count) => {
+                    // Try cache first (populated by auth middleware, 60s TTL)
+                    let max_connections = match state
+                        .user_rate_limiter
+                        .get_cached_max_connections(uid)
+                        .await
+                    {
+                        Some(mc) => mc as usize,
+                        None => {
+                            // Cache miss: fetch from DB and cache for next time
+                            match crate::db::users::get_user_by_id(&state.db_pool, uid).await {
+                                Ok(Some(user)) => {
+                                    state
+                                        .user_rate_limiter
+                                        .cache_config(
+                                            uid,
+                                            user.rate_limit_rps as u32,
+                                            user.rate_limit_burst as u32,
+                                            user.rate_limit_enabled,
+                                            user.max_connections,
+                                        )
+                                        .await;
+                                    user.max_connections as usize
+                                }
+                                _ => 5,
+                            }
+                        }
+                    };
+                    if active_count >= max_connections {
+                        tracing::warn!(
+                            "User {} has {} active connections (max {}), rejecting",
+                            uid,
+                            active_count,
+                            max_connections
+                        );
+                        crate::metrics::ACTIVE_CONNECTIONS
+                            .with_label_values(&[&protocol.to_string()])
+                            .dec();
+                        let _ =
+                            send_error_response(&protocol, &mut stream, ErrorType::QuotaExceeded)
+                                .await;
+                        return;
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Error counting user connections for {}: {}", uid, e);
+                    // Non-fatal: allow connection if counting fails
                 }
             }
         }
@@ -353,22 +406,37 @@ async fn handle_client(
                 .inc();
         }
         Err((e, error_type)) => {
-            tracing::error!(
-                "Error [{}] for {}: {}",
-                match error_type {
-                    ErrorType::Handshake => "handshake",
-                    ErrorType::Connection => "connection",
-                    ErrorType::Response => "response",
-                    ErrorType::Timeout => "timeout",
-                    ErrorType::Tunnel => "tunnel",
-                    ErrorType::QuotaExceeded => "quota_exceeded",
-                },
-                client_addr,
-                e
-            );
+            let error_label = match error_type {
+                ErrorType::Handshake => "handshake",
+                ErrorType::Connection => "connection",
+                ErrorType::Response => "response",
+                ErrorType::Timeout => "timeout",
+                ErrorType::Tunnel => "tunnel",
+                ErrorType::QuotaExceeded => "quota_exceeded",
+            };
+            tracing::error!("Error [{}] for {}: {}", error_label, client_addr, e);
             crate::metrics::REQUESTS_TOTAL
                 .with_label_values(&[&protocol.to_string(), "failed"])
                 .inc();
+            // Record failed connection usage for authenticated users
+            if let Some(uid) = user_id {
+                if uid > 0 {
+                    let _ = crate::db::usage::record_usage(
+                        &state.db_pool,
+                        uid,
+                        &conn_id.to_string(),
+                        &client_addr.ip().to_string(),
+                        &target_addr_str,
+                        &protocol.to_string(),
+                        started_at,
+                        ended_at,
+                        0,
+                        0,
+                        error_label,
+                    )
+                    .await;
+                }
+            }
             if error_type != ErrorType::Tunnel {
                 let _ = send_error_response(&protocol, &mut stream, error_type).await;
             }

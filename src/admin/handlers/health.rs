@@ -15,6 +15,9 @@ pub struct StatsResponse {
     pub uptime_seconds: u64,
     pub active_connections: usize,
     pub total_connections: u64,
+    pub total_bytes_sent: u64,
+    pub total_bytes_received: u64,
+    pub total_bandwidth: u64,
 }
 
 pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -33,9 +36,21 @@ pub async fn stats(State(state): State<AppState>) -> Json<StatsResponse> {
         .get_counter("total_connections")
         .await
         .unwrap_or(0);
+
+    // Read bandwidth from Prometheus counters
+    let bytes_sent = crate::metrics::BYTES_TRANSFERRED
+        .with_label_values(&["sent"])
+        .get() as u64;
+    let bytes_received = crate::metrics::BYTES_TRANSFERRED
+        .with_label_values(&["received"])
+        .get() as u64;
+
     Json(StatsResponse {
         uptime_seconds: state.uptime().as_secs(),
         active_connections: active_count,
         total_connections: total_count,
+        total_bytes_sent: bytes_sent,
+        total_bytes_received: bytes_received,
+        total_bandwidth: bytes_sent + bytes_received,
     })
 }
