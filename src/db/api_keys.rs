@@ -34,7 +34,7 @@ pub async fn verify_api_key(
 
     // Verify against matching keys (typically 0 or 1 result)
     for key in keys {
-        if verify_hash(key_value, &key.key_hash) {
+        if verify_hash(key_value, &key.key_hash).await {
             let _ = update_last_used(pool, key.id).await;
             return Ok(true);
         }
@@ -53,13 +53,18 @@ async fn update_last_used(pool: &SqlitePool, key_id: i64) -> Result<(), sqlx::Er
     Ok(())
 }
 
-fn verify_hash(password: &str, hash: &str) -> bool {
-    let parsed_hash = match PasswordHash::new(hash) {
-        Ok(h) => h,
-        Err(_) => return false,
-    };
-
-    Argon2::default()
-        .verify_password(password.as_bytes(), &parsed_hash)
-        .is_ok()
+async fn verify_hash(password: &str, hash: &str) -> bool {
+    let password = password.to_string();
+    let hash = hash.to_string();
+    tokio::task::spawn_blocking(move || {
+        let parsed_hash = match PasswordHash::new(&hash) {
+            Ok(h) => h,
+            Err(_) => return false,
+        };
+        Argon2::default()
+            .verify_password(password.as_bytes(), &parsed_hash)
+            .is_ok()
+    })
+    .await
+    .unwrap_or(false)
 }

@@ -59,6 +59,10 @@ pub struct AppState {
 
     // Graceful shutdown signal
     pub shutdown_tx: tokio::sync::broadcast::Sender<()>,
+
+    // Quota check cache: user_id -> (allowed, cached_at)
+    // Caches the boolean result of check_quota for 30s to avoid SUM() per connection
+    pub quota_cache: Arc<dashmap::DashMap<i64, (bool, std::time::Instant)>>,
 }
 
 impl AppState {
@@ -163,6 +167,7 @@ impl AppState {
             login_rate_limiter,
             ip_filter,
             shutdown_tx,
+            quota_cache: Arc::new(dashmap::DashMap::new()),
         })
     }
 

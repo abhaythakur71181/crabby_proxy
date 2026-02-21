@@ -202,8 +202,8 @@ impl<R: AsyncRead, W: AsyncWrite> TunnelStream<R, W> {
         R: AsyncReadExt + Unpin,
         W: AsyncWriteExt + Unpin,
     {
-        let mut buf = [0u8; 8192];
-        let mut total = 0;
+        let mut buf = [0u8; 65536];
+        let mut total = 0u64;
 
         loop {
             let n = self.read.read(&mut buf).await?;
@@ -211,12 +211,11 @@ impl<R: AsyncRead, W: AsyncWrite> TunnelStream<R, W> {
                 break;
             }
 
-            tracing::trace!("{} - {} bytes", label, n);
-
             self.write.write_all(&buf[..n]).await?;
             total += n as u64;
         }
 
+        tracing::debug!("{} - {} bytes transferred", label, total);
         self.write.shutdown().await?;
         Ok(total)
     }

@@ -254,3 +254,194 @@ impl Default for Config {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // === Default Config Tests ===
+
+    #[test]
+    fn test_default_config_creates_valid_config() {
+        let config = Config::default();
+        assert_eq!(config.server.proxy_bind, "0.0.0.0:8080");
+        assert_eq!(config.server.admin_bind, "127.0.0.1:8081");
+        assert_eq!(config.server.max_connections, 10000);
+        assert_eq!(config.server.connection_timeout, 30);
+        assert!(!config.server.tls_enabled);
+    }
+
+    #[test]
+    fn test_default_database_config() {
+        let config = Config::default();
+        assert_eq!(config.database.path, "sqlite:proxy.db");
+        assert_eq!(config.database.max_connections, 10);
+    }
+
+    #[test]
+    fn test_default_auth_config() {
+        let config = Config::default();
+        assert!(config.authentication.enabled);
+        assert!(matches!(config.authentication.method, AuthMethod::Basic));
+        assert_eq!(config.authentication.username, "admin");
+        assert_eq!(config.authentication.password, "changeme");
+        assert_eq!(
+            config.authentication.jwt_secret,
+            "change_me_to_a_secure_random_string"
+        );
+        assert_eq!(config.authentication.jwt_expiration, 3600 * 24);
+    }
+
+    #[test]
+    fn test_default_protocols_all_enabled() {
+        let config = Config::default();
+        assert!(config.protocols.enable_http);
+        assert!(config.protocols.enable_https);
+        assert!(config.protocols.enable_socks4);
+        assert!(config.protocols.enable_socks5);
+        assert!(config.protocols.auto_detect);
+    }
+
+    #[test]
+    fn test_default_features_config() {
+        let config = Config::default();
+        assert!(!config.features.connection_approval);
+        assert_eq!(config.features.approval_timeout, 300);
+        assert!(!config.features.reverse_tunnels);
+        assert_eq!(config.features.tunnel_port_start, 10000);
+        assert_eq!(config.features.tunnel_port_end, 10999);
+    }
+
+    #[test]
+    fn test_default_state_config() {
+        let config = Config::default();
+        assert_eq!(config.state.backend, "memory");
+        assert_eq!(config.state.redis_url, "redis://localhost:6379");
+        assert_eq!(config.state.redis_pool_size, 10);
+    }
+
+    #[test]
+    fn test_default_rate_limiting_config() {
+        let config = Config::default();
+        assert!(config.rate_limiting.enabled);
+        assert_eq!(config.rate_limiting.requests_per_second, 100);
+        assert_eq!(config.rate_limiting.burst_size, 200);
+        assert_eq!(config.rate_limiting.ban_duration, 300);
+    }
+
+    #[test]
+    fn test_default_filtering_config() {
+        let config = Config::default();
+        assert!(config.filtering.ip_allowlist.is_empty());
+        assert!(config.filtering.ip_blocklist.is_empty());
+        assert!(!config.filtering.geo_blocking_enabled);
+        assert!(config.filtering.blocked_countries.is_empty());
+        assert_eq!(config.filtering.ip_filter_mode, "blocklist");
+        assert!(!config.filtering.ip_filter_enabled);
+    }
+
+    #[test]
+    fn test_default_logging_config() {
+        let config = Config::default();
+        assert_eq!(config.logging.level, "info");
+        assert!(matches!(config.logging.format, LogFormat::Pretty));
+        assert!(!config.logging.file_enabled);
+        assert!(config.logging.access_log_enabled);
+    }
+
+    #[test]
+    fn test_default_metrics_config() {
+        let config = Config::default();
+        assert!(config.metrics.enabled);
+        assert_eq!(config.metrics.prometheus_path, "/metrics");
+        assert_eq!(config.metrics.update_interval, 10);
+    }
+
+    #[test]
+    fn test_default_admin_config() {
+        let config = Config::default();
+        assert!(config.admin.enabled);
+        assert!(config.admin.auth_enabled);
+        assert_eq!(config.admin.admin_username, "admin");
+        assert_eq!(config.admin.admin_password, "secure_admin_password");
+        assert!(config.admin.websocket_enabled);
+        assert!(config.admin.cors_enabled);
+        assert_eq!(config.admin.cors_origins.len(), 1);
+        assert_eq!(config.admin.cors_origins[0], "http://localhost:3000");
+    }
+
+    #[test]
+    fn test_default_advanced_config() {
+        let config = Config::default();
+        assert_eq!(config.advanced.buffer_size, 8192);
+        assert!(!config.advanced.connection_pooling);
+        assert_eq!(config.advanced.pool_max_idle_per_host, 10);
+        assert!(!config.advanced.http2_enabled);
+        assert_eq!(config.advanced.dns_cache_ttl, 300);
+    }
+
+    // === Config cloneability ===
+
+    #[test]
+    fn test_config_is_cloneable() {
+        let config1 = Config::default();
+        let config2 = config1.clone();
+        assert_eq!(config1.server.proxy_bind, config2.server.proxy_bind);
+    }
+
+    // === Config serialization/deserialization roundtrip ===
+
+    #[test]
+    fn test_config_toml_roundtrip() {
+        let config = Config::default();
+        let toml_str = toml::to_string(&config).expect("Failed to serialize to TOML");
+        let deserialized: Config =
+            toml::from_str(&toml_str).expect("Failed to deserialize from TOML");
+
+        assert_eq!(config.server.proxy_bind, deserialized.server.proxy_bind);
+        assert_eq!(
+            config.server.max_connections,
+            deserialized.server.max_connections
+        );
+        assert_eq!(config.database.path, deserialized.database.path);
+        assert_eq!(
+            config.authentication.jwt_expiration,
+            deserialized.authentication.jwt_expiration
+        );
+    }
+
+    // === from_file error on missing file ===
+
+    #[test]
+    fn test_from_file_nonexistent_file_returns_error() {
+        let result = Config::from_file("/nonexistent/path/config.toml");
+        assert!(result.is_err());
+    }
+
+    // === FilterConfig default helper ===
+
+    #[test]
+    fn test_default_ip_filter_mode_function() {
+        assert_eq!(default_ip_filter_mode(), "blocklist");
+    }
+
+    // === AuthMethod variants ===
+
+    #[test]
+    fn test_auth_method_debug() {
+        let basic = AuthMethod::Basic;
+        let none = AuthMethod::None;
+        assert_eq!(format!("{:?}", basic), "Basic");
+        assert_eq!(format!("{:?}", none), "None");
+    }
+
+    // === LogFormat variants ===
+
+    #[test]
+    fn test_log_format_debug() {
+        let json = LogFormat::Json;
+        let pretty = LogFormat::Pretty;
+        assert_eq!(format!("{:?}", json), "Json");
+        assert_eq!(format!("{:?}", pretty), "Pretty");
+    }
+}

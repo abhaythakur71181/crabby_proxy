@@ -203,3 +203,157 @@ impl CurrentUser {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn root_admin_user() -> CurrentUser {
+        CurrentUser {
+            id: 1,
+            username: "root".to_string(),
+            role: "root_admin".to_string(),
+        }
+    }
+
+    fn admin_user() -> CurrentUser {
+        CurrentUser {
+            id: 2,
+            username: "admin1".to_string(),
+            role: "admin".to_string(),
+        }
+    }
+
+    fn regular_user(id: i64) -> CurrentUser {
+        CurrentUser {
+            id,
+            username: format!("user{}", id),
+            role: "user".to_string(),
+        }
+    }
+
+    // === can_access_user Tests ===
+
+    #[test]
+    fn test_root_admin_can_access_any_user() {
+        let user = root_admin_user();
+        assert!(user.can_access_user(1));
+        assert!(user.can_access_user(2));
+        assert!(user.can_access_user(999));
+    }
+
+    #[test]
+    fn test_admin_can_access_any_user() {
+        let user = admin_user();
+        assert!(user.can_access_user(1));
+        assert!(user.can_access_user(2));
+        assert!(user.can_access_user(999));
+    }
+
+    #[test]
+    fn test_regular_user_can_access_own_data() {
+        let user = regular_user(10);
+        assert!(user.can_access_user(10));
+    }
+
+    #[test]
+    fn test_regular_user_cannot_access_other_users() {
+        let user = regular_user(10);
+        assert!(!user.can_access_user(1));
+        assert!(!user.can_access_user(11));
+        assert!(!user.can_access_user(999));
+    }
+
+    // === require_admin Tests ===
+
+    #[test]
+    fn test_root_admin_passes_require_admin() {
+        let user = root_admin_user();
+        assert!(user.require_admin().is_ok());
+    }
+
+    #[test]
+    fn test_admin_passes_require_admin() {
+        let user = admin_user();
+        assert!(user.require_admin().is_ok());
+    }
+
+    #[test]
+    fn test_regular_user_fails_require_admin() {
+        let user = regular_user(10);
+        let result = user.require_admin();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn test_unknown_role_fails_require_admin() {
+        let user = CurrentUser {
+            id: 99,
+            username: "custom".to_string(),
+            role: "moderator".to_string(),
+        };
+        assert!(user.require_admin().is_err());
+    }
+
+    // === is_public_endpoint Tests ===
+
+    #[test]
+    fn test_health_is_public() {
+        assert!(is_public_endpoint("/health"));
+    }
+
+    #[test]
+    fn test_metrics_is_public() {
+        assert!(is_public_endpoint("/metrics"));
+    }
+
+    #[test]
+    fn test_login_is_public() {
+        assert!(is_public_endpoint("/api/login"));
+    }
+
+    #[test]
+    fn test_users_is_not_public() {
+        assert!(!is_public_endpoint("/api/users"));
+    }
+
+    #[test]
+    fn test_connections_is_not_public() {
+        assert!(!is_public_endpoint("/api/connections"));
+    }
+
+    #[test]
+    fn test_config_is_not_public() {
+        assert!(!is_public_endpoint("/api/config"));
+    }
+
+    #[test]
+    fn test_empty_path_is_not_public() {
+        assert!(!is_public_endpoint(""));
+    }
+
+    #[test]
+    fn test_root_path_is_not_public() {
+        assert!(!is_public_endpoint("/"));
+    }
+
+    // === CurrentUser Debug/Clone ===
+
+    #[test]
+    fn test_current_user_clone() {
+        let user = root_admin_user();
+        let cloned = user.clone();
+        assert_eq!(cloned.id, user.id);
+        assert_eq!(cloned.username, user.username);
+        assert_eq!(cloned.role, user.role);
+    }
+
+    #[test]
+    fn test_current_user_debug() {
+        let user = admin_user();
+        let debug = format!("{:?}", user);
+        assert!(debug.contains("admin1"));
+        assert!(debug.contains("admin"));
+    }
+}

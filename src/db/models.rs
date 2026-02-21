@@ -52,6 +52,221 @@ impl User {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_user_with_role(role: &str) -> User {
+        User {
+            id: 1,
+            username: "testuser".to_string(),
+            password_hash: "hash".to_string(),
+            role: role.to_string(),
+            created_by: None,
+            created_at: 1700000000,
+            updated_at: 1700000000,
+            is_active: true,
+            max_connections: 5,
+            bandwidth_limit_mb: 1000,
+            rate_limit_enabled: true,
+            rate_limit_rps: 10,
+            rate_limit_burst: 20,
+            allowed_protocols: None,
+            ip_whitelist: None,
+            notes: None,
+            last_login_at: None,
+        }
+    }
+
+    // === Role enum Tests ===
+
+    #[test]
+    fn test_role_equality() {
+        assert_eq!(Role::RootAdmin, Role::RootAdmin);
+        assert_eq!(Role::Admin, Role::Admin);
+        assert_eq!(Role::User, Role::User);
+        assert_ne!(Role::RootAdmin, Role::Admin);
+        assert_ne!(Role::Admin, Role::User);
+        assert_ne!(Role::RootAdmin, Role::User);
+    }
+
+    #[test]
+    fn test_role_clone() {
+        let role = Role::Admin;
+        let cloned = role.clone();
+        assert_eq!(role, cloned);
+    }
+
+    #[test]
+    fn test_role_debug() {
+        assert_eq!(format!("{:?}", Role::RootAdmin), "RootAdmin");
+        assert_eq!(format!("{:?}", Role::Admin), "Admin");
+        assert_eq!(format!("{:?}", Role::User), "User");
+    }
+
+    #[test]
+    fn test_role_serialization() {
+        let json = serde_json::to_string(&Role::RootAdmin).unwrap();
+        assert_eq!(json, "\"root_admin\"");
+
+        let json = serde_json::to_string(&Role::Admin).unwrap();
+        assert_eq!(json, "\"admin\"");
+
+        let json = serde_json::to_string(&Role::User).unwrap();
+        assert_eq!(json, "\"user\"");
+    }
+
+    #[test]
+    fn test_role_deserialization() {
+        let role: Role = serde_json::from_str("\"root_admin\"").unwrap();
+        assert_eq!(role, Role::RootAdmin);
+
+        let role: Role = serde_json::from_str("\"admin\"").unwrap();
+        assert_eq!(role, Role::Admin);
+
+        let role: Role = serde_json::from_str("\"user\"").unwrap();
+        assert_eq!(role, Role::User);
+    }
+
+    #[test]
+    fn test_role_serialization_roundtrip() {
+        for role in &[Role::RootAdmin, Role::Admin, Role::User] {
+            let json = serde_json::to_string(role).unwrap();
+            let deserialized: Role = serde_json::from_str(&json).unwrap();
+            assert_eq!(*role, deserialized);
+        }
+    }
+
+    // === User::get_role Tests ===
+
+    #[test]
+    fn test_get_role_root_admin() {
+        let user = test_user_with_role("root_admin");
+        assert_eq!(user.get_role(), Role::RootAdmin);
+    }
+
+    #[test]
+    fn test_get_role_admin() {
+        let user = test_user_with_role("admin");
+        assert_eq!(user.get_role(), Role::Admin);
+    }
+
+    #[test]
+    fn test_get_role_user() {
+        let user = test_user_with_role("user");
+        assert_eq!(user.get_role(), Role::User);
+    }
+
+    #[test]
+    fn test_get_role_unknown_defaults_to_user() {
+        let user = test_user_with_role("moderator");
+        assert_eq!(user.get_role(), Role::User);
+    }
+
+    #[test]
+    fn test_get_role_empty_string_defaults_to_user() {
+        let user = test_user_with_role("");
+        assert_eq!(user.get_role(), Role::User);
+    }
+
+    #[test]
+    fn test_get_role_case_sensitive() {
+        // "Admin" (capitalized) should NOT match "admin"
+        let user = test_user_with_role("Admin");
+        assert_eq!(user.get_role(), Role::User); // Defaults to User
+    }
+
+    // === CreateUserRequest Tests ===
+
+    #[test]
+    fn test_create_user_request_serialization() {
+        let req = CreateUserRequest {
+            username: "newuser".to_string(),
+            password: "pass123!".to_string(),
+            role: Role::User,
+            max_connections: Some(10),
+            bandwidth_limit_mb: Some(500),
+            rate_limit_enabled: Some(true),
+            rate_limit_rps: Some(20),
+            allowed_protocols: Some(vec!["http".to_string(), "https".to_string()]),
+            notes: Some("test user".to_string()),
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"username\":\"newuser\""));
+        assert!(json.contains("\"role\":\"user\""));
+    }
+
+    #[test]
+    fn test_create_user_request_deserialization() {
+        let json = r#"{
+            "username": "alice",
+            "password": "secure123!",
+            "role": "admin",
+            "max_connections": 25
+        }"#;
+
+        let req: CreateUserRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.username, "alice");
+        assert_eq!(req.password, "secure123!");
+        assert_eq!(req.role, Role::Admin);
+        assert_eq!(req.max_connections, Some(25));
+        assert!(req.bandwidth_limit_mb.is_none());
+        assert!(req.notes.is_none());
+    }
+
+    #[test]
+    fn test_create_user_request_clone() {
+        let req = CreateUserRequest {
+            username: "clone_test".to_string(),
+            password: "pass123!".to_string(),
+            role: Role::User,
+            max_connections: None,
+            bandwidth_limit_mb: None,
+            rate_limit_enabled: None,
+            rate_limit_rps: None,
+            allowed_protocols: None,
+            notes: None,
+        };
+        let cloned = req.clone();
+        assert_eq!(cloned.username, "clone_test");
+    }
+
+    // === User struct tests ===
+
+    #[test]
+    fn test_user_clone() {
+        let user = test_user_with_role("admin");
+        let cloned = user.clone();
+        assert_eq!(cloned.id, user.id);
+        assert_eq!(cloned.username, user.username);
+        assert_eq!(cloned.role, user.role);
+    }
+
+    #[test]
+    fn test_user_optional_fields_none() {
+        let user = test_user_with_role("user");
+        assert!(user.created_by.is_none());
+        assert!(user.allowed_protocols.is_none());
+        assert!(user.ip_whitelist.is_none());
+        assert!(user.notes.is_none());
+        assert!(user.last_login_at.is_none());
+    }
+
+    #[test]
+    fn test_user_optional_fields_some() {
+        let mut user = test_user_with_role("user");
+        user.created_by = Some(1);
+        user.allowed_protocols = Some("[\"http\"]".to_string());
+        user.ip_whitelist = Some("10.0.0.0/8".to_string());
+        user.notes = Some("test notes".to_string());
+        user.last_login_at = Some(1700000000);
+
+        assert_eq!(user.created_by, Some(1));
+        assert!(user.allowed_protocols.unwrap().contains("http"));
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateUserRequest {
     pub username: String,

@@ -123,59 +123,282 @@ pub fn validate_hostname(hostname: &str) -> Result<(), &'static str> {
 mod tests {
     use super::*;
 
+    // === Username Tests ===
+
     #[test]
-    fn test_validate_username() {
+    fn test_validate_username_valid_cases() {
         assert!(validate_username("user123").is_ok());
         assert!(validate_username("test_user").is_ok());
         assert!(validate_username("user-name").is_ok());
-
-        assert!(validate_username("").is_err());
-        assert!(validate_username("a".repeat(65).as_str()).is_err());
-        assert!(validate_username("user@name").is_err());
-        assert!(validate_username("_username").is_err());
+        assert!(validate_username("a").is_ok());
+        assert!(validate_username("A").is_ok());
+        assert!(validate_username("1user").is_ok());
+        assert!(validate_username("user_name-123").is_ok());
     }
 
     #[test]
-    fn test_validate_password() {
+    fn test_validate_username_empty() {
+        let result = validate_username("");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Username cannot be empty");
+    }
+
+    #[test]
+    fn test_validate_username_too_long() {
+        let result = validate_username(&"a".repeat(65));
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "Username must be 64 characters or less"
+        );
+    }
+
+    #[test]
+    fn test_validate_username_exactly_64_chars() {
+        assert!(validate_username(&"a".repeat(64)).is_ok());
+    }
+
+    #[test]
+    fn test_validate_username_special_chars_rejected() {
+        assert!(validate_username("user@name").is_err());
+        assert!(validate_username("user.name").is_err());
+        assert!(validate_username("user name").is_err());
+        assert!(validate_username("user!name").is_err());
+        assert!(validate_username("user#name").is_err());
+        assert!(validate_username("user/name").is_err());
+    }
+
+    #[test]
+    fn test_validate_username_must_start_with_alphanumeric() {
+        assert!(validate_username("_username").is_err());
+        assert!(validate_username("-username").is_err());
+    }
+
+    #[test]
+    fn test_validate_username_unicode_accepted() {
+        // Rust's char::is_alphanumeric() returns true for Unicode letters,
+        // so Unicode usernames are accepted by the current implementation.
+        assert!(validate_username("üser").is_ok());
+        assert!(validate_username("用户").is_ok());
+    }
+
+    // === Password Tests ===
+
+    #[test]
+    fn test_validate_password_valid_cases() {
         assert!(validate_password("password123").is_ok());
         assert!(validate_password("MyPass1!").is_ok());
-
-        assert!(validate_password("short1").is_err());
-        assert!(validate_password("nodigits").is_err());
-        assert!(validate_password("12345678").is_err());
+        assert!(validate_password("abcdefg1").is_ok());
+        assert!(validate_password("1abcdefg").is_ok());
+        assert!(validate_password("P@ssw0rd!#$%").is_ok());
     }
 
     #[test]
-    fn test_validate_port() {
+    fn test_validate_password_too_short() {
+        let result = validate_password("short1");
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "Password must be at least 8 characters"
+        );
+    }
+
+    #[test]
+    fn test_validate_password_exactly_8_chars() {
+        assert!(validate_password("abcdefg1").is_ok());
+    }
+
+    #[test]
+    fn test_validate_password_no_digits() {
+        let result = validate_password("nodigits");
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "Password must contain at least one letter and one number"
+        );
+    }
+
+    #[test]
+    fn test_validate_password_no_letters() {
+        let result = validate_password("12345678");
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "Password must contain at least one letter and one number"
+        );
+    }
+
+    #[test]
+    fn test_validate_password_too_long() {
+        let long_pw = "a".repeat(127) + "1";
+        assert!(long_pw.len() == 128);
+        assert!(validate_password(&long_pw).is_ok());
+
+        let too_long = "a".repeat(128) + "1";
+        assert!(validate_password(&too_long).is_err());
+    }
+
+    #[test]
+    fn test_validate_password_only_special_chars() {
+        assert!(validate_password("!@#$%^&*").is_err());
+    }
+
+    #[test]
+    fn test_validate_password_empty() {
+        assert!(validate_password("").is_err());
+    }
+
+    // === Port Tests ===
+
+    #[test]
+    fn test_validate_port_valid_cases() {
         assert!(validate_port(8080).is_ok());
         assert!(validate_port(65535).is_ok());
-
-        assert!(validate_port(0).is_err());
-        assert!(validate_port(80).is_err());
-        assert!(validate_port(1023).is_err());
+        assert!(validate_port(1024).is_ok());
+        assert!(validate_port(3000).is_ok());
     }
 
     #[test]
-    fn test_validate_ip_or_cidr() {
-        assert!(validate_ip_or_cidr("192.168.1.1").is_ok());
-        assert!(validate_ip_or_cidr("192.168.1.0/24").is_ok());
-        assert!(validate_ip_or_cidr("::1").is_ok());
-        assert!(validate_ip_or_cidr("2001:db8::/32").is_ok());
+    fn test_validate_port_zero() {
+        let result = validate_port(0);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Port cannot be 0");
+    }
 
-        assert!(validate_ip_or_cidr("invalid").is_err());
+    #[test]
+    fn test_validate_port_privileged() {
+        assert!(validate_port(80).is_err());
+        assert!(validate_port(443).is_err());
+        assert!(validate_port(22).is_err());
+        assert!(validate_port(1023).is_err());
+        assert!(validate_port(1).is_err());
+    }
+
+    #[test]
+    fn test_validate_port_boundary_1024() {
+        assert!(validate_port(1023).is_err());
+        assert!(validate_port(1024).is_ok());
+    }
+
+    // === IP/CIDR Tests ===
+
+    #[test]
+    fn test_validate_ip_or_cidr_ipv4() {
+        assert!(validate_ip_or_cidr("192.168.1.1").is_ok());
+        assert!(validate_ip_or_cidr("10.0.0.0").is_ok());
+        assert!(validate_ip_or_cidr("0.0.0.0").is_ok());
+        assert!(validate_ip_or_cidr("255.255.255.255").is_ok());
+    }
+
+    #[test]
+    fn test_validate_ip_or_cidr_ipv6() {
+        assert!(validate_ip_or_cidr("::1").is_ok());
+        assert!(validate_ip_or_cidr("::").is_ok());
+        assert!(validate_ip_or_cidr("2001:db8::1").is_ok());
+        assert!(validate_ip_or_cidr("fe80::1").is_ok());
+    }
+
+    #[test]
+    fn test_validate_ip_or_cidr_valid_cidr() {
+        assert!(validate_ip_or_cidr("192.168.1.0/24").is_ok());
+        assert!(validate_ip_or_cidr("10.0.0.0/8").is_ok());
+        assert!(validate_ip_or_cidr("192.168.1.1/32").is_ok());
+        assert!(validate_ip_or_cidr("0.0.0.0/0").is_ok());
+        assert!(validate_ip_or_cidr("2001:db8::/32").is_ok());
+    }
+
+    #[test]
+    fn test_validate_ip_or_cidr_invalid_prefix_ipv4() {
         assert!(validate_ip_or_cidr("192.168.1.0/33").is_err());
+    }
+
+    #[test]
+    fn test_validate_ip_or_cidr_invalid_prefix_ipv6() {
         assert!(validate_ip_or_cidr("::1/129").is_err());
     }
 
     #[test]
-    fn test_validate_hostname() {
+    fn test_validate_ip_or_cidr_invalid_formats() {
+        assert!(validate_ip_or_cidr("invalid").is_err());
+        assert!(validate_ip_or_cidr("").is_err());
+        assert!(validate_ip_or_cidr("not/an/ip").is_err());
+        assert!(validate_ip_or_cidr("192.168.1.0/abc").is_err());
+        assert!(validate_ip_or_cidr("300.300.300.300").is_err());
+    }
+
+    // === Hostname Tests ===
+
+    #[test]
+    fn test_validate_hostname_valid_cases() {
         assert!(validate_hostname("example.com").is_ok());
         assert!(validate_hostname("sub.example.com").is_ok());
         assert!(validate_hostname("my-server.local").is_ok());
+        assert!(validate_hostname("a.b.c.d.e").is_ok());
+        assert!(validate_hostname("host123").is_ok());
+        assert!(validate_hostname("123host").is_ok());
+        assert!(validate_hostname("a").is_ok());
+        assert!(validate_hostname("test-host-name.example.co.uk").is_ok());
+    }
 
-        assert!(validate_hostname("").is_err());
+    #[test]
+    fn test_validate_hostname_empty() {
+        let result = validate_hostname("");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Hostname cannot be empty");
+    }
+
+    #[test]
+    fn test_validate_hostname_too_long() {
+        let long = format!("{}.com", "a".repeat(250));
+        assert!(validate_hostname(&long).is_err());
+    }
+
+    #[test]
+    fn test_validate_hostname_label_too_long() {
+        let result = validate_hostname(&"a".repeat(64));
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "Hostname label too long (max 63 characters)"
+        );
+    }
+
+    #[test]
+    fn test_validate_hostname_label_exactly_63_chars() {
+        assert!(validate_hostname(&"a".repeat(63)).is_ok());
+    }
+
+    #[test]
+    fn test_validate_hostname_starts_with_hyphen() {
         assert!(validate_hostname("-invalid.com").is_err());
+    }
+
+    #[test]
+    fn test_validate_hostname_ends_with_hyphen() {
         assert!(validate_hostname("invalid-.com").is_err());
-        assert!(validate_hostname("a".repeat(64).as_str()).is_err());
+    }
+
+    #[test]
+    fn test_validate_hostname_empty_label() {
+        assert!(validate_hostname("..com").is_err());
+        assert!(validate_hostname("host..com").is_err());
+    }
+
+    #[test]
+    fn test_validate_hostname_special_chars() {
+        assert!(validate_hostname("host_name.com").is_err());
+        assert!(validate_hostname("host@name.com").is_err());
+        assert!(validate_hostname("host name.com").is_err());
+    }
+
+    #[test]
+    fn test_validate_hostname_trailing_dot() {
+        // Trailing dot creates an empty label
+        assert!(validate_hostname("example.com.").is_err());
+    }
+
+    #[test]
+    fn test_validate_hostname_leading_dot() {
+        assert!(validate_hostname(".example.com").is_err());
     }
 }
