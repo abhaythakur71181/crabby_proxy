@@ -834,3 +834,411 @@ impl MultiProtocolProxy {
         Ok(Self { listener })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // === ProxyProtocol Display Tests ===
+
+    #[test]
+    fn test_protocol_display_tcp() {
+        assert_eq!(ProxyProtocol::TCP.to_string(), "TCP");
+    }
+
+    #[test]
+    fn test_protocol_display_http() {
+        assert_eq!(ProxyProtocol::HTTP.to_string(), "HTTP");
+    }
+
+    #[test]
+    fn test_protocol_display_https() {
+        assert_eq!(ProxyProtocol::HTTPS.to_string(), "HTTPS");
+    }
+
+    #[test]
+    fn test_protocol_display_socks4() {
+        assert_eq!(ProxyProtocol::SOCKS4.to_string(), "SOCKS4");
+    }
+
+    #[test]
+    fn test_protocol_display_socks5() {
+        assert_eq!(ProxyProtocol::SOCKS5.to_string(), "SOCKS5");
+    }
+
+    // === ProxyProtocol Equality Tests ===
+
+    #[test]
+    fn test_protocol_equality() {
+        assert_eq!(ProxyProtocol::HTTP, ProxyProtocol::HTTP);
+        assert_ne!(ProxyProtocol::HTTP, ProxyProtocol::HTTPS);
+        assert_ne!(ProxyProtocol::SOCKS4, ProxyProtocol::SOCKS5);
+    }
+
+    // === detect_from_peek Tests ===
+
+    #[test]
+    fn test_detect_http_get() {
+        let buf = [b'G', b'E', b'T', b' '];
+        let protocol = ProxyProtocol::detect_from_peek(&buf).unwrap();
+        assert_eq!(protocol, ProxyProtocol::HTTP);
+    }
+
+    #[test]
+    fn test_detect_http_post() {
+        let buf = [b'P', b'O', b'S', b'T'];
+        let protocol = ProxyProtocol::detect_from_peek(&buf).unwrap();
+        assert_eq!(protocol, ProxyProtocol::HTTP);
+    }
+
+    #[test]
+    fn test_detect_http_put() {
+        let buf = [b'P', b'U', b'T', b' '];
+        let protocol = ProxyProtocol::detect_from_peek(&buf).unwrap();
+        assert_eq!(protocol, ProxyProtocol::HTTP);
+    }
+
+    #[test]
+    fn test_detect_http_head() {
+        let buf = [b'H', b'E', b'A', b'D'];
+        let protocol = ProxyProtocol::detect_from_peek(&buf).unwrap();
+        assert_eq!(protocol, ProxyProtocol::HTTP);
+    }
+
+    #[test]
+    fn test_detect_http_delete() {
+        let buf = [b'D', b'E', b'L', b'E'];
+        let protocol = ProxyProtocol::detect_from_peek(&buf).unwrap();
+        assert_eq!(protocol, ProxyProtocol::HTTP);
+    }
+
+    #[test]
+    fn test_detect_http_connect() {
+        let buf = [b'C', b'O', b'N', b'N'];
+        let protocol = ProxyProtocol::detect_from_peek(&buf).unwrap();
+        assert_eq!(protocol, ProxyProtocol::HTTP);
+    }
+
+    #[test]
+    fn test_detect_https_tls_handshake() {
+        let buf = [0x16, 0x03, 0x01, 0x00]; // TLS record header
+        let protocol = ProxyProtocol::detect_from_peek(&buf).unwrap();
+        assert_eq!(protocol, ProxyProtocol::HTTPS);
+    }
+
+    #[test]
+    fn test_detect_socks5() {
+        let buf = [0x05, 0x01, 0x00, 0x00]; // SOCKS5 version
+        let protocol = ProxyProtocol::detect_from_peek(&buf).unwrap();
+        assert_eq!(protocol, ProxyProtocol::SOCKS5);
+    }
+
+    #[test]
+    fn test_detect_socks4() {
+        let buf = [0x04, 0x01, 0x00, 0x50]; // SOCKS4 CONNECT to port 80
+        let protocol = ProxyProtocol::detect_from_peek(&buf).unwrap();
+        assert_eq!(protocol, ProxyProtocol::SOCKS4);
+    }
+
+    #[test]
+    fn test_detect_unknown_defaults_to_tcp() {
+        let buf = [0xFF, 0xFF, 0xFF, 0xFF];
+        let protocol = ProxyProtocol::detect_from_peek(&buf).unwrap();
+        assert_eq!(protocol, ProxyProtocol::TCP);
+    }
+
+    #[test]
+    fn test_detect_zeros_defaults_to_tcp() {
+        let buf = [0x00, 0x00, 0x00, 0x00];
+        let protocol = ProxyProtocol::detect_from_peek(&buf).unwrap();
+        assert_eq!(protocol, ProxyProtocol::TCP);
+    }
+
+    #[test]
+    fn test_detect_binary_data_defaults_to_tcp() {
+        let buf = [0xAB, 0xCD, 0xEF, 0x12];
+        let protocol = ProxyProtocol::detect_from_peek(&buf).unwrap();
+        assert_eq!(protocol, ProxyProtocol::TCP);
+    }
+
+    // === parse_connect_target Tests ===
+
+    #[test]
+    fn test_parse_connect_target_valid() {
+        let target = ProxyProtocol::parse_connect_target("example.com:443").unwrap();
+        assert_eq!(target.host, "example.com");
+        assert_eq!(target.port, 443);
+    }
+
+    #[test]
+    fn test_parse_connect_target_with_ip() {
+        let target = ProxyProtocol::parse_connect_target("192.168.1.1:8080").unwrap();
+        assert_eq!(target.host, "192.168.1.1");
+        assert_eq!(target.port, 8080);
+    }
+
+    #[test]
+    fn test_parse_connect_target_port_80() {
+        let target = ProxyProtocol::parse_connect_target("example.com:80").unwrap();
+        assert_eq!(target.port, 80);
+    }
+
+    #[test]
+    fn test_parse_connect_target_missing_port() {
+        let result = ProxyProtocol::parse_connect_target("example.com");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_connect_target_invalid_port() {
+        let result = ProxyProtocol::parse_connect_target("example.com:notaport");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_connect_target_empty_string() {
+        let result = ProxyProtocol::parse_connect_target("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_connect_target_too_many_colons() {
+        // IPv6-like address without brackets — treated as invalid
+        let result = ProxyProtocol::parse_connect_target("::1:443");
+        assert!(result.is_err());
+    }
+
+    // === parse_http_target Tests ===
+
+    #[test]
+    fn test_parse_http_target_valid_url() {
+        let target = ProxyProtocol::parse_http_target("http://example.com/path").unwrap();
+        assert_eq!(target.host, "example.com");
+        assert_eq!(target.port, 80);
+    }
+
+    #[test]
+    fn test_parse_http_target_with_port() {
+        let target = ProxyProtocol::parse_http_target("http://example.com:8080/path").unwrap();
+        assert_eq!(target.host, "example.com");
+        assert_eq!(target.port, 8080);
+    }
+
+    #[test]
+    fn test_parse_http_target_no_path() {
+        let target = ProxyProtocol::parse_http_target("http://example.com").unwrap();
+        assert_eq!(target.host, "example.com");
+        assert_eq!(target.port, 80);
+    }
+
+    #[test]
+    fn test_parse_http_target_ip_address() {
+        let target = ProxyProtocol::parse_http_target("http://10.0.0.1:3000/api").unwrap();
+        assert_eq!(target.host, "10.0.0.1");
+        assert_eq!(target.port, 3000);
+    }
+
+    #[test]
+    fn test_parse_http_target_invalid_scheme() {
+        let result = ProxyProtocol::parse_http_target("https://example.com");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_http_target_no_scheme() {
+        let result = ProxyProtocol::parse_http_target("example.com");
+        assert!(result.is_err());
+    }
+
+    // === extract_proxy_auth_header Tests ===
+
+    #[test]
+    fn test_extract_proxy_auth_header_present() {
+        let request = "CONNECT example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic dXNlcjpwYXNz\r\nHost: example.com\r\n\r\n";
+        let header = ProxyProtocol::extract_proxy_auth_header(request);
+        assert!(header.is_some());
+        assert_eq!(header.unwrap(), "Basic dXNlcjpwYXNz");
+    }
+
+    #[test]
+    fn test_extract_proxy_auth_header_case_insensitive() {
+        let request = "GET / HTTP/1.1\r\nproxy-authorization: Basic abc123\r\n\r\n";
+        let header = ProxyProtocol::extract_proxy_auth_header(request);
+        assert!(header.is_some());
+        assert_eq!(header.unwrap(), "Basic abc123");
+    }
+
+    #[test]
+    fn test_extract_proxy_auth_header_not_present() {
+        let request = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let header = ProxyProtocol::extract_proxy_auth_header(request);
+        assert!(header.is_none());
+    }
+
+    #[test]
+    fn test_extract_proxy_auth_header_empty_request() {
+        let header = ProxyProtocol::extract_proxy_auth_header("");
+        assert!(header.is_none());
+    }
+
+    #[test]
+    fn test_extract_proxy_auth_header_with_authorization_not_proxy() {
+        // Should NOT match regular Authorization header
+        let request = "GET / HTTP/1.1\r\nAuthorization: Basic abc123\r\n\r\n";
+        let header = ProxyProtocol::extract_proxy_auth_header(request);
+        assert!(header.is_none());
+    }
+
+    // === extract_sni_from_tls Tests ===
+
+    #[test]
+    fn test_extract_sni_too_short_data() {
+        let data = vec![0x16, 0x03, 0x01]; // Too short
+        let sni = ProxyProtocol::extract_sni_from_tls(&data);
+        assert!(sni.is_none());
+    }
+
+    #[test]
+    fn test_extract_sni_not_handshake() {
+        let mut data = vec![0x17; 100]; // Application data, not handshake
+        let sni = ProxyProtocol::extract_sni_from_tls(&data);
+        assert!(sni.is_none());
+    }
+
+    #[test]
+    fn test_extract_sni_not_client_hello() {
+        let mut data = vec![0u8; 100];
+        data[0] = 0x16; // Handshake
+        data[5] = 0x02; // ServerHello, not ClientHello
+        let sni = ProxyProtocol::extract_sni_from_tls(&data);
+        assert!(sni.is_none());
+    }
+
+    #[test]
+    fn test_extract_sni_valid_client_hello() {
+        // Construct a minimal valid TLS ClientHello with SNI
+        let hostname = b"example.com";
+        let hostname_len = hostname.len();
+
+        let mut data = Vec::new();
+
+        // TLS Record Header
+        data.push(0x16); // ContentType: Handshake
+        data.push(0x03);
+        data.push(0x01); // ProtocolVersion: TLS 1.0
+                         // Record length placeholder (will calculate)
+        let record_len_pos = data.len();
+        data.push(0x00);
+        data.push(0x00);
+
+        // Handshake Header
+        data.push(0x01); // HandshakeType: ClientHello
+                         // Handshake length placeholder
+        let hs_len_pos = data.len();
+        data.push(0x00);
+        data.push(0x00);
+        data.push(0x00);
+
+        // ClientHello body
+        let client_hello_start = data.len();
+        data.push(0x03);
+        data.push(0x03); // ProtocolVersion: TLS 1.2
+        data.extend_from_slice(&[0u8; 32]); // Random
+
+        // Session ID (empty)
+        data.push(0x00);
+
+        // Cipher Suites (one cipher)
+        data.push(0x00);
+        data.push(0x02); // Length: 2
+        data.push(0x00);
+        data.push(0x2F); // TLS_RSA_WITH_AES_128_CBC_SHA
+
+        // Compression Methods
+        data.push(0x01); // Length: 1
+        data.push(0x00); // null compression
+
+        // Extensions
+        // SNI Extension
+        let sni_ext_data_len = 2 + 1 + 2 + hostname_len; // list_len(2) + type(1) + name_len(2) + name
+        let extensions_len = 4 + sni_ext_data_len; // ext_type(2) + ext_len(2) + data
+
+        data.push((extensions_len >> 8) as u8);
+        data.push((extensions_len & 0xFF) as u8);
+
+        // SNI extension type (0x0000)
+        data.push(0x00);
+        data.push(0x00);
+        // SNI extension data length
+        data.push((sni_ext_data_len >> 8) as u8);
+        data.push((sni_ext_data_len & 0xFF) as u8);
+
+        // Server Name List
+        let name_list_len = 1 + 2 + hostname_len; // type(1) + len(2) + name
+        data.push((name_list_len >> 8) as u8);
+        data.push((name_list_len & 0xFF) as u8);
+
+        // Server Name
+        data.push(0x00); // NameType: host_name
+        data.push((hostname_len >> 8) as u8);
+        data.push((hostname_len & 0xFF) as u8);
+        data.extend_from_slice(hostname);
+
+        // Fill in lengths
+        let client_hello_len = data.len() - client_hello_start;
+        let record_len = data.len() - 5; // Exclude TLS record header
+
+        data[record_len_pos] = (record_len >> 8) as u8;
+        data[record_len_pos + 1] = (record_len & 0xFF) as u8;
+
+        data[hs_len_pos] = ((client_hello_len >> 16) & 0xFF) as u8;
+        data[hs_len_pos + 1] = ((client_hello_len >> 8) & 0xFF) as u8;
+        data[hs_len_pos + 2] = (client_hello_len & 0xFF) as u8;
+
+        let sni = ProxyProtocol::extract_sni_from_tls(&data);
+        assert_eq!(sni, Some("example.com".to_string()));
+    }
+
+    // === ProxyTarget Tests ===
+
+    #[test]
+    fn test_proxy_target_clone() {
+        let target = ProxyTarget {
+            host: "test.com".to_string(),
+            port: 8080,
+        };
+        let cloned = target.clone();
+        assert_eq!(cloned.host, "test.com");
+        assert_eq!(cloned.port, 8080);
+    }
+
+    #[test]
+    fn test_proxy_target_debug() {
+        let target = ProxyTarget {
+            host: "debug.com".to_string(),
+            port: 443,
+        };
+        let debug = format!("{:?}", target);
+        assert!(debug.contains("debug.com"));
+        assert!(debug.contains("443"));
+    }
+
+    // === ProxyProtocol serialization ===
+
+    #[test]
+    fn test_protocol_serialization_roundtrip() {
+        let protocols = vec![
+            ProxyProtocol::TCP,
+            ProxyProtocol::HTTP,
+            ProxyProtocol::HTTPS,
+            ProxyProtocol::SOCKS4,
+            ProxyProtocol::SOCKS5,
+        ];
+
+        for proto in protocols {
+            let json = serde_json::to_string(&proto).unwrap();
+            let deserialized: ProxyProtocol = serde_json::from_str(&json).unwrap();
+            assert_eq!(proto, deserialized);
+        }
+    }
+}

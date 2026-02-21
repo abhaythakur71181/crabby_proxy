@@ -44,3 +44,100 @@ impl ConfigEnvExt for Config {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn test_apply_env_jwt_secret_override() {
+        std::env::set_var("CRABBY_JWT_SECRET", "my_test_secret");
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        assert_eq!(config.authentication.jwt_secret, "my_test_secret");
+        std::env::remove_var("CRABBY_JWT_SECRET");
+    }
+
+    #[test]
+    #[serial]
+    fn test_apply_env_admin_password_override() {
+        std::env::set_var("CRABBY_ADMIN_PASSWORD", "super_secure_pw");
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        assert_eq!(config.admin.admin_password, "super_secure_pw");
+        std::env::remove_var("CRABBY_ADMIN_PASSWORD");
+    }
+
+    #[test]
+    #[serial]
+    fn test_apply_env_basic_auth_password_override() {
+        std::env::set_var("CRABBY_BASIC_AUTH_PASSWORD", "basic_pw_123");
+        let mut config = Config::default();
+        config.apply_env_overrides();
+        assert_eq!(config.authentication.password, "basic_pw_123");
+        std::env::remove_var("CRABBY_BASIC_AUTH_PASSWORD");
+    }
+
+    #[test]
+    #[serial]
+    fn test_apply_env_no_overrides_keeps_defaults() {
+        std::env::remove_var("CRABBY_JWT_SECRET");
+        std::env::remove_var("CRABBY_ADMIN_PASSWORD");
+        std::env::remove_var("CRABBY_BASIC_AUTH_PASSWORD");
+
+        let mut config = Config::default();
+        // Change to non-default so the warning branches don't trigger
+        config.authentication.jwt_secret = "custom_secret".to_string();
+        config.admin.admin_password = "custom_admin_pw".to_string();
+        config.authentication.password = "custom_basic_pw".to_string();
+
+        config.apply_env_overrides();
+
+        // Without env vars, non-default values should be preserved
+        assert_eq!(config.authentication.jwt_secret, "custom_secret");
+        assert_eq!(config.admin.admin_password, "custom_admin_pw");
+        assert_eq!(config.authentication.password, "custom_basic_pw");
+    }
+
+    #[test]
+    #[serial]
+    fn test_apply_env_all_overrides_at_once() {
+        std::env::set_var("CRABBY_JWT_SECRET", "jwt_env");
+        std::env::set_var("CRABBY_ADMIN_PASSWORD", "admin_env");
+        std::env::set_var("CRABBY_BASIC_AUTH_PASSWORD", "basic_env");
+
+        let mut config = Config::default();
+        config.apply_env_overrides();
+
+        assert_eq!(config.authentication.jwt_secret, "jwt_env");
+        assert_eq!(config.admin.admin_password, "admin_env");
+        assert_eq!(config.authentication.password, "basic_env");
+
+        std::env::remove_var("CRABBY_JWT_SECRET");
+        std::env::remove_var("CRABBY_ADMIN_PASSWORD");
+        std::env::remove_var("CRABBY_BASIC_AUTH_PASSWORD");
+    }
+
+    #[test]
+    #[serial]
+    fn test_apply_env_defaults_trigger_warning_paths() {
+        // Ensure env vars are not set so the default-value warning paths execute
+        std::env::remove_var("CRABBY_JWT_SECRET");
+        std::env::remove_var("CRABBY_ADMIN_PASSWORD");
+        std::env::remove_var("CRABBY_BASIC_AUTH_PASSWORD");
+
+        let mut config = Config::default();
+        // Should not panic even when defaults are used
+        config.apply_env_overrides();
+
+        // Defaults should remain unchanged
+        assert_eq!(
+            config.authentication.jwt_secret,
+            "change_me_to_a_secure_random_string"
+        );
+        assert_eq!(config.admin.admin_password, "secure_admin_password");
+        assert_eq!(config.authentication.password, "changeme");
+    }
+}

@@ -94,11 +94,19 @@ async fn handle_client(
     state: AppState,
     conn_id: uuid::Uuid,
 ) {
-    // Check IP filter first (before any processing)
-    let config = state.config.read().await;
-    if config.filtering.ip_filter_enabled {
-        drop(config); // Release config lock
+    // Snapshot config values once to avoid multiple read locks per connection
+    let (ip_filter_enabled, rate_limiting_enabled, auth_required, socks4_enabled) = {
+        let config = state.config.read().await;
+        (
+            config.filtering.ip_filter_enabled,
+            config.rate_limiting.enabled,
+            config.authentication.enabled,
+            config.protocols.enable_socks4,
+        )
+    };
 
+    // Check IP filter first (before any processing)
+    if ip_filter_enabled {
         let ip_filter = state.ip_filter.read().await;
         if !ip_filter.is_allowed(client_addr.ip()) {
             tracing::warn!("Connection from {} blocked by IP filter", client_addr.ip());
@@ -110,15 +118,10 @@ async fn handle_client(
         crate::metrics::IP_FILTER_ACTIONS
             .with_label_values(&["allowed"])
             .inc();
-    } else {
-        drop(config);
     }
 
     // Check IP rate limiting
-    let config = state.config.read().await;
-    if config.rate_limiting.enabled {
-        drop(config);
-
+    if rate_limiting_enabled {
         if !state.ip_rate_limiter.check_ip(client_addr.ip()).await {
             tracing::warn!("Rate limit exceeded for {}", client_addr.ip());
             crate::metrics::RATE_LIMIT_EXCEEDED
@@ -126,8 +129,6 @@ async fn handle_client(
                 .inc();
             return; // Drop connection
         }
-    } else {
-        drop(config);
     }
 
     let mut protocol;
@@ -168,7 +169,6 @@ async fn handle_client(
     let mut buffered_stream = BufferedClientStream::new(stream);
 
     // If credentials are required, perform protocol-specific authentication
-    let auth_required = state.config.read().await.authentication.enabled;
     let user_id = if auth_required {
         match protocol.authenticate(&mut buffered_stream, &state).await {
             Ok((true, uid)) => {
@@ -199,32 +199,27 @@ async fn handle_client(
     };
 
     // Check SOCKS4 protocol restrictions (config-based with admin bypass)
-    if protocol == ProxyProtocol::SOCKS4 {
-        let config = state.config.read().await;
-        let socks4_enabled = config.protocols.enable_socks4;
-        drop(config);
-        if !socks4_enabled {
-            // Check if user is admin (admins bypass SOCKS4 restriction)
-            let is_admin = if let Some(uid) = user_id {
-                match crate::db::users::get_user_by_id(&state.db_pool, uid).await {
-                    Ok(Some(user)) => user.role == "root_admin" || user.role == "admin",
-                    _ => false,
-                }
-            } else {
-                false
-            };
-            if is_admin {
-                tracing::debug!("SOCKS4 allowed for admin user {:?}", user_id);
-            } else {
-                tracing::warn!(
-                    "SOCKS4 connection from {} rejected (protocol disabled for non-admin users)",
-                    client_addr
-                );
-                crate::metrics::AUTH_FAILURES
-                    .with_label_values(&["socks4_disabled"])
-                    .inc();
-                return;
+    if protocol == ProxyProtocol::SOCKS4 && !socks4_enabled {
+        // Check if user is admin (admins bypass SOCKS4 restriction)
+        let is_admin = if let Some(uid) = user_id {
+            match crate::db::users::get_user_by_id(&state.db_pool, uid).await {
+                Ok(Some(user)) => user.role == "root_admin" || user.role == "admin",
+                _ => false,
             }
+        } else {
+            false
+        };
+        if is_admin {
+            tracing::debug!("SOCKS4 allowed for admin user {:?}", user_id);
+        } else {
+            tracing::warn!(
+                "SOCKS4 connection from {} rejected (protocol disabled for non-admin users)",
+                client_addr
+            );
+            crate::metrics::AUTH_FAILURES
+                .with_label_values(&["socks4_disabled"])
+                .inc();
+            return;
         }
     }
 
@@ -283,28 +278,50 @@ async fn handle_client(
     // Check quota if user is authenticated (skip for config-based auth sentinel -1)
     if let Some(uid) = user_id {
         if uid > 0 {
-            match crate::db::quota::check_quota(&state.db_pool, uid).await {
-                Ok(true) => {
-                    tracing::debug!("User {} has remaining quota", uid);
+            // Check cached quota result first (30s TTL avoids SUM() per connection)
+            let quota_allowed = if let Some(entry) = state.quota_cache.get(&uid) {
+                let (allowed, cached_at) = entry.value();
+                if cached_at.elapsed() < std::time::Duration::from_secs(30) {
+                    Some(*allowed)
+                } else {
+                    None // Cache expired
                 }
-                Ok(false) => {
-                    tracing::warn!("Quota exceeded for user {}", uid);
-                    crate::metrics::ACTIVE_CONNECTIONS
-                        .with_label_values(&[&protocol.to_string()])
-                        .dec();
-                    let _ =
-                        send_error_response(&protocol, &mut stream, ErrorType::QuotaExceeded).await;
-                    return;
+            } else {
+                None // Cache miss
+            };
+
+            let has_quota = match quota_allowed {
+                Some(allowed) => allowed,
+                None => {
+                    // Cache miss or expired: query DB and cache result
+                    match crate::db::quota::check_quota(&state.db_pool, uid).await {
+                        Ok(allowed) => {
+                            state
+                                .quota_cache
+                                .insert(uid, (allowed, std::time::Instant::now()));
+                            allowed
+                        }
+                        Err(e) => {
+                            tracing::error!("Error checking quota for user {}: {}", uid, e);
+                            crate::metrics::ACTIVE_CONNECTIONS
+                                .with_label_values(&[&protocol.to_string()])
+                                .dec();
+                            let _ =
+                                send_error_response(&protocol, &mut stream, ErrorType::Connection)
+                                    .await;
+                            return; // Fail-closed: reject on DB error
+                        }
+                    }
                 }
-                Err(e) => {
-                    tracing::error!("Error checking quota for user {}: {}", uid, e);
-                    crate::metrics::ACTIVE_CONNECTIONS
-                        .with_label_values(&[&protocol.to_string()])
-                        .dec();
-                    let _ =
-                        send_error_response(&protocol, &mut stream, ErrorType::Connection).await;
-                    return; // Fail-closed: reject on DB error
-                }
+            };
+
+            if !has_quota {
+                tracing::warn!("Quota exceeded for user {}", uid);
+                crate::metrics::ACTIVE_CONNECTIONS
+                    .with_label_values(&[&protocol.to_string()])
+                    .dec();
+                let _ = send_error_response(&protocol, &mut stream, ErrorType::QuotaExceeded).await;
+                return;
             }
 
             // Enforce per-user concurrent connection limit
@@ -398,6 +415,8 @@ async fn handle_client(
                         "success",
                     )
                     .await;
+                    // Invalidate quota cache so next connection gets fresh check
+                    state.quota_cache.remove(&uid);
                 }
             }
             // Record successful request
@@ -435,6 +454,8 @@ async fn handle_client(
                         error_label,
                     )
                     .await;
+                    // Invalidate quota cache so next connection gets fresh check
+                    state.quota_cache.remove(&uid);
                 }
             }
             if error_type != ErrorType::Tunnel {

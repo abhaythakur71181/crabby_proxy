@@ -35,3 +35,8 @@ nonzero_ext = "0.3"
 ipnet = "2.9"
 prometheus = "0.13"
 lru = "0.12"
+dashmap = "6"
+
+[dev-dependencies]
+serial_test = "3.1"
+toml = "0.9.11"
