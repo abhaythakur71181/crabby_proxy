@@ -690,7 +690,26 @@ impl ProxyProtocol {
     }
 
     fn parse_connect_target(url: &str) -> io::Result<ProxyTarget> {
-        let parts: Vec<&str> = url.split(':').collect();
+        // Handle IPv6 bracket notation per RFC 7230 (e.g., [::1]:443)
+        if let Some(bracket_end) = url.find(']') {
+            if url.starts_with('[') {
+                let host = url[1..bracket_end].to_string();
+                let rest = &url[bracket_end + 1..];
+                if let Some(port_str) = rest.strip_prefix(':') {
+                    let port = port_str
+                        .parse::<u16>()
+                        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid port"))?;
+                    return Ok(ProxyTarget { host, port });
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "IPv6 address missing port",
+                ));
+            }
+        }
+
+        // Standard host:port parsing for IPv4/domain names
+        let parts: Vec<&str> = url.rsplitn(2, ':').collect();
         if parts.len() != 2 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -698,8 +717,8 @@ impl ProxyProtocol {
             ));
         }
 
-        let host = parts[0].to_string();
-        let port = parts[1]
+        let host = parts[1].to_string();
+        let port = parts[0]
             .parse::<u16>()
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid port"))?;
 
@@ -1002,9 +1021,24 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_connect_target_too_many_colons() {
-        // IPv6-like address without brackets — treated as invalid
-        let result = ProxyProtocol::parse_connect_target("::1:443");
+    fn test_parse_connect_target_bare_ipv6() {
+        // With rsplitn, bare ::1:443 parses correctly (host = ::1, port = 443)
+        let target = ProxyProtocol::parse_connect_target("::1:443").unwrap();
+        assert_eq!(target.host, "::1");
+        assert_eq!(target.port, 443);
+    }
+
+    #[test]
+    fn test_parse_connect_target_bracketed_ipv6() {
+        // B7: Bracketed IPv6 per RFC 7230
+        let target = ProxyProtocol::parse_connect_target("[::1]:443").unwrap();
+        assert_eq!(target.host, "::1");
+        assert_eq!(target.port, 443);
+    }
+
+    #[test]
+    fn test_parse_connect_target_bracketed_ipv6_no_port() {
+        let result = ProxyProtocol::parse_connect_target("[::1]");
         assert!(result.is_err());
     }
 
