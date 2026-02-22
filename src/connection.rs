@@ -46,7 +46,7 @@ pub enum DbType {
     Custom(String),
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConnectionRequest {
     pub id: Uuid,
     pub client_addr: SocketAddr,
@@ -54,7 +54,7 @@ pub struct ConnectionRequest {
     #[serde(skip, default = "Instant::now")]
     pub requested_at: Instant,
     #[serde(skip)]
-    pub response_tx: Option<oneshot::Sender<bool>>,
+    pub response_tx: Option<std::sync::Arc<std::sync::Mutex<Option<oneshot::Sender<bool>>>>>,
 }
 
 // Expanded approval response
@@ -98,7 +98,7 @@ impl ConnectionManager {
             client_addr,
             connection_type,
             requested_at: Instant::now(),
-            response_tx: Some(tx),
+            response_tx: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(tx)))),
         };
 
         self.pending.insert(id, request);
@@ -110,10 +110,14 @@ impl ConnectionManager {
     }
 
     pub fn approve_connection(&mut self, id: Uuid) -> bool {
-        if let Some(mut request) = self.pending.remove(&id) {
+        if let Some(request) = self.pending.remove(&id) {
             // Notify the waiting task
-            if let Some(tx) = request.response_tx.take() {
-                let _ = tx.send(true);
+            if let Some(tx_arc) = &request.response_tx {
+                if let Ok(mut guard) = tx_arc.lock() {
+                    if let Some(tx) = guard.take() {
+                        let _ = tx.send(true);
+                    }
+                }
             }
 
             // Mark as active
@@ -125,10 +129,14 @@ impl ConnectionManager {
     }
 
     pub fn reject_connection(&mut self, id: Uuid, _reason: String) -> bool {
-        if let Some(mut request) = self.pending.remove(&id) {
+        if let Some(request) = self.pending.remove(&id) {
             // Notify the waiting task
-            if let Some(tx) = request.response_tx.take() {
-                let _ = tx.send(false);
+            if let Some(tx_arc) = &request.response_tx {
+                if let Ok(mut guard) = tx_arc.lock() {
+                    if let Some(tx) = guard.take() {
+                        let _ = tx.send(false);
+                    }
+                }
             }
             true
         } else {
