@@ -9,6 +9,21 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+/// Normalize IPv4-mapped IPv6 addresses (::ffff:x.x.x.x) to IPv4
+/// Prevents bypass where same IP tracked as two different entries
+fn normalize_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                IpAddr::V4(v4)
+            } else {
+                ip
+            }
+        }
+        _ => ip,
+    }
+}
+
 /// Rate limiter for IP addresses (proxy layer)
 /// Uses DashMap for lock-free per-key access (no global write lock)
 #[derive(Clone)]
@@ -34,6 +49,8 @@ impl IpRateLimiter {
     /// Check if IP is allowed to make a request
     /// Uses DashMap entry API — only locks the shard containing this IP
     pub async fn check_ip(&self, ip: IpAddr) -> bool {
+        // INFO: Normalize IPv4-mapped IPv6 (::ffff:x.x.x.x) to IPv4
+        let ip = normalize_ip(ip);
         let limiter = self
             .limiters
             .entry(ip)
@@ -184,7 +201,7 @@ impl Default for UserRateLimiter {
 #[derive(Clone)]
 pub struct LoginRateLimiter {
     limiters: Arc<
-        RwLock<lru::LruCache<String, GovernorRateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
+        RwLock<lru::LruCache<IpAddr, GovernorRateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
     >,
     quota: Quota,
 }
@@ -210,11 +227,15 @@ impl LoginRateLimiter {
         }
     }
 
-    /// Check if IP is allowed to attempt login
+    /// Check if IP is allowed to attempt login (B15: use IpAddr to prevent string-key bypass)
     pub async fn check(&self, ip: &str) -> bool {
+        // Parse to IpAddr for consistent keying; fall back to allow if unparseable
+        let ip_addr: IpAddr = match ip.parse() {
+            Ok(addr) => normalize_ip(addr), // normalize IPv4-mapped IPv6
+            Err(_) => return true,
+        };
         let mut limiters = self.limiters.write().await;
-        let limiter =
-            limiters.get_or_insert(ip.to_string(), || GovernorRateLimiter::direct(self.quota));
+        let limiter = limiters.get_or_insert(ip_addr, || GovernorRateLimiter::direct(self.quota));
         limiter.check().is_ok()
     }
 
