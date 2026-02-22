@@ -69,10 +69,12 @@ impl ProxyProtocol {
         let request_data = String::from_utf8_lossy(&buffer[..n]);
         // Extract Proxy-Authorization header from HTTP request
         if let Some(auth_header) = Self::extract_proxy_auth_header(&request_data) {
-            // Try to get user_id from auth
             let user_id = Self::extract_user_id_from_header(auth_header, state).await;
-            if user_id.is_some() || Self::validate_auth_header(auth_header, state).await.is_ok() {
+            if user_id.is_some() {
                 return Ok((true, user_id));
+            }
+            if Self::validate_auth_header(auth_header, state).await.is_ok() {
+                return Ok((true, None));
             }
         }
 
