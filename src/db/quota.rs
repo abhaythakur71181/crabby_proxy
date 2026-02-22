@@ -45,16 +45,27 @@ pub async fn check_quota(pool: &SqlitePool, user_id: i64) -> Result<bool, sqlx::
 
 /// Get user's quota usage stats
 pub async fn get_quota_stats(pool: &SqlitePool, user_id: i64) -> Result<QuotaStats, sqlx::Error> {
+    let month_start = {
+        let now = chrono::Utc::now();
+        now.with_day(1)
+            .unwrap_or(now)
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp()
+    };
     let row: (Option<i64>, i64) = sqlx::query_as(
         r#"
         SELECT 
             monthly_bandwidth_quota as quota_bytes,
-            COALESCE((SELECT SUM(bytes_sent + bytes_received) FROM usage WHERE user_id = ?), 0) as used_bytes
+            COALESCE((SELECT SUM(bytes_sent + bytes_received) FROM usage WHERE user_id = ? AND started_at >= ?), 0) as used_bytes
         FROM users 
         WHERE id = ?
         "#
     )
     .bind(user_id)
+    .bind(month_start)
     .bind(user_id)
     .fetch_one(pool)
     .await?;
@@ -196,6 +207,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_quota_stats() {
         let pool = setup_test_db().await;
+        let now = chrono::Utc::now().timestamp();
 
         sqlx::query(
             "INSERT INTO users (username, monthly_bandwidth_quota) VALUES ('test', 1048576)",
@@ -205,8 +217,9 @@ mod tests {
         .unwrap();
 
         sqlx::query(
-            "INSERT INTO usage (user_id, bytes_sent, bytes_received) VALUES (1, 262144, 262144)",
+            "INSERT INTO usage (user_id, bytes_sent, bytes_received, started_at) VALUES (1, 262144, 262144, ?)",
         )
+        .bind(now)
         .execute(&pool)
         .await
         .unwrap();
