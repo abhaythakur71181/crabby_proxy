@@ -18,6 +18,23 @@ pub async fn create_pool(
         .connect(&url)
         .await?;
 
+    // Set critical SQLite pragmas
+    sqlx::query("PRAGMA journal_mode = WAL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("PRAGMA busy_timeout = 5000")
+        .execute(&pool)
+        .await?;
+    sqlx::query("PRAGMA synchronous = NORMAL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&pool)
+        .await?;
+    tracing::info!(
+        "SQLite pragmas set: WAL, busy_timeout=5000, synchronous=NORMAL, foreign_keys=ON"
+    );
+
     Ok(pool)
 }
 
