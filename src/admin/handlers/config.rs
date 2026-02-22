@@ -57,8 +57,15 @@ pub async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
 /// Reload configuration from file
 pub async fn reload_config(
     State(state): State<AppState>,
+    axum::Extension(current_user_id): axum::Extension<i64>,
 ) -> Result<Json<ReloadResponse>, StatusCode> {
-    tracing::info!("Configuration reload requested");
+    let current_user =
+        crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
+    current_user.require_admin()?;
+    tracing::info!(
+        "Configuration reload requested by admin user {}",
+        current_user_id
+    );
 
     match state.reload_config().await {
         Ok(_) => Ok(Json(ReloadResponse {
