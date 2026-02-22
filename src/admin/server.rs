@@ -93,10 +93,25 @@ pub async fn run_admin_server(state: AppState, addr: SocketAddr) -> Result<(), s
         // Limit request body to 1MB to prevent OOM from large payloads
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024));
 
-    let cors = CorsLayer::new()
-        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
-        .allow_headers(Any)
-        .allow_origin(Any); // TODO: restrict to admin UI origin
+    // S3: Use configured CORS origins instead of allow_origin(Any)
+    let cors_origins = state.config.read().await.admin.cors_origins.clone();
+    let cors = if cors_origins.is_empty() {
+        tracing::warn!("⚠️  No CORS origins configured, allowing all origins");
+        CorsLayer::new()
+            .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+            .allow_headers(Any)
+            .allow_origin(Any)
+    } else {
+        let origins: Vec<_> = cors_origins
+            .iter()
+            .filter_map(|o| o.parse::<axum::http::HeaderValue>().ok())
+            .collect();
+        tracing::info!("CORS allowed origins: {:?}", cors_origins);
+        CorsLayer::new()
+            .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+            .allow_headers(Any)
+            .allow_origin(origins)
+    };
     let app = Router::new()
         .merge(public_routes)
         .merge(protected_routes)

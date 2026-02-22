@@ -16,8 +16,16 @@ impl ConfigEnvExt for Config {
             tracing::info!("Using JWT secret from CRABBY_JWT_SECRET environment variable");
             self.authentication.jwt_secret = env_secret;
         } else if self.authentication.jwt_secret == "change_me_to_a_secure_random_string" {
+            // INFO: Auto-generate a random secret instead of running with default
+            use rand::Rng;
+            let secret: String = rand::thread_rng()
+                .sample_iter(&rand::distributions::Alphanumeric)
+                .take(64)
+                .map(char::from)
+                .collect();
+            self.authentication.jwt_secret = secret;
             tracing::warn!(
-                "⚠️  JWT secret is using default value! Set CRABBY_JWT_SECRET for production."
+                "⚠️  JWT secret was default — auto-generated a random one. Set CRABBY_JWT_SECRET for persistent sessions across restarts."
             );
         }
 
@@ -132,11 +140,12 @@ mod tests {
         // Should not panic even when defaults are used
         config.apply_env_overrides();
 
-        // Defaults should remain unchanged
-        assert_eq!(
+        // S2: JWT secret should be auto-generated (no longer the default)
+        assert_ne!(
             config.authentication.jwt_secret,
             "change_me_to_a_secure_random_string"
         );
+        assert_eq!(config.authentication.jwt_secret.len(), 64); // Auto-generated is 64 chars
         assert_eq!(config.admin.admin_password, "secure_admin_password");
         assert_eq!(config.authentication.password, "changeme");
     }
