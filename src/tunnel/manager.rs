@@ -83,6 +83,10 @@ impl TunnelManager {
     }
 
     pub async fn shutdown(&mut self) {
+        // INFO: Release all ports before clearing
+        for (&port, _) in &self.active_tunnels {
+            let _ = self.port_allocator.release_port(port);
+        }
         for (_, handles) in self.tasks.drain() {
             for h in handles {
                 h.abort();

@@ -58,8 +58,8 @@ pub async fn hand_shake(
     }
 
     if let Some(index) = partially_read_body_start_index {
-        if buffer[..].starts_with("HTTP/1.1 200 OK".as_bytes()) {
-            if index <= buffer.len() {
+        if buffer[..].starts_with("HTTP/1.1 200".as_bytes()) {
+            if index >= buffer.len() {
                 return Ok(Vec::with_capacity(0));
             } else {
                 return Ok(buffer[index..].into());
