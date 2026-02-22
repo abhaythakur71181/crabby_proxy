@@ -32,13 +32,33 @@ pub async fn run_proxy_server(state: AppState, addr: SocketAddr) {
     };
 
     let mut shutdown_rx = state.shutdown_tx.subscribe();
-    tracing::info!("Proxy server listening on {}", addr);
+    let max_global_conns = {
+        let config = state.config.read().await;
+        config.server.max_connections
+    };
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_global_conns));
+    tracing::info!(
+        "Proxy server listening on {} (max {} connections)",
+        addr,
+        max_global_conns
+    );
     loop {
         tokio::select! {
             // Accept new connections
             Ok((client_stream, client_addr)) = listener.accept() => {
+                let _ = client_stream.set_nodelay(true);
+                let permit = match semaphore.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        tracing::warn!("Global connection limit reached, rejecting {}", client_addr);
+                        drop(client_stream);
+                        continue;
+                    }
+                };
+
                 let state = state.clone();
                 tokio::spawn(async move {
+                    let _permit = permit; // Hold permit until task completes
                     // Generate unique connection ID for tracking
                     let conn_id = uuid::Uuid::new_v4();
                     // Notify: New connection accepted
@@ -481,7 +501,7 @@ async fn async_handle_client_with_target(
             )
         })?
         .map_err(|e| (e, ErrorType::Connection))?;
-
+    let _ = target_stream.set_nodelay(true);
     tracing::info!(
         "[{}]: Connection established to {} by {}",
         &protocol,
@@ -521,34 +541,4 @@ async fn async_handle_client_with_target(
             Err((e, ErrorType::Tunnel))
         }
     }
-}
-
-/// Relay data using TunnelStream
-///
-/// label is a tag for the direction, e.g., "C->T" (client to target).
-async fn relay_with_tunnel_stream<R, W>(
-    mut tunnel: TunnelStream<R, W>,
-    label: &str,
-) -> tokio::io::Result<u64>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
-    let mut buf = [0u8; 1024];
-    let mut total = 0;
-
-    loop {
-        let n = tunnel.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-
-        tracing::debug!("{}", label);
-
-        tunnel.write_all(&buf[..n]).await?;
-        total += n as u64;
-    }
-
-    tunnel.shutdown().await?;
-    Ok(total)
 }
