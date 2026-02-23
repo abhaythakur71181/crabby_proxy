@@ -82,11 +82,11 @@ pub struct UserRateLimiter {
 
 #[derive(Clone, Debug)]
 pub(crate) struct UserRateLimitConfig {
-    rps: u32,
-    burst: u32,
-    enabled: bool,
+    pub(crate) rps: u32,
+    pub(crate) burst: u32,
+    pub(crate) enabled: bool,
     pub(crate) max_connections: i32,
-    cached_at: std::time::Instant,
+    pub(crate) cached_at: std::time::Instant,
 }
 
 impl UserRateLimiter {

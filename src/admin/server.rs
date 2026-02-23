@@ -86,6 +86,17 @@ pub async fn run_admin_server(state: AppState, addr: SocketAddr) -> Result<(), s
             "/api/users/:id/api-keys/:key_id",
             delete(handlers::users::revoke_api_key),
         )
+        // Approval management routes
+        .route("/api/approvals", post(handlers::approvals::create_approval))
+        .route("/api/approvals", get(handlers::approvals::list_approvals))
+        .route(
+            "/api/approvals/:id",
+            delete(handlers::approvals::terminate_approval),
+        )
+        .route(
+            "/api/users/:id/approvals",
+            get(handlers::approvals::list_user_approvals),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             super::auth::auth_middleware,
