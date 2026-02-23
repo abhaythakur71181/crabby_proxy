@@ -65,6 +65,8 @@ pub async fn run_proxy_server(state: AppState, addr: SocketAddr) {
                     let _ = state.notify_tx.send(crate::app_state::ConnectionEvent::NewConnection(conn_id)).await;
                     // Handle the client connection
                     handle_client(client_stream, client_addr, state.clone(), conn_id).await;
+                    // Directly clean up connection state (belt-and-suspenders with event system)
+                    let _ = state.state.delete_connection(conn_id).await;
                     // Notify: Connection closed
                     let _ = state.notify_tx.send(crate::app_state::ConnectionEvent::ConnectionClosed(conn_id)).await;
                 });
@@ -240,6 +242,57 @@ async fn handle_client(
                 .with_label_values(&["socks4_disabled"])
                 .inc();
             return;
+        }
+    }
+
+    // Per-user RPS rate limiting (skip for config-based auth sentinel -1)
+    if let Some(uid) = user_id {
+        if uid > 0 {
+            let rate_config = match state.user_rate_limiter.get_cached_config(uid).await {
+                Some(config) => config,
+                None => {
+                    // Cache miss: fetch from DB and cache
+                    match crate::db::users::get_user_by_id(&state.db_pool, uid).await {
+                        Ok(Some(user)) => {
+                            state
+                                .user_rate_limiter
+                                .cache_config(
+                                    uid,
+                                    user.rate_limit_rps as u32,
+                                    user.rate_limit_burst as u32,
+                                    user.rate_limit_enabled,
+                                    user.max_connections,
+                                )
+                                .await;
+                            crate::rate_limit::UserRateLimitConfig {
+                                rps: user.rate_limit_rps as u32,
+                                burst: user.rate_limit_burst as u32,
+                                enabled: user.rate_limit_enabled,
+                                max_connections: user.max_connections,
+                                cached_at: std::time::Instant::now(),
+                            }
+                        }
+                        _ => crate::rate_limit::UserRateLimitConfig {
+                            rps: 10,
+                            burst: 20,
+                            enabled: false,
+                            max_connections: 5,
+                            cached_at: std::time::Instant::now(),
+                        },
+                    }
+                }
+            };
+            if !state
+                .user_rate_limiter
+                .check_user_cached(uid, rate_config)
+                .await
+            {
+                tracing::warn!("Per-user rate limit exceeded for user {}", uid);
+                crate::metrics::RATE_LIMIT_EXCEEDED
+                    .with_label_values(&["user"])
+                    .inc();
+                return;
+            }
         }
     }
 

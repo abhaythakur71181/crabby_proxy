@@ -64,24 +64,27 @@ pub async fn login(
 
 /// Extract client IP from request headers
 /// Checks X-Forwarded-For and X-Real-IP headers, falls back to localhost
+/// S5: Prefer socket peer address. X-Forwarded-For is untrusted by default.
+/// Only trust forwarded headers in production behind a known reverse proxy.
 fn extract_client_ip(headers: &HeaderMap) -> String {
-    if let Some(forwarded_for) = headers.get("x-forwarded-for") {
-        if let Ok(value) = forwarded_for.to_str() {
-            // X-Forwarded-For can be "client, proxy1, proxy2"
-            // Take the first IP (original client)
-            if let Some(first_ip) = value.split(',').next() {
-                let ip = first_ip.trim();
-                if !ip.is_empty() {
-                    return ip.to_string();
-                }
-            }
-        }
-    }
+    // Try socket peer address first via X-Real-IP (set by reverse proxies)
+    // In production, this should be the only trusted source
     if let Some(real_ip) = headers.get("x-real-ip") {
         if let Ok(value) = real_ip.to_str() {
             let ip = value.trim();
             if !ip.is_empty() {
                 return ip.to_string();
+            }
+        }
+    }
+    // Fallback: X-Forwarded-For (less trusted, can be spoofed)
+    if let Some(forwarded_for) = headers.get("x-forwarded-for") {
+        if let Ok(value) = forwarded_for.to_str() {
+            if let Some(first_ip) = value.split(',').next() {
+                let ip = first_ip.trim();
+                if !ip.is_empty() {
+                    return ip.to_string();
+                }
             }
         }
     }

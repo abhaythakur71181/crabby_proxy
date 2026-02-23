@@ -42,6 +42,16 @@ impl TunnelManager {
         // Allocate port
         let port = self.port_allocator.allocate_port(preferred_port)?;
 
+        // INFO: Bind eagerly so we can release port on failure
+        let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await {
+            Ok(l) => l,
+            Err(e) => {
+                // Release port back since bind failed
+                let _ = self.port_allocator.release_port(port);
+                return Err(TunnelError::BindError(port, e.to_string()));
+            }
+        };
+
         // Create tunnel
         let tunnel = ActiveTunnel {
             tunnel_id: Uuid::new_v4(),
@@ -52,7 +62,11 @@ impl TunnelManager {
             created_at: Utc::now(),
         };
 
-        let handle = tokio::spawn(tunnel_listener_task(port, client_addr));
+        let handle = tokio::spawn(tunnel_listener_task_with_listener(
+            listener,
+            port,
+            client_addr,
+        ));
         self.tasks.entry(port).or_default().push(handle);
 
         // Store tunnel
@@ -105,6 +119,24 @@ async fn tunnel_listener_task(port: u16, target_addr: SocketAddr) {
         }
     };
 
+    loop {
+        match listener.accept().await {
+            Ok((inbound, _)) => {
+                tokio::spawn(handle_tunnel_connection(inbound, target_addr));
+            }
+            Err(e) => {
+                tracing::error!("Accept error on port {port}: {e}");
+            }
+        }
+    }
+}
+
+/// INFO: Tunnel listener task with pre-bound listener (bind failure handled by caller)
+async fn tunnel_listener_task_with_listener(
+    listener: tokio::net::TcpListener,
+    port: u16,
+    target_addr: SocketAddr,
+) {
     loop {
         match listener.accept().await {
             Ok((inbound, _)) => {
