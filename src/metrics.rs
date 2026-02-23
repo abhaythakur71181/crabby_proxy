@@ -1,7 +1,7 @@
 use lazy_static::lazy_static;
 use prometheus::{
-    register_int_counter_vec, register_int_gauge_vec, Encoder, IntCounterVec, IntGaugeVec,
-    TextEncoder,
+    register_histogram_vec, register_int_counter_vec, register_int_gauge_vec, Encoder,
+    HistogramVec, IntCounterVec, IntGaugeVec, TextEncoder,
 };
 
 lazy_static! {
@@ -58,6 +58,33 @@ lazy_static! {
         "proxy_auth_failures_total",
         "Total authentication failures",
         &["reason"] // "invalid_credentials", "socks4_disabled", etc.
+    )
+    .unwrap();
+
+    /// Connection duration histogram (seconds)
+    pub static ref CONNECTION_DURATION: HistogramVec = register_histogram_vec!(
+        "proxy_connection_duration_seconds",
+        "Duration of proxy connections in seconds",
+        &["protocol"],
+        vec![0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 300.0, 600.0, 1800.0]
+    )
+    .unwrap();
+
+    /// Connection setup latency (seconds) — auth + target parsing
+    pub static ref CONNECTION_SETUP_DURATION: HistogramVec = register_histogram_vec!(
+        "proxy_connection_setup_seconds",
+        "Time to authenticate and parse target",
+        &["protocol"],
+        vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 5.0]
+    )
+    .unwrap();
+
+    /// Upstream connect latency (seconds)
+    pub static ref UPSTREAM_CONNECT_DURATION: HistogramVec = register_histogram_vec!(
+        "proxy_upstream_connect_seconds",
+        "Time to connect to upstream target",
+        &["protocol"],
+        vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 5.0, 10.0]
     )
     .unwrap();
 }

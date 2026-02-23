@@ -116,6 +116,7 @@ async fn handle_client(
     state: AppState,
     conn_id: uuid::Uuid,
 ) {
+    let conn_start = std::time::Instant::now();
     // Snapshot config values once to avoid multiple read locks per connection
     let (ip_filter_enabled, rate_limiting_enabled, auth_required, socks4_enabled) = {
         let config = state.config.read().await;
@@ -340,6 +341,11 @@ async fn handle_client(
     };
     let _ = state.state.set_connection(conn_id, conn_info).await;
 
+    // Record setup duration (auth + target parsing)
+    crate::metrics::CONNECTION_SETUP_DURATION
+        .with_label_values(&[&protocol.to_string()])
+        .observe(conn_start.elapsed().as_secs_f64());
+
     // Increment active connections metric
     crate::metrics::ACTIVE_CONNECTIONS
         .with_label_values(&[&protocol.to_string()])
@@ -452,11 +458,15 @@ async fn handle_client(
     }
 
     let started_at = chrono::Utc::now().timestamp();
+    let relay_start = std::time::Instant::now();
     let target_addr_str = format!("{}:{}", target.host, target.port);
     let result =
         async_handle_client_with_target(&mut stream, client_addr, &mut protocol, target).await;
 
-    // Decrement active connections metric when done
+    // Record connection duration and decrement active connections
+    crate::metrics::CONNECTION_DURATION
+        .with_label_values(&[&protocol.to_string()])
+        .observe(relay_start.elapsed().as_secs_f64());
     crate::metrics::ACTIVE_CONNECTIONS
         .with_label_values(&[&protocol.to_string()])
         .dec();
@@ -545,6 +555,7 @@ async fn async_handle_client_with_target(
     target: ProxyTarget,
 ) -> Result<(u64, u64), (io::Error, ErrorType)> {
     let target_addr = format!("{}:{}", target.host, target.port);
+    let upstream_start = std::time::Instant::now();
     let target_stream = timeout(Duration::from_secs(10), TcpStream::connect(&target_addr))
         .await
         .map_err(|_| {
@@ -554,6 +565,9 @@ async fn async_handle_client_with_target(
             )
         })?
         .map_err(|e| (e, ErrorType::Connection))?;
+    crate::metrics::UPSTREAM_CONNECT_DURATION
+        .with_label_values(&[&protocol.to_string()])
+        .observe(upstream_start.elapsed().as_secs_f64());
     let _ = target_stream.set_nodelay(true);
     tracing::info!(
         "[{}]: Connection established to {} by {}",
