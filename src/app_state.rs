@@ -1,5 +1,6 @@
+use crate::cache::CacheLayer;
 use crate::config::Config;
-use crate::state::{MemoryBackend, StateBackend};
+use crate::state::{MemoryBackend, RedisBackend, StateBackend};
 use crate::tunnel::manager::TunnelManager;
 use std::sync::Arc;
 use std::time::Instant;
@@ -62,7 +63,11 @@ pub struct AppState {
 
     // Quota check cache: user_id -> (allowed, cached_at)
     // Caches the boolean result of check_quota for 30s to avoid SUM() per connection
+    // (fallback when Redis cache is unavailable)
     pub quota_cache: Arc<dashmap::DashMap<i64, (bool, std::time::Instant)>>,
+
+    // Redis cache layer for users, API keys, quotas, approvals
+    pub cache: Option<CacheLayer>,
 }
 
 impl AppState {
@@ -73,12 +78,24 @@ impl AppState {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let state: Arc<dyn StateBackend> = match config.state.backend.as_str() {
             "redis" => {
-                tracing::info!(
-                    "Redis backend configured but not yet implemented, falling back to memory"
-                );
-                // TODO: Implement Redis backend
-                // Arc::new(RedisBackend::new(&config.state.redis_url, config.state.redis_key_prefix.clone())?)
-                Arc::new(MemoryBackend::new())
+                match RedisBackend::new(
+                    &config.state.redis_url,
+                    config.state.redis_key_prefix.clone(),
+                )
+                .await
+                {
+                    Ok(backend) => {
+                        tracing::info!("Using Redis state backend");
+                        Arc::new(backend)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to connect to Redis ({}), falling back to memory backend",
+                            e
+                        );
+                        Arc::new(MemoryBackend::new())
+                    }
+                }
             }
             "memory" | _ => {
                 tracing::info!("Using in-memory state backend");
@@ -148,6 +165,26 @@ impl AppState {
         // Create graceful shutdown channel
         let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
 
+        // Initialize Redis cache layer (uses same Redis URL as state backend)
+        let cache = match CacheLayer::new(
+            &config.state.redis_url,
+            config.state.redis_key_prefix.clone(),
+        )
+        .await
+        {
+            Ok(layer) => {
+                tracing::info!("Redis cache layer initialized");
+                Some(layer)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to initialize Redis cache layer ({}), using DB-only mode",
+                    e
+                );
+                None
+            }
+        };
+
         Ok(Self {
             config: Arc::new(RwLock::new(config.clone())),
             state,
@@ -168,6 +205,7 @@ impl AppState {
             ip_filter,
             shutdown_tx,
             quota_cache: Arc::new(dashmap::DashMap::new()),
+            cache,
         })
     }
 
@@ -192,6 +230,144 @@ impl AppState {
         tracing::info!("Shutting down application");
         // Close all tunnels
         self.tunnels.write().await.shutdown().await;
+    }
+
+    // ─── Cache-aside convenience methods ──────────────────────────────
+    //
+    // These wrap the `if let Some(ref cache)` + DB fallback pattern into
+    // single-call APIs. If Redis is absent, they go straight to DB.
+    // On cache miss they populate Redis automatically.
+
+    /// Fetch a CachedUser by id: Redis -> DB -> populate Redis.
+    pub async fn cached_user_by_id(&self, user_id: i64) -> Option<crate::cache::CachedUser> {
+        let pool = self.db_pool.clone();
+        if let Some(ref cache) = self.cache {
+            cache
+                .get_or_set(
+                    &format!("user:id:{}", user_id),
+                    crate::cache::USER_TTL,
+                    || async {
+                        crate::db::users::get_user_by_id(&pool, user_id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .filter(|u| u.is_active)
+                            .map(crate::cache::CachedUser::from)
+                    },
+                )
+                .await
+        } else {
+            crate::db::users::get_user_by_id(&pool, user_id)
+                .await
+                .ok()
+                .flatten()
+                .filter(|u| u.is_active)
+                .map(crate::cache::CachedUser::from)
+        }
+    }
+
+    /// Fetch a CachedUser by username: Redis -> DB -> populate Redis.
+    pub async fn cached_user_by_username(
+        &self,
+        username: &str,
+    ) -> Option<crate::cache::CachedUser> {
+        let pool = self.db_pool.clone();
+        let uname = username.to_owned();
+        if let Some(ref cache) = self.cache {
+            cache
+                .get_or_set(
+                    &format!("user:name:{}", username),
+                    crate::cache::USER_TTL,
+                    || async {
+                        crate::db::users::get_user_by_username(&pool, &uname)
+                            .await
+                            .ok()
+                            .flatten()
+                            .filter(|u| u.is_active)
+                            .map(crate::cache::CachedUser::from)
+                    },
+                )
+                .await
+        } else {
+            crate::db::users::get_user_by_username(&pool, username)
+                .await
+                .ok()
+                .flatten()
+                .filter(|u| u.is_active)
+                .map(crate::cache::CachedUser::from)
+        }
+    }
+
+    /// Fetch a CachedUserRole by id: Redis -> DB -> populate Redis.
+    /// Lightweight version used by admin auth middleware.
+    pub async fn cached_user_role(&self, user_id: i64) -> Option<crate::cache::CachedUserRole> {
+        let pool = self.db_pool.clone();
+        if let Some(ref cache) = self.cache {
+            cache
+                .get_or_set(
+                    &format!("user:role:{}", user_id),
+                    crate::cache::USER_ROLE_TTL,
+                    || async {
+                        crate::db::users::get_user_by_id(&pool, user_id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(crate::cache::CachedUserRole::from)
+                    },
+                )
+                .await
+        } else {
+            crate::db::users::get_user_by_id(&pool, user_id)
+                .await
+                .ok()
+                .flatten()
+                .map(crate::cache::CachedUserRole::from)
+        }
+    }
+
+    // ─── Cache invalidation helpers ───────────────────────────────────
+    //
+    // Fire-and-forget: silently no-ops when Redis is absent.
+
+    pub async fn invalidate_user_cache(&self, user_id: i64, username: &str) {
+        if let Some(ref cache) = self.cache {
+            cache.invalidate_user(user_id, username).await;
+        }
+    }
+
+    pub async fn invalidate_api_key_cache(&self, user_id: i64) {
+        if let Some(ref cache) = self.cache {
+            cache.invalidate_api_keys_for_user(user_id).await;
+        }
+    }
+
+    pub async fn invalidate_quota_cache(&self, user_id: i64) {
+        if let Some(ref cache) = self.cache {
+            cache.invalidate_quota(user_id).await;
+        }
+        self.quota_cache.remove(&user_id);
+    }
+
+    pub async fn invalidate_approval_cache(&self, user_id: i64) {
+        if let Some(ref cache) = self.cache {
+            cache.invalidate_approvals_for_user(user_id).await;
+        }
+    }
+
+    pub async fn track_bandwidth(&self, user_id: i64, bytes: i64) {
+        if let Some(ref cache) = self.cache {
+            cache.incr_bandwidth(user_id, bytes).await;
+        }
+    }
+
+    /// Populate user cache by both id and username after a successful DB lookup.
+    /// Call this after verify_password or any DB user fetch you want to cache.
+    pub async fn populate_user_cache(&self, user: &crate::db::models::User) {
+        if let Some(ref cache) = self.cache {
+            let cu = crate::cache::CachedUser::from(user.clone());
+            cache.set_user_by_id(user.id, &cu).await;
+            cache.set_user_by_username(&user.username, &cu).await;
+        }
     }
 }
 

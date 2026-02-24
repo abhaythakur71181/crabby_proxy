@@ -240,19 +240,38 @@ impl ProxyProtocol {
     async fn validate_credentials(username: &str, password: &str, state: &AppState) -> Option<i64> {
         // Check for API Key format: user@apikey
         if let Some(actual_username) = username.strip_suffix("@apikey") {
-            if let Ok(Some(user)) =
-                users::get_user_by_username(&state.db_pool, actual_username).await
-            {
-                // Verify API key (password is the key)
-                if let Ok(true) = api_keys::verify_api_key(&state.db_pool, user.id, password).await
-                {
-                    return Some(user.id);
+            // Redis -> DB with auto-populate via cached_user_by_username
+            let user = state
+                .cached_user_by_username(actual_username)
+                .await
+                .map(|cu| (cu.id, cu.username));
+
+            if let Some((user_id, _)) = user {
+                // Try API key verification cache
+                if let Some(ref cache) = state.cache {
+                    if let Some(verified) = cache.get_api_key_verified(user_id, password).await {
+                        return if verified { Some(user_id) } else { None };
+                    }
+                }
+                // Cache miss: verify via DB (expensive argon2)
+                let verified = api_keys::verify_api_key(&state.db_pool, user_id, password)
+                    .await
+                    .unwrap_or(false);
+                if let Some(ref cache) = state.cache {
+                    cache
+                        .set_api_key_verified(user_id, password, verified)
+                        .await;
+                }
+                if verified {
+                    return Some(user_id);
                 }
             }
         } else {
-            // Regular password authentication
+            // Regular password authentication — cannot cache the verify itself
+            // But we populate user cache on successful login
             if let Ok(Some(user)) = users::verify_password(&state.db_pool, username, password).await
             {
+                state.populate_user_cache(&user).await;
                 return Some(user.id);
             }
         }
