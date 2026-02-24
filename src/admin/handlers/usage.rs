@@ -6,6 +6,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[derive(Deserialize)]
 pub struct UsageQuery {
@@ -42,7 +43,7 @@ pub struct UsageRecordResponse {
 
 /// GET /api/users/:id/usage - Get user usage statistics
 pub async fn get_user_usage_stats(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
     axum::Extension(current_user_id): axum::Extension<i64>,
     Query(params): Query<UsageQuery>,
@@ -73,7 +74,7 @@ pub async fn get_user_usage_stats(
 
 /// GET /api/users/:id/usage/recent - Get recent usage records
 pub async fn get_recent_usage(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
     axum::Extension(current_user_id): axum::Extension<i64>,
     Query(params): Query<UsageQuery>,
@@ -115,7 +116,7 @@ pub async fn get_recent_usage(
 
 /// GET /api/users/:id/usage/all-time - Get all-time usage statistics
 pub async fn get_all_time_usage(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
     axum::Extension(current_user_id): axum::Extension<i64>,
 ) -> Result<Json<UsageStatsResponse>, StatusCode> {
@@ -164,7 +165,7 @@ pub struct TopUserResponse {
 
 /// GET /api/usage/summary - System-wide usage dashboard (admin only)
 pub async fn get_system_usage_summary(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     axum::Extension(current_user_id): axum::Extension<i64>,
     Query(params): Query<UsageQuery>,
 ) -> Result<Json<SystemUsageSummaryResponse>, StatusCode> {

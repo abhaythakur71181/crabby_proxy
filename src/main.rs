@@ -19,10 +19,11 @@ mod validation;
 
 use crate::app_state::AppState;
 use crate::config::Config;
-use crate::config_env::ConfigEnvExt;  // Import trait for apply_env_overrides
+use crate::config_env::ConfigEnvExt;
 use crate::proxy::listener::run_proxy_server;
 use clap::Parser;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::signal;
 
 #[derive(Parser, Debug)]
@@ -90,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
-    let state = AppState::new(config.clone(), config_path, db_pool).await?;
+    let state = Arc::new(AppState::new(config.clone(), config_path, db_pool).await?);
 
     // Parse socket addresses
     let proxy_addr = config.server.proxy_bind.parse()?;

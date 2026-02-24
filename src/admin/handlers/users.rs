@@ -9,10 +9,11 @@ use axum::{
     response::{IntoResponse, Json},
     Extension,
 };
+use std::sync::Arc;
 
 /// Create a new user (root_admin only)
 pub async fn create_user(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     Extension(current_user_id): Extension<i64>,
     Json(request): Json<super::models::CreateUserRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
@@ -51,7 +52,7 @@ pub async fn create_user(
 
 /// List all users (admin+)
 pub async fn list_users(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     Extension(current_user_id): Extension<i64>,
 ) -> Result<impl IntoResponse, StatusCode> {
     // Check if current user is at least admin
@@ -75,7 +76,7 @@ pub async fn list_users(
 
 /// Get user details (admin+ or self)
 pub async fn get_user(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     Extension(current_user_id): Extension<i64>,
     Path(user_id): Path<i64>,
 ) -> Result<impl IntoResponse, StatusCode> {
@@ -99,7 +100,7 @@ pub async fn get_user(
 
 /// Update user (root_admin or self for limited fields)
 pub async fn update_user(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     Extension(current_user_id): Extension<i64>,
     Path(user_id): Path<i64>,
     Json(request): Json<UpdateUserRequest>,
@@ -160,7 +161,7 @@ pub async fn update_user(
 
 /// Delete user (root_admin only)
 pub async fn delete_user(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     Extension(current_user_id): Extension<i64>,
     Path(user_id): Path<i64>,
 ) -> Result<impl IntoResponse, StatusCode> {
@@ -199,7 +200,7 @@ pub async fn delete_user(
 
 /// Create API key for user
 pub async fn create_api_key(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
     Extension(current_user_id): Extension<i64>,
     Json(request): Json<CreateApiKeyRequest>,
@@ -248,7 +249,7 @@ pub async fn create_api_key(
 
 /// List API keys for user
 pub async fn list_api_keys(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
     Extension(current_user_id): Extension<i64>,
 ) -> Result<impl IntoResponse, StatusCode> {
@@ -277,7 +278,7 @@ pub async fn list_api_keys(
 
 /// Revoke API key
 pub async fn revoke_api_key(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     Path((user_id, key_id)): Path<(i64, i64)>,
     Extension(current_user_id): Extension<i64>,
 ) -> Result<impl IntoResponse, StatusCode> {

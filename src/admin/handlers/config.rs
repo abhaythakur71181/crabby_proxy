@@ -2,6 +2,7 @@ use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 
 use crate::app_state::AppState;
+use std::sync::Arc;
 
 #[derive(Serialize, Deserialize)]
 pub struct ConfigResponse {
@@ -36,7 +37,7 @@ pub struct ReloadResponse {
 }
 
 /// Get current configuration (sensitive fields redacted)
-pub async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
+pub async fn get_config(State(state): State<Arc<AppState>>) -> Json<ConfigResponse> {
     let config = state.config.read().await;
     Json(ConfigResponse {
         server: ServerConfigResponse {
@@ -56,7 +57,7 @@ pub async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
 
 /// Reload configuration from file
 pub async fn reload_config(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     axum::Extension(current_user_id): axum::Extension<i64>,
 ) -> Result<Json<ReloadResponse>, StatusCode> {
     let current_user =

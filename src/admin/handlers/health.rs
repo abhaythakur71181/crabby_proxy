@@ -1,5 +1,6 @@
 use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use crate::app_state::AppState;
 
@@ -20,7 +21,7 @@ pub struct StatsResponse {
     pub total_bandwidth: u64,
 }
 
-pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
+pub async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "healthy".to_string(),
         uptime_seconds: state.uptime().as_secs(),
@@ -29,7 +30,7 @@ pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse>
 }
 
 /// Server statistics endpoint
-pub async fn stats(State(state): State<AppState>) -> Json<StatsResponse> {
+pub async fn stats(State(state): State<Arc<AppState>>) -> Json<StatsResponse> {
     let active_count = state.state.count_connections().await.unwrap_or(0);
     let total_count = state
         .state

@@ -6,6 +6,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::app_state::AppState;
+use std::sync::Arc;
 
 #[derive(Serialize, Deserialize)]
 pub struct TunnelInfo {
@@ -34,7 +35,7 @@ pub struct CreateTunnelResponse {
 
 /// List all active tunnels
 /// NOTE: TunnelManager doesn't expose active tunnels publicly yet
-pub async fn list_tunnels(State(_state): State<AppState>) -> Json<TunnelsListResponse> {
+pub async fn list_tunnels(State(_state): State<Arc<AppState>>) -> Json<TunnelsListResponse> {
     // TODO: Add list_active() method to TunnelManager
     Json(TunnelsListResponse {
         tunnels: vec![],
@@ -45,7 +46,7 @@ pub async fn list_tunnels(State(_state): State<AppState>) -> Json<TunnelsListRes
 /// Create a new tunnel (if enabled in config)
 /// NOTE: This is a simplified stub - full implementation requires connection context
 pub async fn create_tunnel(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     Json(_req): Json<CreateTunnelRequest>,
 ) -> Result<Json<CreateTunnelResponse>, StatusCode> {
     let config = state.config.read().await;
@@ -63,7 +64,7 @@ pub async fn create_tunnel(
 }
 
 /// Close a tunnel
-pub async fn close_tunnel(State(state): State<AppState>, Path(port): Path<u16>) -> StatusCode {
+pub async fn close_tunnel(State(state): State<Arc<AppState>>, Path(port): Path<u16>) -> StatusCode {
     let mut tunnels = state.tunnels.write().await;
     match tunnels.close_tunnel(port).await {
         Ok(_) => {

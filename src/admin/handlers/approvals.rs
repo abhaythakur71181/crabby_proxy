@@ -6,6 +6,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
 pub struct CreateApprovalRequest {
@@ -34,7 +35,7 @@ pub struct TerminateRequest {
 
 /// POST /api/approvals - Create a new approval (admin only)
 pub async fn create_approval(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     axum::Extension(current_user_id): axum::Extension<i64>,
     Json(payload): Json<CreateApprovalRequest>,
 ) -> Result<(StatusCode, Json<ApprovalResponse>), StatusCode> {
@@ -77,7 +78,7 @@ pub async fn create_approval(
 
 /// GET /api/approvals - List all active approvals (admin only)
 pub async fn list_approvals(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     axum::Extension(current_user_id): axum::Extension<i64>,
 ) -> Result<Json<Vec<ApprovalResponse>>, StatusCode> {
     let current_user =
@@ -110,7 +111,7 @@ pub async fn list_approvals(
 
 /// GET /api/users/:id/approvals - List user's active approvals
 pub async fn list_user_approvals(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
     axum::Extension(current_user_id): axum::Extension<i64>,
 ) -> Result<Json<Vec<ApprovalResponse>>, StatusCode> {
@@ -146,7 +147,7 @@ pub async fn list_user_approvals(
 
 /// DELETE /api/approvals/:id - Terminate an approval (admin only)
 pub async fn terminate_approval(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     Path(approval_id): Path<i64>,
     axum::Extension(current_user_id): axum::Extension<i64>,
     Json(payload): Json<TerminateRequest>,

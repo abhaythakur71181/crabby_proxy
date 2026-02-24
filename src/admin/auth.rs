@@ -5,13 +5,14 @@ use axum::{
     response::Response,
 };
 use base64::{engine::general_purpose, Engine};
+use std::sync::Arc;
 
 use crate::app_state::AppState;
 use crate::auth::jwt;
 use crate::db::users;
 
 pub async fn auth_middleware(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     mut request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
