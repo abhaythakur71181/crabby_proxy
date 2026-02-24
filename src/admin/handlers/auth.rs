@@ -7,6 +7,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::{app_state::AppState, auth::jwt, db::users};
+use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
@@ -22,7 +23,7 @@ pub struct LoginResponse {
 }
 
 pub async fn login(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<LoginRequest>,
 ) -> Result<Response, (StatusCode, String)> {

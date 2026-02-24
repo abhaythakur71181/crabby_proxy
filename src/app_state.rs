@@ -19,8 +19,8 @@ pub enum ConnectionEvent {
     TunnelClosed(u16),
 }
 
-/// Shared application state
-#[derive(Clone)]
+/// Shared application state.
+/// Wrapped in `Arc<AppState>` at creation — never deep-cloned.
 pub struct AppState {
     // Configuration (hot reload 😉)
     pub config: Arc<RwLock<Config>>,
@@ -242,19 +242,16 @@ impl AppState {
     pub async fn cached_user_by_id(&self, user_id: i64) -> Option<crate::cache::CachedUser> {
         let pool = self.db_pool.clone();
         if let Some(ref cache) = self.cache {
+            let key = format!("{}cache:user:id:{}", cache.prefix(), user_id);
             cache
-                .get_or_set(
-                    &format!("user:id:{}", user_id),
-                    crate::cache::USER_TTL,
-                    || async {
-                        crate::db::users::get_user_by_id(&pool, user_id)
-                            .await
-                            .ok()
-                            .flatten()
-                            .filter(|u| u.is_active)
-                            .map(crate::cache::CachedUser::from)
-                    },
-                )
+                .get_or_set(&key, crate::cache::USER_TTL, || async {
+                    crate::db::users::get_user_by_id(&pool, user_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .filter(|u| u.is_active)
+                        .map(crate::cache::CachedUser::from)
+                })
                 .await
         } else {
             crate::db::users::get_user_by_id(&pool, user_id)
@@ -272,21 +269,19 @@ impl AppState {
         username: &str,
     ) -> Option<crate::cache::CachedUser> {
         let pool = self.db_pool.clone();
-        let uname = username.to_owned();
         if let Some(ref cache) = self.cache {
+            let key = format!("{}cache:user:name:{}", cache.prefix(), username);
+            // Defer username.to_owned() to cache-miss path only
+            let uname = username.to_owned();
             cache
-                .get_or_set(
-                    &format!("user:name:{}", username),
-                    crate::cache::USER_TTL,
-                    || async {
-                        crate::db::users::get_user_by_username(&pool, &uname)
-                            .await
-                            .ok()
-                            .flatten()
-                            .filter(|u| u.is_active)
-                            .map(crate::cache::CachedUser::from)
-                    },
-                )
+                .get_or_set(&key, crate::cache::USER_TTL, || async {
+                    crate::db::users::get_user_by_username(&pool, &uname)
+                        .await
+                        .ok()
+                        .flatten()
+                        .filter(|u| u.is_active)
+                        .map(crate::cache::CachedUser::from)
+                })
                 .await
         } else {
             crate::db::users::get_user_by_username(&pool, username)
@@ -303,18 +298,15 @@ impl AppState {
     pub async fn cached_user_role(&self, user_id: i64) -> Option<crate::cache::CachedUserRole> {
         let pool = self.db_pool.clone();
         if let Some(ref cache) = self.cache {
+            let key = format!("{}cache:user:role:{}", cache.prefix(), user_id);
             cache
-                .get_or_set(
-                    &format!("user:role:{}", user_id),
-                    crate::cache::USER_ROLE_TTL,
-                    || async {
-                        crate::db::users::get_user_by_id(&pool, user_id)
-                            .await
-                            .ok()
-                            .flatten()
-                            .map(crate::cache::CachedUserRole::from)
-                    },
-                )
+                .get_or_set(&key, crate::cache::USER_ROLE_TTL, || async {
+                    crate::db::users::get_user_by_id(&pool, user_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(crate::cache::CachedUserRole::from)
+                })
                 .await
         } else {
             crate::db::users::get_user_by_id(&pool, user_id)
@@ -362,9 +354,10 @@ impl AppState {
 
     /// Populate user cache by both id and username after a successful DB lookup.
     /// Call this after verify_password or any DB user fetch you want to cache.
+    /// Uses `From<&User>` to avoid cloning the entire User struct.
     pub async fn populate_user_cache(&self, user: &crate::db::models::User) {
         if let Some(ref cache) = self.cache {
-            let cu = crate::cache::CachedUser::from(user.clone());
+            let cu = crate::cache::CachedUser::from(user);
             cache.set_user_by_id(user.id, &cu).await;
             cache.set_user_by_username(&user.username, &cu).await;
         }

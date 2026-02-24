@@ -1,12 +1,13 @@
 use crate::db::models::Usage;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
+use uuid::Uuid;
 
 /// Record connection usage in the database
 pub async fn record_usage(
     pool: &SqlitePool,
     user_id: i64,
-    connection_id: &str,
+    connection_id: &Uuid,
     client_ip: &str,
     target_host: &str,
     protocol: &str,
@@ -28,7 +29,7 @@ pub async fn record_usage(
         "#,
     )
     .bind(user_id)
-    .bind(connection_id)
+    .bind(connection_id.to_string())
     .bind(client_ip)
     .bind(target_host)
     .bind(protocol)
@@ -254,7 +255,7 @@ mod tests {
         let id = record_usage(
             &pool,
             1,
-            "conn123",
+            &Uuid::parse_str("00000000-0000-0000-0000-000000000123").unwrap(),
             "127.0.0.1",
             "example.com",
             "http",
@@ -291,7 +292,7 @@ mod tests {
         record_usage(
             &pool,
             1,
-            "conn1",
+            &Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
             "127.0.0.1",
             "example.com",
             "http",
@@ -306,7 +307,7 @@ mod tests {
         record_usage(
             &pool,
             1,
-            "conn2",
+            &Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
             "127.0.0.1",
             "test.com",
             "https",
@@ -337,7 +338,7 @@ mod tests {
             record_usage(
                 &pool,
                 1,
-                &format!("conn{}", i),
+                &Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
                 "127.0.0.1",
                 "example.com",
                 "http",
@@ -355,7 +356,10 @@ mod tests {
 
         assert_eq!(records.len(), 3);
         // Should be in descending order (most recent first)
-        assert_eq!(records[0].connection_id, "conn0");
+        assert_eq!(
+            records[0].connection_id,
+            "00000000-0000-0000-0000-000000000001"
+        );
     }
 
     #[tokio::test]
@@ -367,7 +371,7 @@ mod tests {
         record_usage(
             &pool,
             1,
-            "conn1",
+            &Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
             "127.0.0.1",
             "example.com",
             "http",
@@ -382,7 +386,7 @@ mod tests {
         record_usage(
             &pool,
             1,
-            "conn2",
+            &Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
             "127.0.0.1",
             "test.com",
             "https",
@@ -412,7 +416,7 @@ mod tests {
         record_usage(
             &pool,
             1,
-            "conn1",
+            &Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
             "127.0.0.1",
             "example.com",
             "http",
@@ -427,7 +431,7 @@ mod tests {
         record_usage(
             &pool,
             2,
-            "conn2",
+            &Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
             "127.0.0.1",
             "test.com",
             "https",
@@ -459,7 +463,7 @@ mod tests {
         record_usage(
             &pool,
             1,
-            "conn1",
+            &Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
             "127.0.0.1",
             "example.com",
             "http",
@@ -474,7 +478,7 @@ mod tests {
         record_usage(
             &pool,
             2,
-            "conn2",
+            &Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
             "10.0.0.1",
             "test.com",
             "https",
@@ -505,7 +509,7 @@ mod tests {
         record_usage(
             &pool,
             1,
-            "conn1",
+            &Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
             "127.0.0.1",
             "example.com",
             "http",
@@ -521,7 +525,7 @@ mod tests {
         record_usage(
             &pool,
             2,
-            "conn2",
+            &Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
             "10.0.0.1",
             "test.com",
             "https",

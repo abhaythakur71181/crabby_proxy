@@ -6,6 +6,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::app_state::AppState;
+use std::sync::Arc;
 
 #[derive(Debug, Serialize)]
 pub struct QuotaResponse {
@@ -23,7 +24,7 @@ pub struct UpdateQuotaRequest {
 
 /// GET /api/users/:id/quota - Get user's quota usage stats
 pub async fn get_user_quota(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
     axum::Extension(current_user_id): axum::Extension<i64>,
 ) -> Result<Json<QuotaResponse>, StatusCode> {
@@ -53,7 +54,7 @@ pub async fn get_user_quota(
 
 /// PUT /api/users/:id/quota - Update user's quota
 pub async fn update_user_quota(
-    State(state): State<AppState>,
+    State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
     axum::Extension(current_user_id): axum::Extension<i64>,
     Json(payload): Json<UpdateQuotaRequest>,

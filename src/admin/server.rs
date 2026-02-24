@@ -4,12 +4,16 @@ use axum::{
     Router,
 };
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
 use super::handlers;
 use crate::app_state::AppState;
 
-pub async fn run_admin_server(state: AppState, addr: SocketAddr) -> Result<(), std::io::Error> {
+pub async fn run_admin_server(
+    state: Arc<AppState>,
+    addr: SocketAddr,
+) -> Result<(), std::io::Error> {
     tracing::info!("Starting admin API server on {}", addr);
 
     // Public routes (no auth required)

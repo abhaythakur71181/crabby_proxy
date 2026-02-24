@@ -6,6 +6,7 @@ use crate::stream::{
 };
 use crate::utils;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
@@ -22,7 +23,7 @@ enum ErrorType {
     QuotaExceeded,
 }
 
-pub async fn run_proxy_server(state: AppState, addr: SocketAddr) {
+pub async fn run_proxy_server(state: Arc<AppState>, addr: SocketAddr) {
     let listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -64,7 +65,7 @@ pub async fn run_proxy_server(state: AppState, addr: SocketAddr) {
                     // Notify: New connection accepted
                     let _ = state.notify_tx.send(crate::app_state::ConnectionEvent::NewConnection(conn_id)).await;
                     // Handle the client connection
-                    handle_client(client_stream, client_addr, state.clone(), conn_id).await;
+                    handle_client(client_stream, client_addr, &state, conn_id).await;
                     // Directly clean up connection state (belt-and-suspenders with event system)
                     let _ = state.state.delete_connection(conn_id).await;
                     // Notify: Connection closed
@@ -113,7 +114,7 @@ async fn send_error_response(
 async fn handle_client(
     mut client_stream: TcpStream,
     client_addr: SocketAddr,
-    state: AppState,
+    state: &AppState,
     conn_id: uuid::Uuid,
 ) {
     let conn_start = std::time::Instant::now();
@@ -268,8 +269,8 @@ async fn handle_client(
                             // Per-user protocol restriction check
                             if let Some(ref allowed) = cached.allowed_protocols {
                                 if let Ok(protos) = serde_json::from_str::<Vec<String>>(allowed) {
-                                    let proto_str = protocol.to_string().to_lowercase();
-                                    if !protos.iter().any(|p| p.to_lowercase() == proto_str) {
+                                    let proto_str = protocol.as_str_lower();
+                                    if !protos.iter().any(|p| p.eq_ignore_ascii_case(proto_str)) {
                                         tracing::warn!(
                                             "User {} not allowed to use protocol {} (allowed: {:?})",
                                             uid, protocol, protos
@@ -341,6 +342,7 @@ async fn handle_client(
         }
     };
     // INFO: for tracking
+    let proto_label = protocol.as_str();
     let conn_info = crate::state::backend::ConnectionInfo {
         id: conn_id,
         client_addr,
@@ -356,15 +358,15 @@ async fn handle_client(
 
     // Record setup duration (auth + target parsing)
     crate::metrics::CONNECTION_SETUP_DURATION
-        .with_label_values(&[&protocol.to_string()])
+        .with_label_values(&[proto_label])
         .observe(conn_start.elapsed().as_secs_f64());
 
     // Increment active connections metric
     crate::metrics::ACTIVE_CONNECTIONS
-        .with_label_values(&[&protocol.to_string()])
+        .with_label_values(&[proto_label])
         .inc();
     crate::metrics::REQUESTS_TOTAL
-        .with_label_values(&[&protocol.to_string(), "started"])
+        .with_label_values(&[proto_label, "started"])
         .inc();
 
     // Check quota if user is authenticated (skip for config-based auth sentinel -1)
@@ -409,7 +411,7 @@ async fn handle_client(
                         Err(e) => {
                             tracing::error!("Error checking quota for user {}: {}", uid, e);
                             crate::metrics::ACTIVE_CONNECTIONS
-                                .with_label_values(&[&protocol.to_string()])
+                                .with_label_values(&[proto_label])
                                 .dec();
                             let _ =
                                 send_error_response(&protocol, &mut stream, ErrorType::Connection)
@@ -423,7 +425,7 @@ async fn handle_client(
             if !has_quota {
                 tracing::warn!("Quota exceeded for user {}", uid);
                 crate::metrics::ACTIVE_CONNECTIONS
-                    .with_label_values(&[&protocol.to_string()])
+                    .with_label_values(&[proto_label])
                     .dec();
                 let _ = send_error_response(&protocol, &mut stream, ErrorType::QuotaExceeded).await;
                 return;
@@ -463,7 +465,7 @@ async fn handle_client(
                             max_connections
                         );
                         crate::metrics::ACTIVE_CONNECTIONS
-                            .with_label_values(&[&protocol.to_string()])
+                            .with_label_values(&[proto_label])
                             .dec();
                         let _ =
                             send_error_response(&protocol, &mut stream, ErrorType::QuotaExceeded)
@@ -487,10 +489,10 @@ async fn handle_client(
 
     // Record connection duration and decrement active connections
     crate::metrics::CONNECTION_DURATION
-        .with_label_values(&[&protocol.to_string()])
+        .with_label_values(&[proto_label])
         .observe(relay_start.elapsed().as_secs_f64());
     crate::metrics::ACTIVE_CONNECTIONS
-        .with_label_values(&[&protocol.to_string()])
+        .with_label_values(&[proto_label])
         .dec();
 
     let ended_at = chrono::Utc::now().timestamp();
@@ -509,10 +511,10 @@ async fn handle_client(
                     let _ = crate::db::usage::record_usage(
                         &state.db_pool,
                         uid,
-                        &conn_id.to_string(),
+                        &conn_id,
                         &client_addr.ip().to_string(),
                         &target_addr_str,
-                        &protocol.to_string(),
+                        proto_label,
                         started_at,
                         ended_at,
                         bytes_sent as i64,
@@ -529,7 +531,7 @@ async fn handle_client(
             }
             // Record successful request
             crate::metrics::REQUESTS_TOTAL
-                .with_label_values(&[&protocol.to_string(), "success"])
+                .with_label_values(&[proto_label, "success"])
                 .inc();
         }
         Err((e, error_type)) => {
@@ -543,7 +545,7 @@ async fn handle_client(
             };
             tracing::error!("Error [{}] for {}: {}", error_label, client_addr, e);
             crate::metrics::REQUESTS_TOTAL
-                .with_label_values(&[&protocol.to_string(), "failed"])
+                .with_label_values(&[proto_label, "failed"])
                 .inc();
             // Record failed connection usage for authenticated users
             if let Some(uid) = user_id {
@@ -551,10 +553,10 @@ async fn handle_client(
                     let _ = crate::db::usage::record_usage(
                         &state.db_pool,
                         uid,
-                        &conn_id.to_string(),
+                        &conn_id,
                         &client_addr.ip().to_string(),
                         &target_addr_str,
-                        &protocol.to_string(),
+                        proto_label,
                         started_at,
                         ended_at,
                         0,
@@ -591,7 +593,7 @@ async fn async_handle_client_with_target(
         })?
         .map_err(|e| (e, ErrorType::Connection))?;
     crate::metrics::UPSTREAM_CONNECT_DURATION
-        .with_label_values(&[&protocol.to_string()])
+        .with_label_values(&[protocol.as_str()])
         .observe(upstream_start.elapsed().as_secs_f64());
     let _ = target_stream.set_nodelay(true);
     tracing::info!(

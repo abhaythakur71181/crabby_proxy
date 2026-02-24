@@ -7,7 +7,7 @@ use tokio::io::{self, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ProxyProtocol {
     TCP,
     HTTP,
@@ -16,16 +16,35 @@ pub enum ProxyProtocol {
     SOCKS5,
 }
 
-impl std::fmt::Display for ProxyProtocol {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
+impl ProxyProtocol {
+    /// Zero-allocation label for metrics / logging.
+    #[inline]
+    pub fn as_str(&self) -> &'static str {
+        match self {
             ProxyProtocol::TCP => "TCP",
             ProxyProtocol::HTTP => "HTTP",
             ProxyProtocol::HTTPS => "HTTPS",
             ProxyProtocol::SOCKS4 => "SOCKS4",
             ProxyProtocol::SOCKS5 => "SOCKS5",
-        };
-        write!(f, "{}", s)
+        }
+    }
+
+    /// Lowercase label for protocol restriction checks.
+    #[inline]
+    pub fn as_str_lower(&self) -> &'static str {
+        match self {
+            ProxyProtocol::TCP => "tcp",
+            ProxyProtocol::HTTP => "http",
+            ProxyProtocol::HTTPS => "https",
+            ProxyProtocol::SOCKS4 => "socks4",
+            ProxyProtocol::SOCKS5 => "socks5",
+        }
+    }
+}
+
+impl std::fmt::Display for ProxyProtocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -277,14 +296,11 @@ impl ProxyProtocol {
         }
 
         // Fallback to Config credentials if enabled
-        let (config_user, config_pass) = {
+        let config_match = {
             let config = state.config.read().await;
-            (
-                config.authentication.username.clone(),
-                config.authentication.password.clone(),
-            )
+            username == config.authentication.username && password == config.authentication.password
         };
-        if username == config_user && password == config_pass {
+        if config_match {
             // Config-based auth: use sentinel -1 to distinguish from failure (None)
             return Some(-1);
         }

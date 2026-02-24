@@ -4,9 +4,10 @@ use axum::{
     http::{header, StatusCode},
     response::IntoResponse,
 };
+use std::sync::Arc;
 
 /// Prometheus metrics endpoint
-pub async fn prometheus_metrics(State(_state): State<AppState>) -> impl IntoResponse {
+pub async fn prometheus_metrics(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
     let metrics_output = crate::metrics::export_metrics();
     (
         StatusCode::OK,
