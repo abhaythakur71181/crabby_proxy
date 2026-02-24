@@ -187,19 +187,25 @@ impl CurrentUser {
         }
     }
 
-    /// Extract from request extensions (set by auth middleware)
+    /// Extract from request extensions (set by auth middleware).
+    /// Uses Redis -> DB cache-aside via `cached_user_role`.
     pub async fn from_request_extensions(
         state: &AppState,
         user_id: i64,
     ) -> Result<Self, StatusCode> {
-        let user = users::get_user_by_id(&state.db_pool, user_id)
+        let cached = state
+            .cached_user_role(user_id)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .ok_or(StatusCode::UNAUTHORIZED)?;
+
+        if !cached.is_active {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+
         Ok(CurrentUser {
-            id: user.id,
-            username: user.username,
-            role: user.role,
+            id: cached.id,
+            username: cached.username,
+            role: cached.role,
         })
     }
 }

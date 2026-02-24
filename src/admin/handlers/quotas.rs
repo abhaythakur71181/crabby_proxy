@@ -71,6 +71,10 @@ pub async fn update_user_quota(
     crate::db::quota::update_quota(&state.db_pool, user_id, payload.quota_bytes)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Invalidate cached quota so proxy picks up the new limit immediately
+    state.invalidate_quota_cache(user_id).await;
+
     let stats = crate::db::quota::get_quota_stats(&state.db_pool, user_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

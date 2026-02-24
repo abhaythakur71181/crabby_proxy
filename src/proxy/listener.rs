@@ -223,12 +223,12 @@ async fn handle_client(
 
     // Check SOCKS4 protocol restrictions (config-based with admin bypass)
     if protocol == ProxyProtocol::SOCKS4 && !socks4_enabled {
-        // Check if user is admin (admins bypass SOCKS4 restriction)
         let is_admin = if let Some(uid) = user_id {
-            match crate::db::users::get_user_by_id(&state.db_pool, uid).await {
-                Ok(Some(user)) => user.role == "root_admin" || user.role == "admin",
-                _ => false,
-            }
+            state
+                .cached_user_by_id(uid)
+                .await
+                .map(|u| u.role == "root_admin" || u.role == "admin")
+                .unwrap_or(false)
         } else {
             false
         };
@@ -252,28 +252,41 @@ async fn handle_client(
             let rate_config = match state.user_rate_limiter.get_cached_config(uid).await {
                 Some(config) => config,
                 None => {
-                    // Cache miss: fetch from DB and cache
-                    match crate::db::users::get_user_by_id(&state.db_pool, uid).await {
-                        Ok(Some(user)) => {
+                    // Redis -> DB with auto-populate via cached_user_by_id
+                    match state.cached_user_by_id(uid).await {
+                        Some(cached) => {
                             state
                                 .user_rate_limiter
                                 .cache_config(
                                     uid,
-                                    user.rate_limit_rps as u32,
-                                    user.rate_limit_burst as u32,
-                                    user.rate_limit_enabled,
-                                    user.max_connections,
+                                    cached.rate_limit_rps as u32,
+                                    cached.rate_limit_burst as u32,
+                                    cached.rate_limit_enabled,
+                                    cached.max_connections,
                                 )
                                 .await;
+                            // Per-user protocol restriction check
+                            if let Some(ref allowed) = cached.allowed_protocols {
+                                if let Ok(protos) = serde_json::from_str::<Vec<String>>(allowed) {
+                                    let proto_str = protocol.to_string().to_lowercase();
+                                    if !protos.iter().any(|p| p.to_lowercase() == proto_str) {
+                                        tracing::warn!(
+                                            "User {} not allowed to use protocol {} (allowed: {:?})",
+                                            uid, protocol, protos
+                                        );
+                                        return;
+                                    }
+                                }
+                            }
                             crate::rate_limit::UserRateLimitConfig {
-                                rps: user.rate_limit_rps as u32,
-                                burst: user.rate_limit_burst as u32,
-                                enabled: user.rate_limit_enabled,
-                                max_connections: user.max_connections,
+                                rps: cached.rate_limit_rps as u32,
+                                burst: cached.rate_limit_burst as u32,
+                                enabled: cached.rate_limit_enabled,
+                                max_connections: cached.max_connections,
                                 cached_at: std::time::Instant::now(),
                             }
                         }
-                        _ => crate::rate_limit::UserRateLimitConfig {
+                        None => crate::rate_limit::UserRateLimitConfig {
                             rps: 10,
                             burst: 20,
                             enabled: false,
@@ -357,17 +370,26 @@ async fn handle_client(
     // Check quota if user is authenticated (skip for config-based auth sentinel -1)
     if let Some(uid) = user_id {
         if uid > 0 {
-            // Check cached quota result first (30s TTL avoids SUM() per connection)
-            let quota_allowed = if let Some(entry) = state.quota_cache.get(&uid) {
-                let (allowed, cached_at) = entry.value();
-                if cached_at.elapsed() < std::time::Duration::from_secs(30) {
-                    Some(*allowed)
-                } else {
-                    None // Cache expired
-                }
+            // Check Redis cache first, then DashMap fallback, then DB
+            let quota_allowed = if let Some(ref cache) = state.cache {
+                cache.get_quota_allowed(uid).await
             } else {
-                None // Cache miss
+                None
             };
+
+            // Fallback to DashMap if Redis miss
+            let quota_allowed = quota_allowed.or_else(|| {
+                if let Some(entry) = state.quota_cache.get(&uid) {
+                    let (allowed, cached_at) = entry.value();
+                    if cached_at.elapsed() < std::time::Duration::from_secs(30) {
+                        Some(*allowed)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            });
 
             let has_quota = match quota_allowed {
                 Some(allowed) => allowed,
@@ -375,6 +397,10 @@ async fn handle_client(
                     // Cache miss or expired: query DB and cache result
                     match crate::db::quota::check_quota(&state.db_pool, uid).await {
                         Ok(allowed) => {
+                            // Cache in both Redis and DashMap
+                            if let Some(ref cache) = state.cache {
+                                cache.set_quota_allowed(uid, allowed).await;
+                            }
                             state
                                 .quota_cache
                                 .insert(uid, (allowed, std::time::Instant::now()));
@@ -406,32 +432,28 @@ async fn handle_client(
             // Enforce per-user concurrent connection limit
             match state.state.count_user_connections(uid).await {
                 Ok(active_count) => {
-                    // Try cache first (populated by auth middleware, 60s TTL)
                     let max_connections = match state
                         .user_rate_limiter
                         .get_cached_max_connections(uid)
                         .await
                     {
                         Some(mc) => mc as usize,
-                        None => {
-                            // Cache miss: fetch from DB and cache for next time
-                            match crate::db::users::get_user_by_id(&state.db_pool, uid).await {
-                                Ok(Some(user)) => {
-                                    state
-                                        .user_rate_limiter
-                                        .cache_config(
-                                            uid,
-                                            user.rate_limit_rps as u32,
-                                            user.rate_limit_burst as u32,
-                                            user.rate_limit_enabled,
-                                            user.max_connections,
-                                        )
-                                        .await;
-                                    user.max_connections as usize
-                                }
-                                _ => 5,
+                        None => match state.cached_user_by_id(uid).await {
+                            Some(cu) => {
+                                state
+                                    .user_rate_limiter
+                                    .cache_config(
+                                        uid,
+                                        cu.rate_limit_rps as u32,
+                                        cu.rate_limit_burst as u32,
+                                        cu.rate_limit_enabled,
+                                        cu.max_connections,
+                                    )
+                                    .await;
+                                cu.max_connections as usize
                             }
-                        }
+                            None => 5,
+                        },
                     };
                     if active_count >= max_connections {
                         tracing::warn!(
@@ -498,8 +520,11 @@ async fn handle_client(
                         "success",
                     )
                     .await;
-                    // Invalidate quota cache so next connection gets fresh check
-                    state.quota_cache.remove(&uid);
+                    // Track bandwidth in Redis and invalidate quota caches
+                    state
+                        .track_bandwidth(uid, bytes_sent as i64 + bytes_received as i64)
+                        .await;
+                    state.invalidate_quota_cache(uid).await;
                 }
             }
             // Record successful request
@@ -537,8 +562,8 @@ async fn handle_client(
                         error_label,
                     )
                     .await;
-                    // Invalidate quota cache so next connection gets fresh check
-                    state.quota_cache.remove(&uid);
+                    // Invalidate quota caches
+                    state.invalidate_quota_cache(uid).await;
                 }
             }
             if error_type != ErrorType::Tunnel {

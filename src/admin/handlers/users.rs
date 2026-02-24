@@ -149,6 +149,12 @@ pub async fn update_user(
     // Invalidate rate limit cache for this user to pick up new settings
     state.user_rate_limiter.invalidate_user(user_id).await;
 
+    // Invalidate Redis caches for this user
+    state
+        .invalidate_user_cache(user_id, &updated_user.username)
+        .await;
+    state.invalidate_api_key_cache(user_id).await;
+
     Ok(Json(UserResponse::from(updated_user)))
 }
 
@@ -172,9 +178,21 @@ pub async fn delete_user(
         return Err(StatusCode::BAD_REQUEST);
     }
 
+    // Fetch username before deletion for cache invalidation
+    let target_user = users::get_user_by_id(&state.db_pool, user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     users::delete_user(&state.db_pool, user_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Invalidate all caches for the deleted user
+    let username = target_user.map(|u| u.username).unwrap_or_default();
+    state.invalidate_user_cache(user_id, &username).await;
+    state.invalidate_api_key_cache(user_id).await;
+    state.invalidate_quota_cache(user_id).await;
+    state.invalidate_approval_cache(user_id).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -277,5 +295,9 @@ pub async fn revoke_api_key(
     api_keys_crud::revoke_api_key(&state.db_pool, key_id, user_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Invalidate cached API key verifications for this user
+    state.invalidate_api_key_cache(user_id).await;
+
     Ok(StatusCode::NO_CONTENT)
 }
