@@ -34,6 +34,7 @@ governor = "0.6"
 nonzero_ext = "0.3"
 ipnet = "2.9"
 prometheus = "0.13"
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 lru = "0.12"
 dashmap = "6"
 

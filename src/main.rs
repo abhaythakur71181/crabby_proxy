@@ -1,6 +1,7 @@
 mod admin;
 mod app_state;
 mod auth;
+mod cache;
 mod config;
 mod config_env;
 mod connection;
