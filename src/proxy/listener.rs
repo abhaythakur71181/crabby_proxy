@@ -266,17 +266,15 @@ async fn handle_client(
                                     cached.max_connections,
                                 )
                                 .await;
-                            // Per-user protocol restriction check
-                            if let Some(ref allowed) = cached.allowed_protocols {
-                                if let Ok(protos) = serde_json::from_str::<Vec<String>>(allowed) {
-                                    let proto_str = protocol.as_str_lower();
-                                    if !protos.iter().any(|p| p.eq_ignore_ascii_case(proto_str)) {
-                                        tracing::warn!(
-                                            "User {} not allowed to use protocol {} (allowed: {:?})",
-                                            uid, protocol, protos
-                                        );
-                                        return;
-                                    }
+                            // Per-user protocol restriction check (pre-parsed at cache time)
+                            if let Some(ref protos) = cached.allowed_protocols {
+                                let proto_str = protocol.as_str_lower();
+                                if !protos.iter().any(|p| p.eq_ignore_ascii_case(proto_str)) {
+                                    tracing::warn!(
+                                        "User {} not allowed to use protocol {} (allowed: {:?})",
+                                        uid, protocol, protos
+                                    );
+                                    return;
                                 }
                             }
                             crate::rate_limit::UserRateLimitConfig {
@@ -347,7 +345,7 @@ async fn handle_client(
         id: conn_id,
         client_addr,
         target_addr: format!("{:?}", target),
-        protocol: protocol.clone(),
+        protocol,
         state: crate::connection::ConnectionState::Active,
         user_id,
         bytes_sent: 0,
@@ -496,6 +494,7 @@ async fn handle_client(
         .dec();
 
     let ended_at = chrono::Utc::now().timestamp();
+    let client_ip_str = client_addr.ip().to_string();
     match result {
         Ok((bytes_sent, bytes_received)) => {
             // Record bytes transferred metrics
@@ -512,7 +511,7 @@ async fn handle_client(
                         &state.db_pool,
                         uid,
                         &conn_id,
-                        &client_addr.ip().to_string(),
+                        &client_ip_str,
                         &target_addr_str,
                         proto_label,
                         started_at,
@@ -554,7 +553,7 @@ async fn handle_client(
                         &state.db_pool,
                         uid,
                         &conn_id,
-                        &client_addr.ip().to_string(),
+                        &client_ip_str,
                         &target_addr_str,
                         proto_label,
                         started_at,
