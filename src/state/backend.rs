@@ -53,7 +53,7 @@ pub trait StateBackend: Send + Sync {
     async fn count_connections(&self) -> StateResult<usize>;
     async fn count_user_connections(&self, user_id: i64) -> StateResult<usize>;
 
-    // Pending connections (TODO: for approval workflow)
+    // Pending connections (for approval workflow)
     async fn get_pending(&self, id: Uuid) -> StateResult<ConnectionRequest>;
     async fn add_pending(&self, req: ConnectionRequest) -> StateResult<()>;
     async fn remove_pending(&self, id: Uuid) -> StateResult<()>;

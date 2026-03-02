@@ -119,13 +119,20 @@ async fn handle_client(
 ) {
     let conn_start = std::time::Instant::now();
     // Snapshot config values once to avoid multiple read locks per connection
-    let (ip_filter_enabled, rate_limiting_enabled, auth_required, socks4_enabled) = {
+    let (
+        ip_filter_enabled,
+        rate_limiting_enabled,
+        auth_required,
+        socks4_enabled,
+        connection_approval,
+    ) = {
         let config = state.config.read().await;
         (
             config.filtering.ip_filter_enabled,
             config.rate_limiting.enabled,
             config.authentication.enabled,
             config.protocols.enable_socks4,
+            config.features.connection_approval,
         )
     };
 
@@ -247,54 +254,90 @@ async fn handle_client(
         }
     }
 
+    // Connection approval check — require active IP approval for non-admin users
+    if connection_approval {
+        if let Some(uid) = user_id {
+            if uid > 0 {
+                let is_admin = match crate::db::users::get_user_by_id(&state.db_pool, uid).await {
+                    Ok(Some(user)) => user.role == "root_admin" || user.role == "admin",
+                    _ => false,
+                };
+                if !is_admin {
+                    match crate::db::approvals::is_ip_approved(
+                        &state.db_pool,
+                        uid,
+                        &client_addr.ip().to_string(),
+                    )
+                    .await
+                    {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            tracing::warn!(
+                                "Connection from {} rejected: IP not approved for user {}",
+                                client_addr.ip(),
+                                uid
+                            );
+                            return;
+                        }
+                        Err(e) => {
+                            tracing::error!("Approval check failed for user {}: {}", uid, e);
+                            return; // Fail-closed
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Per-user RPS rate limiting (skip for config-based auth sentinel -1)
     if let Some(uid) = user_id {
         if uid > 0 {
-            let rate_config = match state.user_rate_limiter.get_cached_config(uid).await {
-                Some(config) => config,
-                None => {
-                    // Redis -> DB with auto-populate via cached_user_by_id
-                    match state.cached_user_by_id(uid).await {
-                        Some(cached) => {
-                            state
-                                .user_rate_limiter
-                                .cache_config(
-                                    uid,
-                                    cached.rate_limit_rps as u32,
-                                    cached.rate_limit_burst as u32,
-                                    cached.rate_limit_enabled,
-                                    cached.max_connections,
-                                )
-                                .await;
-                            // Per-user protocol restriction check (pre-parsed at cache time)
-                            if let Some(ref protos) = cached.allowed_protocols {
-                                let proto_str = protocol.as_str_lower();
-                                if !protos.iter().any(|p| p.eq_ignore_ascii_case(proto_str)) {
-                                    tracing::warn!(
+            let rate_config =
+                match state.user_rate_limiter.get_cached_config(uid).await {
+                    Some(config) => config,
+                    None => {
+                        // Redis -> DB with auto-populate via cached_user_by_id
+                        match state.cached_user_by_id(uid).await {
+                            Some(cached) => {
+                                state
+                                    .user_rate_limiter
+                                    .cache_config(
+                                        uid,
+                                        cached.rate_limit_rps as u32,
+                                        cached.rate_limit_burst as u32,
+                                        cached.rate_limit_enabled,
+                                        cached.max_connections,
+                                    )
+                                    .await;
+                                // Per-user protocol restriction check (pre-parsed at cache time)
+                                if let Some(ref protos) = cached.allowed_protocols {
+                                    let proto_str = protocol.as_str_lower();
+                                    if !protos.iter().any(|p| p.eq_ignore_ascii_case(proto_str)) {
+                                        tracing::warn!(
                                         "User {} not allowed to use protocol {} (allowed: {:?})",
                                         uid, protocol, protos
                                     );
-                                    return;
+                                        return;
+                                    }
+                                }
+                                crate::rate_limit::UserRateLimitConfig {
+                                    rps: cached.rate_limit_rps as u32,
+                                    burst: cached.rate_limit_burst as u32,
+                                    enabled: cached.rate_limit_enabled,
+                                    max_connections: cached.max_connections,
+                                    cached_at: std::time::Instant::now(),
                                 }
                             }
-                            crate::rate_limit::UserRateLimitConfig {
-                                rps: cached.rate_limit_rps as u32,
-                                burst: cached.rate_limit_burst as u32,
-                                enabled: cached.rate_limit_enabled,
-                                max_connections: cached.max_connections,
+                            None => crate::rate_limit::UserRateLimitConfig {
+                                rps: 10,
+                                burst: 20,
+                                enabled: false,
+                                max_connections: 5,
                                 cached_at: std::time::Instant::now(),
-                            }
+                            },
                         }
-                        None => crate::rate_limit::UserRateLimitConfig {
-                            rps: 10,
-                            burst: 20,
-                            enabled: false,
-                            max_connections: 5,
-                            cached_at: std::time::Instant::now(),
-                        },
                     }
-                }
-            };
+                };
             if !state
                 .user_rate_limiter
                 .check_user_cached(uid, rate_config)

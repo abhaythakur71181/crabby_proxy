@@ -9,6 +9,16 @@ use crate::connection::ServiceType;
 
 use super::{error::TunnelError, port_allocator::PortAllocator};
 
+/// Public tunnel info for admin API responses
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TunnelInfo {
+    pub tunnel_id: String,
+    pub listen_port: u16,
+    pub target_addr: String,
+    pub service_type: String,
+    pub created_at: i64,
+}
+
 pub struct TunnelManager {
     active_tunnels: HashMap<u16, ActiveTunnel>,
     port_allocator: PortAllocator,
@@ -107,6 +117,45 @@ impl TunnelManager {
             }
         }
         self.active_tunnels.clear();
+    }
+
+    /// List all active tunnels (for admin API)
+    pub fn list_active(&self) -> Vec<TunnelInfo> {
+        self.active_tunnels
+            .values()
+            .map(|t| TunnelInfo {
+                tunnel_id: t.tunnel_id.to_string(),
+                listen_port: t.listen_port,
+                target_addr: t.target_addr.to_string(),
+                service_type: format!("{:?}", t.service_type),
+                created_at: t.created_at.timestamp(),
+            })
+            .collect()
+    }
+
+    /// Count active tunnels
+    pub fn count_active(&self) -> usize {
+        self.active_tunnels.len()
+    }
+
+    /// Create a tunnel from admin API (no client connection needed)
+    pub async fn create_tunnel_admin(
+        &mut self,
+        service_type: ServiceType,
+        preferred_port: Option<u16>,
+        target_addr: SocketAddr,
+    ) -> Result<TunnelInfo, TunnelError> {
+        let port = self
+            .create_reverse_tunnel(service_type, preferred_port, target_addr)
+            .await?;
+        let tunnel = self.active_tunnels.get(&port).unwrap();
+        Ok(TunnelInfo {
+            tunnel_id: tunnel.tunnel_id.to_string(),
+            listen_port: tunnel.listen_port,
+            target_addr: tunnel.target_addr.to_string(),
+            service_type: format!("{:?}", tunnel.service_type),
+            created_at: tunnel.created_at.timestamp(),
+        })
     }
 }
 

@@ -6,61 +6,73 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::app_state::AppState;
+use crate::connection::ServiceType;
 use std::sync::Arc;
 
-#[derive(Serialize, Deserialize)]
-pub struct TunnelInfo {
-    pub port: u16,
-    pub service_type: String,
-    pub active: bool,
-}
-
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 pub struct TunnelsListResponse {
-    pub tunnels: Vec<TunnelInfo>,
+    pub tunnels: Vec<crate::tunnel::manager::TunnelInfo>,
     pub total: usize,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 pub struct CreateTunnelRequest {
     pub service_type: String,
     pub port: Option<u16>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct CreateTunnelResponse {
-    pub port: u16,
-    pub message: String,
+    pub target_addr: Option<String>,
 }
 
 /// List all active tunnels
-/// NOTE: TunnelManager doesn't expose active tunnels publicly yet
-pub async fn list_tunnels(State(_state): State<Arc<AppState>>) -> Json<TunnelsListResponse> {
-    // TODO: Add list_active() method to TunnelManager
+pub async fn list_tunnels(State(state): State<Arc<AppState>>) -> Json<TunnelsListResponse> {
+    let tunnels = state.tunnels.read().await;
+    let active = tunnels.list_active();
+    let total = active.len();
     Json(TunnelsListResponse {
-        tunnels: vec![],
-        total: 0,
+        tunnels: active,
+        total,
     })
 }
 
 /// Create a new tunnel (if enabled in config)
-/// NOTE: This is a simplified stub - full implementation requires connection context
 pub async fn create_tunnel(
     State(state): State<Arc<AppState>>,
-    Json(_req): Json<CreateTunnelRequest>,
-) -> Result<Json<CreateTunnelResponse>, StatusCode> {
+    Json(req): Json<CreateTunnelRequest>,
+) -> Result<(StatusCode, Json<crate::tunnel::manager::TunnelInfo>), StatusCode> {
     let config = state.config.read().await;
-
     if !config.features.reverse_tunnels {
         return Err(StatusCode::FORBIDDEN);
     }
+    drop(config);
 
-    // TODO: Full tunnel creation requires client connection context
-    // This is a placeholder response
-    Ok(Json(CreateTunnelResponse {
-        port: 0,
-        message: "Tunnel creation requires client connection - use proxy protocol".to_string(),
-    }))
+    let service_type = match req.service_type.to_lowercase().as_str() {
+        "http" | "https" | "web" => ServiceType::WebService,
+        "ssh" => ServiceType::SshService,
+        "postgres" => ServiceType::Database(crate::connection::DbType::Postgres),
+        "mysql" => ServiceType::Database(crate::connection::DbType::MySQL),
+        "redis" => ServiceType::Database(crate::connection::DbType::Redis),
+        "mongodb" => ServiceType::Database(crate::connection::DbType::MongoDB),
+        other => ServiceType::Custom(other.to_string()),
+    };
+    let target_addr = req
+        .target_addr
+        .as_deref()
+        .unwrap_or("127.0.0.1:0")
+        .parse()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let mut tunnels = state.tunnels.write().await;
+    match tunnels
+        .create_tunnel_admin(service_type, req.port, target_addr)
+        .await
+    {
+        Ok(info) => {
+            tracing::info!("Created tunnel on port {} via admin API", info.listen_port);
+            Ok((StatusCode::CREATED, Json(info)))
+        }
+        Err(e) => {
+            tracing::error!("Failed to create tunnel: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
 }
 
 /// Close a tunnel
