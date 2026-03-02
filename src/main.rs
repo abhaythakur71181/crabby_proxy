@@ -40,14 +40,32 @@ struct Args {
     /// Override admin bind address
     #[arg(long)]
     admin_bind: Option<String>,
+
+    /// Log format: "text" (default) or "json" for structured JSON logs
+    #[arg(long, default_value = "text")]
+    log_format: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .init();
     let args = Args::parse();
+
+    match args.log_format.as_str() {
+        "json" => {
+            tracing_subscriber::fmt()
+                .json()
+                .with_max_level(tracing::Level::TRACE)
+                .with_target(true)
+                .with_thread_ids(true)
+                .init();
+        }
+        _ => {
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::TRACE)
+                .init();
+        }
+    }
+
     let mut config = if args.config.exists() {
         tracing::info!("Loading configuration from: {}", args.config.display());
         Config::from_file(&args.config)?
