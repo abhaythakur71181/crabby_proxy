@@ -67,6 +67,8 @@ pub struct FeatureConfig {
     pub reverse_tunnels: bool,
     pub tunnel_port_start: u16,
     pub tunnel_port_end: u16,
+    pub webhook_url: Option<String>,
+    pub webhook_events: Vec<String>, // e.g. ["quota_exceeded", "rate_limit", "auth_failure"]
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -200,6 +202,8 @@ impl Default for Config {
                 reverse_tunnels: false,
                 tunnel_port_start: 10000,
                 tunnel_port_end: 10999,
+                webhook_url: None,
+                webhook_events: vec![],
             },
             state: StateConfig {
                 backend: "memory".to_string(),
