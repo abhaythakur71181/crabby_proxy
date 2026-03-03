@@ -1,4 +1,5 @@
 pub mod approvals;
+pub mod audit;
 pub mod auth;
 pub mod config;
 pub mod connections;

@@ -16,6 +16,7 @@ mod stream;
 mod tunnel;
 mod utils;
 mod validation;
+mod webhook;
 
 use crate::app_state::AppState;
 use crate::config::Config;
