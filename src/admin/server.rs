@@ -25,6 +25,7 @@ pub async fn run_admin_server(
     // Protected routes (auth required)
     let protected_routes = Router::new()
         .route("/stats", get(handlers::health::stats))
+        .route("/api/dashboard", get(handlers::health::dashboard))
         .route(
             "/api/connections",
             get(handlers::connections::list_connections),
@@ -100,6 +101,17 @@ pub async fn run_admin_server(
         .route(
             "/api/users/:id/approvals",
             get(handlers::approvals::list_user_approvals),
+        )
+        // Audit log routes
+        .route("/api/audit-log", get(handlers::audit::list_audit_log))
+        // Session management routes
+        .route(
+            "/api/users/:id/sessions",
+            get(handlers::audit::list_user_sessions),
+        )
+        .route(
+            "/api/users/:id/sessions",
+            delete(handlers::audit::delete_user_sessions),
         )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
