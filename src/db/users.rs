@@ -297,6 +297,14 @@ pub async fn list_users(pool: &SqlitePool) -> Result<Vec<User>, sqlx::Error> {
     Ok(users)
 }
 
+/// Count active users
+pub async fn count_users(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
+    let row = sqlx::query("SELECT COUNT(*) FROM users WHERE is_active = 1")
+        .fetch_one(pool)
+        .await?;
+    Ok(sqlx::Row::get(&row, 0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
