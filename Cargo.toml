@@ -37,6 +37,7 @@ prometheus = "0.13"
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 lru = "0.12"
 dashmap = "6"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [dev-dependencies]
 serial_test = "3.1"
