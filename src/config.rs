@@ -94,11 +94,18 @@ pub struct FilterConfig {
     pub ip_blocklist: Vec<String>,
     pub geo_blocking_enabled: bool,
     pub blocked_countries: Vec<String>,
-    // IP filter mode: "blocklist" (default) or "allow list"
     #[serde(default = "default_ip_filter_mode")]
     pub ip_filter_mode: String,
     #[serde(default)]
     pub ip_filter_enabled: bool,
+    // Target domain filtering (glob patterns: "*.example.com", "api.github.com")
+    #[serde(default)]
+    pub global_allowed_targets: Vec<String>,
+    #[serde(default)]
+    pub global_blocked_targets: Vec<String>,
+    // Default access schedule (JSON: {"days":["mon","tue"...],"start_hour":9,"end_hour":18,"timezone":"UTC"})
+    #[serde(default)]
+    pub default_access_schedule: Option<String>,
 }
 
 fn default_ip_filter_mode() -> String {
@@ -225,6 +232,9 @@ impl Default for Config {
                 blocked_countries: vec![],
                 ip_filter_mode: "blocklist".to_string(),
                 ip_filter_enabled: false,
+                global_allowed_targets: vec![],
+                global_blocked_targets: vec![],
+                default_access_schedule: None,
             },
             logging: LoggingConfig {
                 level: "info".to_string(),

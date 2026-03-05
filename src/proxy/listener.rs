@@ -382,6 +382,48 @@ async fn handle_client(
             }
         }
     };
+
+    // Target domain filter and access schedule (skip for admins / config-auth)
+    if let Some(uid) = user_id {
+        if uid > 0 {
+            // Fetch user + global config for filtering
+            let user_data = crate::db::users::get_user_by_id(&state.db_pool, uid).await;
+            let config = state.config.read().await;
+            if let Ok(Some(ref user)) = user_data {
+                let is_admin = user.role == "root_admin" || user.role == "admin";
+                if !is_admin {
+                    if !crate::target_filter::is_target_allowed(
+                        &target.host,
+                        &config.filtering.global_allowed_targets,
+                        &config.filtering.global_blocked_targets,
+                        user.allowed_targets.as_deref(),
+                        user.blocked_targets.as_deref(),
+                    ) {
+                        tracing::warn!(
+                            "Target {} blocked for user {} by domain filter",
+                            target.host,
+                            uid
+                        );
+                        return;
+                    }
+                    let schedule = user
+                        .access_schedule
+                        .as_deref()
+                        .or(config.filtering.default_access_schedule.as_deref());
+                    if let Some(sched) = schedule {
+                        if !crate::target_filter::is_within_schedule(sched) {
+                            tracing::warn!(
+                                "Access denied for user {} — outside access schedule",
+                                uid
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // INFO: for tracking
     let proto_label = protocol.as_str();
     let conn_info = crate::state::backend::ConnectionInfo {
