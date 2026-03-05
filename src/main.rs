@@ -13,6 +13,7 @@ mod proxy;
 mod rate_limit;
 mod state;
 mod stream;
+mod target_filter;
 mod tunnel;
 mod utils;
 mod validation;

@@ -330,6 +330,9 @@ mod tests {
                 rate_limit_burst INTEGER NOT NULL DEFAULT 20,
                 allowed_protocols TEXT,
                 ip_whitelist TEXT,
+                allowed_targets TEXT,
+                blocked_targets TEXT,
+                access_schedule TEXT,
                 notes TEXT,
                 last_login_at INTEGER,
                 monthly_bandwidth_quota INTEGER

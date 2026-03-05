@@ -36,6 +36,13 @@ pub struct User {
     pub allowed_protocols: Option<String>,
     pub ip_whitelist: Option<String>,
 
+    // Target filtering (per-user)
+    pub allowed_targets: Option<String>, // JSON: ["*.example.com"]
+    pub blocked_targets: Option<String>, // JSON: ["*.malware.org"]
+
+    // Time-based access
+    pub access_schedule: Option<String>, // JSON: {"days":["mon"...],"start_hour":9,"end_hour":18,"timezone":"UTC"}
+
     // Metadata
     pub notes: Option<String>,
     pub last_login_at: Option<i64>,
@@ -73,6 +80,9 @@ mod tests {
             rate_limit_burst: 20,
             allowed_protocols: None,
             ip_whitelist: None,
+            allowed_targets: None,
+            blocked_targets: None,
+            access_schedule: None,
             notes: None,
             last_login_at: None,
         }

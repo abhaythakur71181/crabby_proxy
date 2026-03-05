@@ -119,6 +119,9 @@ mod tests {
             rate_limit_burst: 20,
             allowed_protocols: Some("[\"http\",\"https\"]".to_string()),
             ip_whitelist: None,
+            allowed_targets: None,
+            blocked_targets: None,
+            access_schedule: None,
             notes: Some("test notes".to_string()),
             last_login_at: Some(1700000050),
         }
