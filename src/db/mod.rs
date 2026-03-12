@@ -3,6 +3,7 @@ pub mod api_keys_crud;
 pub mod approvals;
 pub mod audit_log;
 pub mod connection;
+pub mod groups;
 pub mod models;
 pub mod quota;
 pub mod sessions;

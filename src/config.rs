@@ -94,6 +94,10 @@ pub struct FilterConfig {
     pub ip_blocklist: Vec<String>,
     pub geo_blocking_enabled: bool,
     pub blocked_countries: Vec<String>,
+    #[serde(default)]
+    pub allowed_countries: Vec<String>, // If non-empty, ONLY these countries are allowed
+    #[serde(default)]
+    pub geoip_database_path: Option<String>, // Path to MaxMind GeoLite2-Country.mmdb
     #[serde(default = "default_ip_filter_mode")]
     pub ip_filter_mode: String,
     #[serde(default)]
@@ -230,6 +234,8 @@ impl Default for Config {
                 ip_blocklist: vec![],
                 geo_blocking_enabled: false,
                 blocked_countries: vec![],
+                allowed_countries: vec![],
+                geoip_database_path: None,
                 ip_filter_mode: "blocklist".to_string(),
                 ip_filter_enabled: false,
                 global_allowed_targets: vec![],

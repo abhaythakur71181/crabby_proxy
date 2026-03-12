@@ -113,6 +113,27 @@ pub async fn run_admin_server(
             "/api/users/:id/sessions",
             delete(handlers::audit::delete_user_sessions),
         )
+        // User group routes
+        .route("/api/groups", post(handlers::groups::create_group))
+        .route("/api/groups", get(handlers::groups::list_groups))
+        .route("/api/groups/:id", get(handlers::groups::get_group))
+        .route("/api/groups/:id", delete(handlers::groups::delete_group))
+        .route(
+            "/api/groups/:id/members",
+            post(handlers::groups::add_member),
+        )
+        .route(
+            "/api/groups/:id/members",
+            get(handlers::groups::list_members),
+        )
+        .route(
+            "/api/groups/:id/members/:user_id",
+            delete(handlers::groups::remove_member),
+        )
+        .route(
+            "/api/users/:id/groups",
+            get(handlers::groups::list_user_groups),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             super::auth::auth_middleware,
