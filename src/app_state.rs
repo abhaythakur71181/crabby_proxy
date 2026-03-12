@@ -58,6 +58,9 @@ pub struct AppState {
     // IP filter
     pub ip_filter: Arc<RwLock<crate::ip_filter::IpFilter>>,
 
+    // GeoIP filter (optional — requires MaxMind DB file)
+    pub geo_filter: Option<crate::geo_filter::SharedGeoFilter>,
+
     // Graceful shutdown signal
     pub shutdown_tx: tokio::sync::broadcast::Sender<()>,
 
@@ -162,6 +165,10 @@ impl AppState {
             Arc::new(RwLock::new(filter))
         };
 
+        // Initialize GeoIP filter (optional)
+        let geo_filter =
+            crate::geo_filter::init_geo_filter(config.filtering.geoip_database_path.as_deref());
+
         // Create graceful shutdown channel
         let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
 
@@ -203,6 +210,7 @@ impl AppState {
             user_rate_limiter,
             login_rate_limiter,
             ip_filter,
+            geo_filter,
             shutdown_tx,
             quota_cache: Arc::new(dashmap::DashMap::new()),
             cache,

@@ -7,6 +7,7 @@ mod config_env;
 mod connection;
 mod db;
 mod error;
+mod geo_filter;
 mod ip_filter;
 mod metrics;
 mod proxy;

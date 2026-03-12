@@ -151,6 +151,26 @@ async fn handle_client(
             .inc();
     }
 
+    // Geo-blocking check (after IP filter, before rate limiting)
+    if let Some(ref geo) = state.geo_filter {
+        let config = state.config.read().await;
+        if config.filtering.geo_blocking_enabled {
+            let (allowed, country) = geo.is_ip_allowed(
+                client_addr.ip(),
+                &config.filtering.blocked_countries,
+                &config.filtering.allowed_countries,
+            );
+            if !allowed {
+                tracing::warn!(
+                    "Connection from {} blocked by geo-filter (country: {})",
+                    client_addr.ip(),
+                    country.as_deref().unwrap_or("unknown")
+                );
+                return;
+            }
+        }
+    }
+
     // Check IP rate limiting
     if rate_limiting_enabled {
         if !state.ip_rate_limiter.check_ip(client_addr.ip()).await {
