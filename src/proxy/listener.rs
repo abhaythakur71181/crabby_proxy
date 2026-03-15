@@ -111,87 +111,40 @@ async fn send_error_response(
     }
 }
 
+/// Main connection handler — orchestrates the validation pipeline.
+///
+/// Flow: Config snapshot → Phase 1 (IP validators) → Protocol detect/TLS/Auth
+///     → Phase 2 (user validators) → Target parse → Phase 3 (target validators)
+///     → Connection tracking → Phase 4 (quota validators) → Relay + record usage
 async fn handle_client(
     mut client_stream: TcpStream,
     client_addr: SocketAddr,
     state: &AppState,
     conn_id: uuid::Uuid,
 ) {
-    let conn_start = std::time::Instant::now();
-    // Snapshot config values once to avoid multiple read locks per connection
-    let (
-        ip_filter_enabled,
-        rate_limiting_enabled,
-        auth_required,
-        socks4_enabled,
-        connection_approval,
-    ) = {
-        let config = state.config.read().await;
-        (
-            config.filtering.ip_filter_enabled,
-            config.rate_limiting.enabled,
-            config.authentication.enabled,
-            config.protocols.enable_socks4,
-            config.features.connection_approval,
-        )
+    use super::pipeline::Verdict;
+    use super::validators;
+    let mut ctx = super::pipeline::ConnectionContext::new(client_addr, conn_id, state).await;
+    // ── Phase 1: Pre-Connection (IP-based, no stream needed) ────────────
+    for result in [
+        validators::validate_ip_filter(&ctx, state).await,
+        validators::validate_geo_block(&ctx, state).await,
+        validators::validate_ip_rate_limit(&ctx, state).await,
+    ] {
+        if let Verdict::Deny(reason) = result {
+            tracing::warn!("{} denied: {}", client_addr, reason);
+            return;
+        }
+    }
+    // ── Processing: Protocol detection ──────────────────────────────────
+    let protocol = match ProxyProtocol::detect_from_stream(&mut client_stream).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!("Protocol detection failed for {}: {}", client_addr, e);
+            return;
+        }
     };
-
-    // Check IP filter first (before any processing)
-    if ip_filter_enabled {
-        let ip_filter = state.ip_filter.read().await;
-        if !ip_filter.is_allowed(client_addr.ip()) {
-            tracing::warn!("Connection from {} blocked by IP filter", client_addr.ip());
-            crate::metrics::IP_FILTER_ACTIONS
-                .with_label_values(&["blocked"])
-                .inc();
-            return; // Drop connection silently
-        }
-        crate::metrics::IP_FILTER_ACTIONS
-            .with_label_values(&["allowed"])
-            .inc();
-    }
-
-    // Geo-blocking check (after IP filter, before rate limiting)
-    if let Some(ref geo) = state.geo_filter {
-        let config = state.config.read().await;
-        if config.filtering.geo_blocking_enabled {
-            let (allowed, country) = geo.is_ip_allowed(
-                client_addr.ip(),
-                &config.filtering.blocked_countries,
-                &config.filtering.allowed_countries,
-            );
-            if !allowed {
-                tracing::warn!(
-                    "Connection from {} blocked by geo-filter (country: {})",
-                    client_addr.ip(),
-                    country.as_deref().unwrap_or("unknown")
-                );
-                return;
-            }
-        }
-    }
-
-    // Check IP rate limiting
-    if rate_limiting_enabled {
-        if !state.ip_rate_limiter.check_ip(client_addr.ip()).await {
-            tracing::warn!("Rate limit exceeded for {}", client_addr.ip());
-            crate::metrics::RATE_LIMIT_EXCEEDED
-                .with_label_values(&["ip"])
-                .inc();
-            return; // Drop connection
-        }
-    }
-
-    let mut protocol;
-    let protocol_detection_result = ProxyProtocol::detect_from_stream(&mut client_stream).await;
-    if let Err(e) = protocol_detection_result {
-        tracing::error!("Protocol detection failed for {}: {}", client_addr, e);
-        return;
-    } else {
-        protocol = protocol_detection_result.unwrap();
-    }
-
-    // If protocol is HTTPS and we have TLS support, upgrade the connection
+    // ── Processing: TLS upgrade (for HTTPS) ─────────────────────────────
     let stream: ClientStream = if protocol == ProxyProtocol::HTTPS {
         match &state.tls_acceptor {
             Some(tls_acceptor) => match tls_acceptor.accept(client_stream).await {
@@ -206,7 +159,7 @@ async fn handle_client(
             },
             None => {
                 tracing::error!(
-                    "HTTPS protocol detected but no TLS configuration available for {}",
+                    "HTTPS detected but no TLS config available for {}",
                     client_addr
                 );
                 return;
@@ -215,28 +168,16 @@ async fn handle_client(
     } else {
         ClientStream::Plain(client_stream)
     };
-
-    // Wrap stream in buffered wrapper for TLS peek support
     let mut buffered_stream = BufferedClientStream::new(stream);
-
-    // If credentials are required, perform protocol-specific authentication
-    let user_id = if auth_required {
-        match protocol.authenticate(&mut buffered_stream, &state).await {
+    // ── Processing: Authentication ──────────────────────────────────────
+    let user_id = if ctx.config.auth_required {
+        match protocol.authenticate(&mut buffered_stream, state).await {
             Ok((true, uid)) => {
-                tracing::debug!(
-                    "{} authenticated successfully via {}",
-                    &client_addr,
-                    protocol
-                );
+                tracing::debug!("{} authenticated via {}", client_addr, protocol);
                 uid
             }
             Ok((false, _)) => {
-                // Authentication required for this protocol
-                tracing::error!(
-                    "Authentication required for {} via {}",
-                    &client_addr,
-                    protocol
-                );
+                tracing::error!("Auth required for {} via {}", client_addr, protocol);
                 return;
             }
             Err(e) => {
@@ -246,134 +187,30 @@ async fn handle_client(
         }
     } else {
         tracing::debug!("Skipping authentication (--no-creds)");
-        None // No auth required
+        None
     };
-
-    // Check SOCKS4 protocol restrictions (config-based with admin bypass)
-    if protocol == ProxyProtocol::SOCKS4 && !socks4_enabled {
-        let is_admin = if let Some(uid) = user_id {
-            state
-                .cached_user_by_id(uid)
-                .await
-                .map(|u| u.role == "root_admin" || u.role == "admin")
-                .unwrap_or(false)
-        } else {
-            false
-        };
-        if is_admin {
-            tracing::debug!("SOCKS4 allowed for admin user {:?}", user_id);
-        } else {
-            tracing::warn!(
-                "SOCKS4 connection from {} rejected (protocol disabled for non-admin users)",
-                client_addr
-            );
-            crate::metrics::AUTH_FAILURES
-                .with_label_values(&["socks4_disabled"])
-                .inc();
+    // Update context with auth results
+    ctx.user_id = user_id;
+    ctx.protocol = Some(protocol.clone());
+    if let Some(uid) = ctx.effective_uid() {
+        ctx.is_admin = state
+            .cached_user_by_id(uid)
+            .await
+            .map(|u| u.role == "root_admin" || u.role == "admin")
+            .unwrap_or(false);
+    }
+    // ── Phase 2: Post-Auth validators ───────────────────────────────────
+    for result in [
+        validators::validate_protocol_restriction(&ctx, state).await,
+        validators::validate_approval(&ctx, state).await,
+        validators::validate_user_rate_limit(&ctx, state).await,
+    ] {
+        if let Verdict::Deny(reason) = result {
+            tracing::warn!("{} denied: {}", client_addr, reason);
             return;
         }
     }
-
-    // Connection approval check — require active IP approval for non-admin users
-    if connection_approval {
-        if let Some(uid) = user_id {
-            if uid > 0 {
-                let is_admin = match crate::db::users::get_user_by_id(&state.db_pool, uid).await {
-                    Ok(Some(user)) => user.role == "root_admin" || user.role == "admin",
-                    _ => false,
-                };
-                if !is_admin {
-                    match crate::db::approvals::is_ip_approved(
-                        &state.db_pool,
-                        uid,
-                        &client_addr.ip().to_string(),
-                    )
-                    .await
-                    {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            tracing::warn!(
-                                "Connection from {} rejected: IP not approved for user {}",
-                                client_addr.ip(),
-                                uid
-                            );
-                            return;
-                        }
-                        Err(e) => {
-                            tracing::error!("Approval check failed for user {}: {}", uid, e);
-                            return; // Fail-closed
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Per-user RPS rate limiting (skip for config-based auth sentinel -1)
-    if let Some(uid) = user_id {
-        if uid > 0 {
-            let rate_config =
-                match state.user_rate_limiter.get_cached_config(uid).await {
-                    Some(config) => config,
-                    None => {
-                        // Redis -> DB with auto-populate via cached_user_by_id
-                        match state.cached_user_by_id(uid).await {
-                            Some(cached) => {
-                                state
-                                    .user_rate_limiter
-                                    .cache_config(
-                                        uid,
-                                        cached.rate_limit_rps as u32,
-                                        cached.rate_limit_burst as u32,
-                                        cached.rate_limit_enabled,
-                                        cached.max_connections,
-                                    )
-                                    .await;
-                                // Per-user protocol restriction check (pre-parsed at cache time)
-                                if let Some(ref protos) = cached.allowed_protocols {
-                                    let proto_str = protocol.as_str_lower();
-                                    if !protos.iter().any(|p| p.eq_ignore_ascii_case(proto_str)) {
-                                        tracing::warn!(
-                                        "User {} not allowed to use protocol {} (allowed: {:?})",
-                                        uid, protocol, protos
-                                    );
-                                        return;
-                                    }
-                                }
-                                crate::rate_limit::UserRateLimitConfig {
-                                    rps: cached.rate_limit_rps as u32,
-                                    burst: cached.rate_limit_burst as u32,
-                                    enabled: cached.rate_limit_enabled,
-                                    max_connections: cached.max_connections,
-                                    cached_at: std::time::Instant::now(),
-                                }
-                            }
-                            None => crate::rate_limit::UserRateLimitConfig {
-                                rps: 10,
-                                burst: 20,
-                                enabled: false,
-                                max_connections: 5,
-                                cached_at: std::time::Instant::now(),
-                            },
-                        }
-                    }
-                };
-            if !state
-                .user_rate_limiter
-                .check_user_cached(uid, rate_config)
-                .await
-            {
-                tracing::warn!("Per-user rate limit exceeded for user {}", uid);
-                crate::metrics::RATE_LIMIT_EXCEEDED
-                    .with_label_values(&["user"])
-                    .inc();
-                return;
-            }
-        }
-    }
-
-    // INFO: For HTTP/HTTPS, we need to parse the target from the buffered stream
-    // to preserve any data read during authentication
+    // ── Processing: Parse target ────────────────────────────────────────
     let (target, mut stream) = if matches!(protocol, ProxyProtocol::HTTP | ProxyProtocol::HTTPS) {
         match protocol
             .parse_target_from_buffered(&mut buffered_stream)
@@ -402,49 +239,19 @@ async fn handle_client(
             }
         }
     };
-
-    // Target domain filter and access schedule (skip for admins / config-auth)
-    if let Some(uid) = user_id {
-        if uid > 0 {
-            // Fetch user + global config for filtering
-            let user_data = crate::db::users::get_user_by_id(&state.db_pool, uid).await;
-            let config = state.config.read().await;
-            if let Ok(Some(ref user)) = user_data {
-                let is_admin = user.role == "root_admin" || user.role == "admin";
-                if !is_admin {
-                    if !crate::target_filter::is_target_allowed(
-                        &target.host,
-                        &config.filtering.global_allowed_targets,
-                        &config.filtering.global_blocked_targets,
-                        user.allowed_targets.as_deref(),
-                        user.blocked_targets.as_deref(),
-                    ) {
-                        tracing::warn!(
-                            "Target {} blocked for user {} by domain filter",
-                            target.host,
-                            uid
-                        );
-                        return;
-                    }
-                    let schedule = user
-                        .access_schedule
-                        .as_deref()
-                        .or(config.filtering.default_access_schedule.as_deref());
-                    if let Some(sched) = schedule {
-                        if !crate::target_filter::is_within_schedule(sched) {
-                            tracing::warn!(
-                                "Access denied for user {} — outside access schedule",
-                                uid
-                            );
-                            return;
-                        }
-                    }
-                }
-            }
+    // Update context with target
+    ctx.target_host = Some(target.host.clone());
+    // ── Phase 3: Post-Target validators ─────────────────────────────────
+    for result in [
+        validators::validate_target_domain(&ctx, state).await,
+        validators::validate_access_schedule(&ctx, state).await,
+    ] {
+        if let Verdict::Deny(reason) = result {
+            tracing::warn!("{} denied: {}", client_addr, reason);
+            return;
         }
     }
-
-    // INFO: for tracking
+    // ── Connection tracking + metrics ───────────────────────────────────
     let proto_label = protocol.as_str();
     let conn_info = crate::state::backend::ConnectionInfo {
         id: conn_id,
@@ -458,139 +265,42 @@ async fn handle_client(
         created_at: chrono::Utc::now().timestamp(),
     };
     let _ = state.state.set_connection(conn_id, conn_info).await;
-
-    // Record setup duration (auth + target parsing)
     crate::metrics::CONNECTION_SETUP_DURATION
         .with_label_values(&[proto_label])
-        .observe(conn_start.elapsed().as_secs_f64());
-
-    // Increment active connections metric
+        .observe(ctx.conn_start.elapsed().as_secs_f64());
     crate::metrics::ACTIVE_CONNECTIONS
         .with_label_values(&[proto_label])
         .inc();
     crate::metrics::REQUESTS_TOTAL
         .with_label_values(&[proto_label, "started"])
         .inc();
-
-    // Check quota if user is authenticated (skip for config-based auth sentinel -1)
-    if let Some(uid) = user_id {
-        if uid > 0 {
-            // Check Redis cache first, then DashMap fallback, then DB
-            let quota_allowed = if let Some(ref cache) = state.cache {
-                cache.get_quota_allowed(uid).await
-            } else {
-                None
-            };
-
-            // Fallback to DashMap if Redis miss
-            let quota_allowed = quota_allowed.or_else(|| {
-                if let Some(entry) = state.quota_cache.get(&uid) {
-                    let (allowed, cached_at) = entry.value();
-                    if cached_at.elapsed() < std::time::Duration::from_secs(30) {
-                        Some(*allowed)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            });
-
-            let has_quota = match quota_allowed {
-                Some(allowed) => allowed,
-                None => {
-                    // Cache miss or expired: query DB and cache result
-                    match crate::db::quota::check_quota(&state.db_pool, uid).await {
-                        Ok(allowed) => {
-                            // Cache in both Redis and DashMap
-                            if let Some(ref cache) = state.cache {
-                                cache.set_quota_allowed(uid, allowed).await;
-                            }
-                            state
-                                .quota_cache
-                                .insert(uid, (allowed, std::time::Instant::now()));
-                            allowed
-                        }
-                        Err(e) => {
-                            tracing::error!("Error checking quota for user {}: {}", uid, e);
-                            crate::metrics::ACTIVE_CONNECTIONS
-                                .with_label_values(&[proto_label])
-                                .dec();
-                            let _ =
-                                send_error_response(&protocol, &mut stream, ErrorType::Connection)
-                                    .await;
-                            return; // Fail-closed: reject on DB error
-                        }
-                    }
-                }
-            };
-
-            if !has_quota {
-                tracing::warn!("Quota exceeded for user {}", uid);
-                crate::metrics::ACTIVE_CONNECTIONS
-                    .with_label_values(&[proto_label])
-                    .dec();
-                let _ = send_error_response(&protocol, &mut stream, ErrorType::QuotaExceeded).await;
-                return;
-            }
-
-            // Enforce per-user concurrent connection limit
-            match state.state.count_user_connections(uid).await {
-                Ok(active_count) => {
-                    let max_connections = match state
-                        .user_rate_limiter
-                        .get_cached_max_connections(uid)
-                        .await
-                    {
-                        Some(mc) => mc as usize,
-                        None => match state.cached_user_by_id(uid).await {
-                            Some(cu) => {
-                                state
-                                    .user_rate_limiter
-                                    .cache_config(
-                                        uid,
-                                        cu.rate_limit_rps as u32,
-                                        cu.rate_limit_burst as u32,
-                                        cu.rate_limit_enabled,
-                                        cu.max_connections,
-                                    )
-                                    .await;
-                                cu.max_connections as usize
-                            }
-                            None => 5,
-                        },
-                    };
-                    if active_count >= max_connections {
-                        tracing::warn!(
-                            "User {} has {} active connections (max {}), rejecting",
-                            uid,
-                            active_count,
-                            max_connections
-                        );
-                        crate::metrics::ACTIVE_CONNECTIONS
-                            .with_label_values(&[proto_label])
-                            .dec();
-                        let _ =
-                            send_error_response(&protocol, &mut stream, ErrorType::QuotaExceeded)
-                                .await;
-                        return;
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Error counting user connections for {}: {}", uid, e);
-                    // Non-fatal: allow connection if counting fails
-                }
-            }
+    // ── Phase 4: Post-Setup validators (quota + connection limit) ───────
+    for result in [
+        validators::validate_quota(&ctx, state).await,
+        validators::validate_connection_limit(&ctx, state).await,
+    ] {
+        if let Verdict::Deny(reason) = result {
+            tracing::warn!("{} denied: {}", client_addr, reason);
+            crate::metrics::ACTIVE_CONNECTIONS
+                .with_label_values(&[proto_label])
+                .dec();
+            let _ = send_error_response(
+                ctx.protocol.as_ref().unwrap(),
+                &mut stream,
+                ErrorType::QuotaExceeded,
+            )
+            .await;
+            return;
         }
     }
-
+    // ── Relay + record usage ────────────────────────────────────────────
     let started_at = chrono::Utc::now().timestamp();
     let relay_start = std::time::Instant::now();
     let target_addr_str = format!("{}:{}", target.host, target.port);
+    let mut protocol = ctx.protocol.take().unwrap();
     let result =
         async_handle_client_with_target(&mut stream, client_addr, &mut protocol, target).await;
 
-    // Record connection duration and decrement active connections
     crate::metrics::CONNECTION_DURATION
         .with_label_values(&[proto_label])
         .observe(relay_start.elapsed().as_secs_f64());
@@ -602,38 +312,32 @@ async fn handle_client(
     let client_ip_str = client_addr.ip().to_string();
     match result {
         Ok((bytes_sent, bytes_received)) => {
-            // Record bytes transferred metrics
             crate::metrics::BYTES_TRANSFERRED
                 .with_label_values(&["sent"])
                 .inc_by(bytes_sent);
             crate::metrics::BYTES_TRANSFERRED
                 .with_label_values(&["received"])
                 .inc_by(bytes_received);
-            // Record usage in DB for authenticated users (skip config auth sentinel -1)
-            if let Some(uid) = user_id {
-                if uid > 0 {
-                    let _ = crate::db::usage::record_usage(
-                        &state.db_pool,
-                        uid,
-                        &conn_id,
-                        &client_ip_str,
-                        &target_addr_str,
-                        proto_label,
-                        started_at,
-                        ended_at,
-                        bytes_sent as i64,
-                        bytes_received as i64,
-                        "success",
-                    )
+            if let Some(uid) = ctx.effective_uid() {
+                let _ = crate::db::usage::record_usage(
+                    &state.db_pool,
+                    uid,
+                    &conn_id,
+                    &client_ip_str,
+                    &target_addr_str,
+                    proto_label,
+                    started_at,
+                    ended_at,
+                    bytes_sent as i64,
+                    bytes_received as i64,
+                    "success",
+                )
+                .await;
+                state
+                    .track_bandwidth(uid, bytes_sent as i64 + bytes_received as i64)
                     .await;
-                    // Track bandwidth in Redis and invalidate quota caches
-                    state
-                        .track_bandwidth(uid, bytes_sent as i64 + bytes_received as i64)
-                        .await;
-                    state.invalidate_quota_cache(uid).await;
-                }
+                state.invalidate_quota_cache(uid).await;
             }
-            // Record successful request
             crate::metrics::REQUESTS_TOTAL
                 .with_label_values(&[proto_label, "success"])
                 .inc();
@@ -651,26 +355,22 @@ async fn handle_client(
             crate::metrics::REQUESTS_TOTAL
                 .with_label_values(&[proto_label, "failed"])
                 .inc();
-            // Record failed connection usage for authenticated users
-            if let Some(uid) = user_id {
-                if uid > 0 {
-                    let _ = crate::db::usage::record_usage(
-                        &state.db_pool,
-                        uid,
-                        &conn_id,
-                        &client_ip_str,
-                        &target_addr_str,
-                        proto_label,
-                        started_at,
-                        ended_at,
-                        0,
-                        0,
-                        error_label,
-                    )
-                    .await;
-                    // Invalidate quota caches
-                    state.invalidate_quota_cache(uid).await;
-                }
+            if let Some(uid) = ctx.effective_uid() {
+                let _ = crate::db::usage::record_usage(
+                    &state.db_pool,
+                    uid,
+                    &conn_id,
+                    &client_ip_str,
+                    &target_addr_str,
+                    proto_label,
+                    started_at,
+                    ended_at,
+                    0,
+                    0,
+                    error_label,
+                )
+                .await;
+                state.invalidate_quota_cache(uid).await;
             }
             if error_type != ErrorType::Tunnel {
                 let _ = send_error_response(&protocol, &mut stream, error_type).await;
