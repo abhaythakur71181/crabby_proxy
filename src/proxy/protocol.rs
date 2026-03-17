@@ -257,6 +257,17 @@ impl ProxyProtocol {
     /// Validate credentials and return user_id.
     /// Returns Some(user_id) for DB users, Some(-1) for config-based auth, None on failure.
     async fn validate_credentials(username: &str, password: &str, state: &AppState) -> Option<i64> {
+        // ── In-process auth cache (avoids DB + argon2 on repeat connections) ──
+        // Key = FNV-1a hash of "username:password", value = (user_id, cached_at).
+        // 60-second TTL.  API-key auth has its own Redis-backed cache so we skip it here.
+        let cache_key = Self::auth_cache_key(username, password);
+        if let Some(entry) = state.auth_cache.get(&cache_key) {
+            let (uid, cached_at) = entry.value();
+            if cached_at.elapsed() < std::time::Duration::from_secs(60) {
+                return Some(*uid);
+            }
+        }
+
         // Check for API Key format: user@apikey
         if let Some(actual_username) = username.strip_suffix("@apikey") {
             // Redis -> DB with auto-populate via cached_user_by_username
@@ -269,7 +280,14 @@ impl ProxyProtocol {
                 // Try API key verification cache
                 if let Some(ref cache) = state.cache {
                     if let Some(verified) = cache.get_api_key_verified(user_id, password).await {
-                        return if verified { Some(user_id) } else { None };
+                        if verified {
+                            state
+                                .auth_cache
+                                .insert(cache_key, (user_id, std::time::Instant::now()));
+                            return Some(user_id);
+                        } else {
+                            return None;
+                        }
                     }
                 }
                 // Cache miss: verify via DB (expensive argon2)
@@ -282,15 +300,23 @@ impl ProxyProtocol {
                         .await;
                 }
                 if verified {
+                    state
+                        .auth_cache
+                        .insert(cache_key, (user_id, std::time::Instant::now()));
                     return Some(user_id);
                 }
             }
         } else {
-            // Regular password authentication — cannot cache the verify itself
-            // But we populate user cache on successful login
+            // Regular password authentication
+            // auth_cache (checked above) handles repeat connections.
+            // On miss, we must hit the DB for argon2 verification (password_hash
+            // is intentionally excluded from CachedUser for security).
             if let Ok(Some(user)) = users::verify_password(&state.db_pool, username, password).await
             {
                 state.populate_user_cache(&user).await;
+                state
+                    .auth_cache
+                    .insert(cache_key, (user.id, std::time::Instant::now()));
                 return Some(user.id);
             }
         }
@@ -302,10 +328,30 @@ impl ProxyProtocol {
         };
         if config_match {
             // Config-based auth: use sentinel -1 to distinguish from failure (None)
+            // Can be cached too
+            state
+                .auth_cache
+                .insert(cache_key, (-1, std::time::Instant::now()));
             return Some(-1);
         }
 
         None // Authentication failed
+    }
+
+    /// FNV-1a hash for auth cache key (NOT cryptographic — just for DashMap lookup).
+    fn auth_cache_key(username: &str, password: &str) -> u64 {
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for byte in username.as_bytes() {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash ^= b':' as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+        for byte in password.as_bytes() {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
     }
 
     /// Detect the protocol from a client stream

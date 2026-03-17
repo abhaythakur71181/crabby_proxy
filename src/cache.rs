@@ -230,6 +230,9 @@ pub struct CachedUser {
     pub allowed_protocols: Option<Vec<String>>,
     pub ip_whitelist: Option<String>,
     pub monthly_bandwidth_quota: Option<i64>,
+    pub allowed_targets: Option<String>,
+    pub blocked_targets: Option<String>,
+    pub access_schedule: Option<String>,
 }
 
 impl From<User> for CachedUser {
@@ -244,9 +247,14 @@ impl From<User> for CachedUser {
             rate_limit_enabled: u.rate_limit_enabled,
             rate_limit_rps: u.rate_limit_rps,
             rate_limit_burst: u.rate_limit_burst,
-            allowed_protocols: u.allowed_protocols.and_then(|s| serde_json::from_str(&s).ok()),
+            allowed_protocols: u
+                .allowed_protocols
+                .and_then(|s| serde_json::from_str(&s).ok()),
             ip_whitelist: u.ip_whitelist,
             monthly_bandwidth_quota: None,
+            allowed_targets: u.allowed_targets,
+            blocked_targets: u.blocked_targets,
+            access_schedule: u.access_schedule,
         }
     }
 }
@@ -263,9 +271,15 @@ impl From<&User> for CachedUser {
             rate_limit_enabled: u.rate_limit_enabled,
             rate_limit_rps: u.rate_limit_rps,
             rate_limit_burst: u.rate_limit_burst,
-            allowed_protocols: u.allowed_protocols.as_ref().and_then(|s| serde_json::from_str(s).ok()),
+            allowed_protocols: u
+                .allowed_protocols
+                .as_ref()
+                .and_then(|s| serde_json::from_str(s).ok()),
             ip_whitelist: u.ip_whitelist.clone(),
             monthly_bandwidth_quota: None,
+            allowed_targets: u.allowed_targets.clone(),
+            blocked_targets: u.blocked_targets.clone(),
+            access_schedule: u.access_schedule.clone(),
         }
     }
 }
