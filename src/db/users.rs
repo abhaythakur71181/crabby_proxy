@@ -24,7 +24,7 @@ pub async fn create_user(
         Role::User => "user",
     };
 
-    let max_connections = request.max_connections.unwrap_or(5);
+    let max_connections = request.max_connections.unwrap_or(100);
     let bandwidth_limit_mb = request.bandwidth_limit_mb.unwrap_or(1000);
     let rate_limit_enabled = request.rate_limit_enabled.unwrap_or(true);
     let rate_limit_rps = request.rate_limit_rps.unwrap_or(10);
@@ -323,7 +323,7 @@ mod tests {
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 is_active BOOLEAN NOT NULL DEFAULT 1,
-                max_connections INTEGER NOT NULL DEFAULT 5,
+                max_connections INTEGER NOT NULL DEFAULT 100,
                 bandwidth_limit_mb INTEGER NOT NULL DEFAULT 1000,
                 rate_limit_enabled BOOLEAN NOT NULL DEFAULT 1,
                 rate_limit_rps INTEGER NOT NULL DEFAULT 10,
@@ -397,7 +397,7 @@ mod tests {
 
         let user = get_user_by_id(&pool, id).await.unwrap().unwrap();
         assert_eq!(user.username, "alice");
-        assert_eq!(user.max_connections, 5); // default
+        assert_eq!(user.max_connections, 100); // default
         assert_eq!(user.bandwidth_limit_mb, 1000); // default
         assert!(user.rate_limit_enabled); // default true
         assert_eq!(user.rate_limit_rps, 10); // default

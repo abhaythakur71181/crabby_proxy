@@ -171,7 +171,7 @@ pub async fn validate_user_rate_limit(ctx: &ConnectionContext, state: &AppState)
                 rps: 10,
                 burst: 20,
                 enabled: false,
-                max_connections: 5,
+                max_connections: 100,
                 cached_at: std::time::Instant::now(),
             },
         },
@@ -204,16 +204,17 @@ pub async fn validate_target_domain(ctx: &ConnectionContext, state: &AppState) -
         Some(h) => h,
         None => return Verdict::Allow,
     };
-    let user = match crate::db::users::get_user_by_id(&state.db_pool, uid).await {
-        Ok(Some(u)) => u,
-        _ => return Verdict::Allow, // Fail-open if user fetch fails
+    // Use cached user lookup (Redis -> in-memory -> DB) instead of direct DB query
+    let (allowed_targets, blocked_targets) = match state.cached_user_by_id(uid).await {
+        Some(cu) => (cu.allowed_targets, cu.blocked_targets),
+        None => return Verdict::Allow, // Fail-open if user fetch fails
     };
     if !crate::target_filter::is_target_allowed(
         host,
         &ctx.config.global_allowed_targets,
         &ctx.config.global_blocked_targets,
-        user.allowed_targets.as_deref(),
-        user.blocked_targets.as_deref(),
+        allowed_targets.as_deref(),
+        blocked_targets.as_deref(),
     ) {
         return Verdict::Deny(format!(
             "Target {} blocked for user {} by domain filter",
@@ -232,11 +233,11 @@ pub async fn validate_access_schedule(ctx: &ConnectionContext, state: &AppState)
     if ctx.is_admin {
         return Verdict::Allow;
     }
-    let schedule = match crate::db::users::get_user_by_id(&state.db_pool, uid).await {
-        Ok(Some(user)) => user
+    let schedule = match state.cached_user_by_id(uid).await {
+        Some(cu) => cu
             .access_schedule
             .or(ctx.config.default_access_schedule.clone()),
-        _ => ctx.config.default_access_schedule.clone(),
+        None => ctx.config.default_access_schedule.clone(),
     };
     if let Some(sched) = schedule {
         if !crate::target_filter::is_within_schedule(&sched) {
@@ -331,10 +332,12 @@ pub async fn validate_connection_limit(ctx: &ConnectionContext, state: &AppState
                     .await;
                 cu.max_connections as usize
             }
-            None => 5,
+            None => 100,
         },
     };
-    if active_count >= max_connections {
+    // Note: the current connection is already tracked in state before this
+    // check runs, so we use `>` (not `>=`) to allow exactly `max_connections`.
+    if active_count > max_connections {
         return Verdict::Deny(format!(
             "User {} has {} active connections (max {})",
             uid, active_count, max_connections

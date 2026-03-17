@@ -61,6 +61,10 @@ pub struct AppState {
     // GeoIP filter (optional — requires MaxMind DB file)
     pub geo_filter: Option<crate::geo_filter::SharedGeoFilter>,
 
+    // Auth result cache: hash(username + password) -> (user_id, cached_at)
+    // Avoids DB + argon2 on every connection from the same user (60s TTL)
+    pub auth_cache: Arc<dashmap::DashMap<u64, (i64, std::time::Instant)>>,
+
     // Graceful shutdown signal
     pub shutdown_tx: tokio::sync::broadcast::Sender<()>,
 
@@ -213,6 +217,7 @@ impl AppState {
             geo_filter,
             shutdown_tx,
             quota_cache: Arc::new(dashmap::DashMap::new()),
+            auth_cache: Arc::new(dashmap::DashMap::new()),
             cache,
         })
     }
