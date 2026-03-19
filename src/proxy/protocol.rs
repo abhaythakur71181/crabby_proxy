@@ -12,6 +12,7 @@ pub enum ProxyProtocol {
     TCP,
     HTTP,
     HTTPS,
+    HTTP2,
     SOCKS4,
     SOCKS5,
 }
@@ -24,6 +25,7 @@ impl ProxyProtocol {
             ProxyProtocol::TCP => "TCP",
             ProxyProtocol::HTTP => "HTTP",
             ProxyProtocol::HTTPS => "HTTPS",
+            ProxyProtocol::HTTP2 => "HTTP2",
             ProxyProtocol::SOCKS4 => "SOCKS4",
             ProxyProtocol::SOCKS5 => "SOCKS5",
         }
@@ -36,6 +38,7 @@ impl ProxyProtocol {
             ProxyProtocol::TCP => "tcp",
             ProxyProtocol::HTTP => "http",
             ProxyProtocol::HTTPS => "https",
+            ProxyProtocol::HTTP2 => "h2",
             ProxyProtocol::SOCKS4 => "socks4",
             ProxyProtocol::SOCKS5 => "socks5",
         }
@@ -377,6 +380,12 @@ impl ProxyProtocol {
             return Ok(ProxyProtocol::HTTP);
         }
 
+        // HTTP/2 connection preface: "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+        // First 4 bytes: "PRI " (0x50 0x52 0x49 0x20)
+        if peek_buf.starts_with(b"PRI ") {
+            return Ok(ProxyProtocol::HTTP2);
+        }
+
         // HTTPS/TLS starts with 0x16 (handshake)
         if peek_buf[0] == 0x16 {
             return Ok(ProxyProtocol::HTTPS);
@@ -407,6 +416,10 @@ impl ProxyProtocol {
             ProxyProtocol::SOCKS4 => Self::parse_socks4_target(stream).await,
             ProxyProtocol::SOCKS5 => Self::parse_socks5_target(stream).await,
             ProxyProtocol::TCP => Self::parse_tcp_target(stream).await,
+            ProxyProtocol::HTTP2 => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "HTTP/2 targets are parsed by the h2 handler",
+            )),
         }
     }
 

@@ -5,8 +5,11 @@ mod cache;
 mod config;
 mod config_env;
 mod connection;
+mod connection_pool;
 mod db;
+mod dns_cache;
 mod error;
+mod event_bus;
 mod geo_filter;
 mod ip_filter;
 mod metrics;
@@ -130,6 +133,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let admin_handle =
         tokio::spawn(async move { admin::run_admin_server(admin_state, admin_addr).await });
+
+    // Background: Event bus subscriber (cross-instance coordination)
+    {
+        let redis_url = config.state.redis_url.clone();
+        let prefix = config.state.redis_key_prefix.clone();
+        let sub_state = state.clone();
+        tokio::spawn(async move {
+            event_bus::start_subscriber(&redis_url, &prefix, sub_state).await;
+        });
+    }
+
+    // Background: DNS cache cleanup (every 60s)
+    {
+        let dns_state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                dns_state.dns_cache.cleanup_expired();
+            }
+        });
+    }
+
+    // Background: Connection pool cleanup (every 30s, if pooling enabled)
+    if let Some(ref pool) = state.connection_pool {
+        let pool_ref = pool.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                pool_ref.cleanup_expired();
+            }
+        });
+    }
 
     // Wait for EITHER shutdown signal OR server crash
     tokio::select! {
