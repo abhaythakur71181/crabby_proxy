@@ -61,6 +61,12 @@ pub struct AppState {
     // GeoIP filter (optional — requires MaxMind DB file)
     pub geo_filter: Option<crate::geo_filter::SharedGeoFilter>,
 
+    // DNS resolution cache (reduces upstream connect latency)
+    pub dns_cache: Arc<crate::dns_cache::DnsCache>,
+
+    // Upstream connection pool (reuses idle TCP connections)
+    pub connection_pool: Option<Arc<crate::connection_pool::ConnectionPool>>,
+
     // Auth result cache: hash(username + password) -> (user_id, cached_at)
     // Avoids DB + argon2 on every connection from the same user (60s TTL)
     pub auth_cache: Arc<dashmap::DashMap<u64, (i64, std::time::Instant)>>,
@@ -75,6 +81,9 @@ pub struct AppState {
 
     // Redis cache layer for users, API keys, quotas, approvals
     pub cache: Option<CacheLayer>,
+
+    // Event bus for cross-instance coordination (optional — requires Redis)
+    pub event_bus: Option<crate::event_bus::EventBus>,
 }
 
 impl AppState {
@@ -215,10 +224,33 @@ impl AppState {
             login_rate_limiter,
             ip_filter,
             geo_filter,
+            dns_cache: Arc::new(crate::dns_cache::DnsCache::new(
+                config.advanced.dns_cache_ttl,
+            )),
+            connection_pool: if config.advanced.connection_pooling {
+                Some(Arc::new(crate::connection_pool::ConnectionPool::new(
+                    config.advanced.pool_max_idle_per_host,
+                    60, // 60s idle timeout
+                )))
+            } else {
+                None
+            },
             shutdown_tx,
             quota_cache: Arc::new(dashmap::DashMap::new()),
             auth_cache: Arc::new(dashmap::DashMap::new()),
             cache,
+            event_bus: match crate::event_bus::EventBus::new(
+                &config.state.redis_url,
+                &config.state.redis_key_prefix,
+            )
+            .await
+            {
+                Ok(bus) => Some(bus),
+                Err(e) => {
+                    tracing::warn!("Event bus disabled: {}", e);
+                    None
+                }
+            },
         })
     }
 

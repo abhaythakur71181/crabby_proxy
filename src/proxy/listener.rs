@@ -144,6 +144,16 @@ async fn handle_client(
             return;
         }
     };
+
+    // HTTP/2: hand off to dedicated h2 handler (multiplexed streams)
+    if protocol == ProxyProtocol::HTTP2 {
+        if ctx.config.http2_enabled {
+            super::http2_handler::handle_h2_connection(client_stream, client_addr, state).await;
+        } else {
+            tracing::warn!("{}: HTTP/2 detected but disabled in config", client_addr);
+        }
+        return;
+    }
     // ── Processing: TLS upgrade (for HTTPS) ─────────────────────────────
     let stream: ClientStream = if protocol == ProxyProtocol::HTTPS {
         match &state.tls_acceptor {
@@ -299,7 +309,8 @@ async fn handle_client(
     let target_addr_str = format!("{}:{}", target.host, target.port);
     let mut protocol = ctx.protocol.take().unwrap();
     let result =
-        async_handle_client_with_target(&mut stream, client_addr, &mut protocol, target).await;
+        async_handle_client_with_target(&mut stream, client_addr, &mut protocol, target, state)
+            .await;
 
     crate::metrics::CONNECTION_DURATION
         .with_label_values(&[proto_label])
@@ -384,18 +395,48 @@ async fn async_handle_client_with_target(
     client_addr: SocketAddr,
     protocol: &mut ProxyProtocol,
     target: ProxyTarget,
+    state: &AppState,
 ) -> Result<(u64, u64), (io::Error, ErrorType)> {
     let target_addr = format!("{}:{}", target.host, target.port);
     let upstream_start = std::time::Instant::now();
-    let target_stream = timeout(Duration::from_secs(10), TcpStream::connect(&target_addr))
-        .await
-        .map_err(|_| {
-            (
-                io::Error::new(io::ErrorKind::TimedOut, "Connection timeout"),
-                ErrorType::Timeout,
-            )
-        })?
-        .map_err(|e| (e, ErrorType::Connection))?;
+
+    // Resolve via DNS cache (avoids repeated DNS lookups for same host)
+    let resolved_addr = timeout(
+        Duration::from_secs(5),
+        state.dns_cache.resolve(&target.host, target.port),
+    )
+    .await
+    .map_err(|_| {
+        (
+            io::Error::new(io::ErrorKind::TimedOut, "DNS resolution timeout"),
+            ErrorType::Timeout,
+        )
+    })?
+    .map_err(|e| (e, ErrorType::Connection))?;
+
+    let target_stream = if let Some(ref pool) = state.connection_pool {
+        pool.get_or_connect(&target_addr, resolved_addr, Duration::from_secs(10))
+            .await
+            .map_err(|e| {
+                state.dns_cache.invalidate(&target.host, target.port);
+                (e, ErrorType::Connection)
+            })?
+    } else {
+        // No connection pooling — direct connect
+        timeout(Duration::from_secs(10), TcpStream::connect(resolved_addr))
+            .await
+            .map_err(|_| {
+                state.dns_cache.invalidate(&target.host, target.port);
+                (
+                    io::Error::new(io::ErrorKind::TimedOut, "Connection timeout"),
+                    ErrorType::Timeout,
+                )
+            })?
+            .map_err(|e| {
+                state.dns_cache.invalidate(&target.host, target.port);
+                (e, ErrorType::Connection)
+            })?
+    };
     crate::metrics::UPSTREAM_CONNECT_DURATION
         .with_label_values(&[protocol.as_str()])
         .observe(upstream_start.elapsed().as_secs_f64());
