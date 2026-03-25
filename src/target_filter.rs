@@ -76,8 +76,9 @@ fn default_tz() -> String {
     "UTC".to_string()
 }
 
-/// Check if current time is within the access schedule
-/// Returns true if access is allowed right now
+/// Check if current time is within the access schedule.
+/// Returns true if access is allowed right now.
+/// Respects the `timezone` field (e.g. "Asia/Kolkata", "US/Eastern"); defaults to UTC.
 pub fn is_within_schedule(schedule_json: &str) -> bool {
     let schedule: AccessSchedule = match serde_json::from_str(schedule_json) {
         Ok(s) => s,
@@ -86,11 +87,32 @@ pub fn is_within_schedule(schedule_json: &str) -> bool {
             return false;
         }
     };
-    let now = chrono::Utc::now();
+
+    // Convert current time to the configured timezone
+    let now_utc = chrono::Utc::now();
+    let now = if schedule.timezone.eq_ignore_ascii_case("utc") {
+        now_utc.naive_utc()
+    } else {
+        match schedule.timezone.parse::<chrono_tz::Tz>() {
+            Ok(tz) => {
+                use chrono::TimeZone;
+                tz.from_utc_datetime(&now_utc.naive_utc()).naive_local()
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "Unknown timezone '{}' in access schedule, falling back to UTC",
+                    schedule.timezone
+                );
+                now_utc.naive_utc()
+            }
+        }
+    };
+
     let hour = now.format("%H").to_string().parse::<u32>().unwrap_or(0);
     let day = now.format("%a").to_string().to_lowercase();
     let day_short = &day[..3]; // "mon", "tue", etc.
-                               // Check day
+
+    // Check day
     if !schedule.days.iter().any(|d| d.to_lowercase() == day_short) {
         return false;
     }
