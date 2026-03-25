@@ -43,6 +43,7 @@ futures-lite = "2"
 h2 = "0.4"
 http = "1"
 bytes = "1"
+chrono-tz = "0.10.4"
 
 [dev-dependencies]
 serial_test = "3.1"
