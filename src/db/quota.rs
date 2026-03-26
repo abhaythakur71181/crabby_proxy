@@ -135,6 +135,14 @@ mod tests {
         .await
         .unwrap();
 
+        // Covering index for quota SUM queries
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_usage_quota_lookup ON usage (user_id, started_at, bytes_sent, bytes_received)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
         pool
     }
 
