@@ -1,7 +1,7 @@
 use lazy_static::lazy_static;
 use prometheus::{
-    register_histogram_vec, register_int_counter_vec, register_int_gauge_vec, Encoder,
-    HistogramVec, IntCounterVec, IntGaugeVec, TextEncoder,
+    register_histogram_vec, register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
+    Encoder, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, TextEncoder,
 };
 
 lazy_static! {
@@ -85,6 +85,20 @@ lazy_static! {
         "Time to connect to upstream target",
         &["protocol"],
         vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 5.0, 10.0]
+    )
+    .unwrap();
+
+    /// Whether the proxy is currently draining (1 = draining, 0 = normal)
+    pub static ref DRAINING: IntGauge = register_int_gauge!(
+        "proxy_draining",
+        "Whether the proxy is in shutdown drain mode (1 = draining)"
+    )
+    .unwrap();
+
+    /// Connections still active during shutdown drain
+    pub static ref DRAINING_CONNECTIONS: IntGauge = register_int_gauge!(
+        "proxy_draining_connections",
+        "Number of connections remaining during shutdown drain"
     )
     .unwrap();
 }
