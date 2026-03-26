@@ -183,6 +183,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Signal shutdown to all servers (stops accepting new connections)
     tracing::info!("Initiating graceful shutdown...");
     let _ = state.shutdown_tx.send(());
+    crate::metrics::DRAINING.set(1);
 
     // Poll active connections until drained or timeout
     let drain_start = std::time::Instant::now();
@@ -194,6 +195,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await
             .map(|c| c.len())
             .unwrap_or(0);
+        crate::metrics::DRAINING_CONNECTIONS.set(active_count as i64);
         if active_count == 0 {
             tracing::info!("All connections drained");
             break;
