@@ -373,6 +373,20 @@ async fn handle_client(
             crate::metrics::REQUESTS_TOTAL
                 .with_label_values(&[proto_label, "success"])
                 .inc();
+
+            // Structured access log
+            tracing::info!(
+                target: "access_log",
+                client_ip = %client_addr.ip(),
+                target = %target_addr_str,
+                protocol = proto_label,
+                user_id = ?ctx.effective_uid(),
+                bytes_sent = bytes_sent,
+                bytes_received = bytes_received,
+                duration_ms = relay_start.elapsed().as_millis() as u64,
+                status = "success",
+                "connection completed"
+            );
         }
         Err((e, error_type)) => {
             let error_label = match error_type {
@@ -383,10 +397,23 @@ async fn handle_client(
                 ErrorType::Tunnel => "tunnel",
                 ErrorType::QuotaExceeded => "quota_exceeded",
             };
-            tracing::error!("Error [{}] for {}: {}", error_label, client_addr, e);
             crate::metrics::REQUESTS_TOTAL
                 .with_label_values(&[proto_label, "failed"])
                 .inc();
+
+            // Structured access log
+            tracing::info!(
+                target: "access_log",
+                client_ip = %client_addr.ip(),
+                target = %target_addr_str,
+                protocol = proto_label,
+                user_id = ?ctx.effective_uid(),
+                duration_ms = relay_start.elapsed().as_millis() as u64,
+                status = "failed",
+                error_type = error_label,
+                error = %e,
+                "connection failed"
+            );
             if let Some(uid) = ctx.effective_uid() {
                 let _ = crate::db::usage::record_usage(
                     &state.db_pool,
