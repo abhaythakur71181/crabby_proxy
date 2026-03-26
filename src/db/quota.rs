@@ -2,6 +2,49 @@ use chrono::Datelike;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
+/// Quota window period for bandwidth tracking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QuotaPeriod {
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+impl Default for QuotaPeriod {
+    fn default() -> Self {
+        Self::Monthly
+    }
+}
+
+impl QuotaPeriod {
+    /// Get the Unix timestamp for the start of the current period.
+    pub fn window_start(&self) -> i64 {
+        let now = chrono::Utc::now();
+        match self {
+            QuotaPeriod::Daily => now
+                .date_naive()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp(),
+            QuotaPeriod::Weekly => {
+                let days_since_monday = now.weekday().num_days_from_monday();
+                let monday = now.date_naive() - chrono::Duration::days(days_since_monday as i64);
+                monday.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp()
+            }
+            QuotaPeriod::Monthly => {
+                let month_start = now.date_naive().with_day(1).unwrap_or(now.date_naive());
+                month_start
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap()
+                    .and_utc()
+                    .timestamp()
+            }
+        }
+    }
+}
+
 /// Quota usage statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuotaStats {
@@ -9,29 +52,32 @@ pub struct QuotaStats {
     pub used_bytes: i64,
     pub remaining_bytes: Option<i64>,
     pub percentage_used: Option<f64>,
+    pub period: QuotaPeriod,
 }
 
-/// Check if user has remaining quota (monthly window)
+/// Check if user has remaining quota for the given period.
 pub async fn check_quota(pool: &SqlitePool, user_id: i64) -> Result<bool, sqlx::Error> {
-    // Calculate start of current month (Unix timestamp)
-    let now = chrono::Utc::now();
-    let month_start = now.date_naive().with_day(1).unwrap_or(now.date_naive());
-    let month_start_ts = month_start
-        .and_hms_opt(0, 0, 0)
-        .unwrap()
-        .and_utc()
-        .timestamp();
+    check_quota_with_period(pool, user_id, QuotaPeriod::Monthly).await
+}
+
+/// Check if user has remaining quota within a specific time window.
+pub async fn check_quota_with_period(
+    pool: &SqlitePool,
+    user_id: i64,
+    period: QuotaPeriod,
+) -> Result<bool, sqlx::Error> {
+    let window_start_ts = period.window_start();
     let row: (Option<i64>, i64) = sqlx::query_as(
         r#"
-        SELECT 
+        SELECT
             monthly_bandwidth_quota as quota_bytes,
             COALESCE((SELECT SUM(bytes_sent + bytes_received) FROM usage WHERE user_id = ? AND started_at >= ?), 0) as used_bytes
-        FROM users 
+        FROM users
         WHERE id = ?
         "#
     )
     .bind(user_id)
-    .bind(month_start_ts)
+    .bind(window_start_ts)
     .bind(user_id)
     .fetch_one(pool)
     .await?;
@@ -43,29 +89,29 @@ pub async fn check_quota(pool: &SqlitePool, user_id: i64) -> Result<bool, sqlx::
     }
 }
 
-/// Get user's quota usage stats
+/// Get user's quota usage stats for a given period.
 pub async fn get_quota_stats(pool: &SqlitePool, user_id: i64) -> Result<QuotaStats, sqlx::Error> {
-    let month_start = {
-        let now = chrono::Utc::now();
-        now.with_day(1)
-            .unwrap_or(now)
-            .date_naive()
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .and_utc()
-            .timestamp()
-    };
+    get_quota_stats_with_period(pool, user_id, QuotaPeriod::Monthly).await
+}
+
+/// Get user's quota usage stats for a specific period.
+pub async fn get_quota_stats_with_period(
+    pool: &SqlitePool,
+    user_id: i64,
+    period: QuotaPeriod,
+) -> Result<QuotaStats, sqlx::Error> {
+    let window_start = period.window_start();
     let row: (Option<i64>, i64) = sqlx::query_as(
         r#"
-        SELECT 
+        SELECT
             monthly_bandwidth_quota as quota_bytes,
             COALESCE((SELECT SUM(bytes_sent + bytes_received) FROM usage WHERE user_id = ? AND started_at >= ?), 0) as used_bytes
-        FROM users 
+        FROM users
         WHERE id = ?
         "#
     )
     .bind(user_id)
-    .bind(month_start)
+    .bind(window_start)
     .bind(user_id)
     .fetch_one(pool)
     .await?;
@@ -82,6 +128,7 @@ pub async fn get_quota_stats(pool: &SqlitePool, user_id: i64) -> Result<QuotaSta
         used_bytes: row.1,
         remaining_bytes,
         percentage_used,
+        period,
     })
 }
 
