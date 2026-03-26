@@ -4,6 +4,15 @@ use tokio::sync::RwLock;
 
 use crate::config::Config;
 
+lazy_static::lazy_static! {
+    /// Shared HTTP client for webhook deliveries (reuses connections and DNS cache).
+    static ref WEBHOOK_CLIENT: reqwest::Client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .pool_max_idle_per_host(2)
+        .build()
+        .expect("Failed to create webhook HTTP client");
+}
+
 /// Webhook event types
 #[derive(Debug, Clone, Serialize)]
 pub struct WebhookPayload {
@@ -33,17 +42,7 @@ pub fn send_webhook(config: Arc<RwLock<Config>>, event: &str, data: serde_json::
             timestamp: chrono::Utc::now().timestamp(),
             data,
         };
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build();
-        let client = match client {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!("Failed to create HTTP client for webhook: {}", e);
-                return;
-            }
-        };
-        match client
+        match WEBHOOK_CLIENT
             .post(&url)
             .json(&payload)
             .header("Content-Type", "application/json")
