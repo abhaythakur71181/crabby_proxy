@@ -89,13 +89,20 @@ lazy_static! {
     .unwrap();
 }
 
-/// Export all metrics in Prometheus format
+/// Export all metrics in Prometheus format.
+/// Returns an empty string if encoding fails (instead of panicking).
 pub fn export_metrics() -> String {
     let encoder = TextEncoder::new();
     let metric_families = prometheus::gather();
     let mut buffer = vec![];
-    encoder.encode(&metric_families, &mut buffer).unwrap();
-    String::from_utf8(buffer).unwrap()
+    if let Err(e) = encoder.encode(&metric_families, &mut buffer) {
+        tracing::error!("Failed to encode Prometheus metrics: {}", e);
+        return String::new();
+    }
+    String::from_utf8(buffer).unwrap_or_else(|e| {
+        tracing::error!("Prometheus metrics produced invalid UTF-8: {}", e);
+        String::new()
+    })
 }
 
 #[cfg(test)]
