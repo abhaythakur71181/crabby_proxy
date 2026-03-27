@@ -65,7 +65,7 @@ pub async fn run_proxy_server(state: Arc<AppState>, addr: SocketAddr) {
                     // Notify: New connection accepted
                     let _ = state.notify_tx.send(crate::app_state::ConnectionEvent::NewConnection(conn_id)).await;
                     // Handle the client connection
-                    handle_client(client_stream, client_addr, &state, conn_id).await;
+                    handle_client(client_stream, client_addr, state.clone(), conn_id).await;
                     // Directly clean up connection state (belt-and-suspenders with event system)
                     let _ = state.state.delete_connection(conn_id).await;
                     // Notify: Connection closed
@@ -119,11 +119,12 @@ async fn send_error_response(
 async fn handle_client(
     mut client_stream: TcpStream,
     client_addr: SocketAddr,
-    state: &AppState,
+    state_arc: Arc<AppState>,
     conn_id: uuid::Uuid,
 ) {
     use super::pipeline::Verdict;
     use super::validators;
+    let state: &AppState = &state_arc;
     let mut ctx = super::pipeline::ConnectionContext::new(client_addr, conn_id, state).await;
     // ── Phase 1: Pre-Connection (IP-based, no stream needed) ────────────
     for result in [
@@ -148,7 +149,8 @@ async fn handle_client(
     // HTTP/2: hand off to dedicated h2 handler (multiplexed streams)
     if protocol == ProxyProtocol::HTTP2 {
         if ctx.config.http2_enabled {
-            super::http2_handler::handle_h2_connection(client_stream, client_addr, state).await;
+            super::http2_handler::handle_h2_connection(client_stream, client_addr, state_arc)
+                .await;
         } else {
             tracing::warn!("{}: HTTP/2 detected but disabled in config", client_addr);
         }
