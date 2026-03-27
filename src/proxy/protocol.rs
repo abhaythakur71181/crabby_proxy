@@ -341,6 +341,15 @@ impl ProxyProtocol {
         None // Authentication failed
     }
 
+    /// Public wrapper around `validate_credentials` for use by the HTTP/2 handler.
+    pub async fn validate_credentials_public(
+        username: &str,
+        password: &str,
+        state: &AppState,
+    ) -> Option<i64> {
+        Self::validate_credentials(username, password, state).await
+    }
+
     /// FNV-1a hash for auth cache key (NOT cryptographic — just for DashMap lookup).
     fn auth_cache_key(username: &str, password: &str) -> u64 {
         let mut hash: u64 = 0xcbf29ce484222325;

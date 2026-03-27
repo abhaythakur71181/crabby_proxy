@@ -3,9 +3,18 @@
 //! Accepts an HTTP/2 connection from a client, processes CONNECT requests
 //! (via `:method` = CONNECT, `:authority` = host:port), and bridges each
 //! h2 stream to an upstream TCP connection.
+//!
+//! Each CONNECT stream runs the full validation pipeline (IP filter, geo-block,
+//! rate limit, auth, quota, target filter, access schedule) before establishing
+//! the upstream tunnel.
 
 use crate::app_state::AppState;
+use crate::proxy::pipeline::{ConnectionContext, Verdict};
+use crate::proxy::protocol::ProxyProtocol;
+use crate::proxy::validators;
+use base64::Engine;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
@@ -15,9 +24,11 @@ use tokio::time::{timeout, Duration};
 /// This function:
 /// 1. Completes the h2 server handshake
 /// 2. For each incoming request stream, extracts the CONNECT target
-/// 3. Opens an upstream TCP connection
-/// 4. Bridges data between the h2 stream and the upstream connection
-pub async fn handle_h2_connection(stream: TcpStream, client_addr: SocketAddr, state: &AppState) {
+/// 3. Runs the full validation pipeline (auth, rate limit, quota, etc.)
+/// 4. Opens an upstream TCP connection
+/// 5. Bridges data between the h2 stream and the upstream connection
+pub async fn handle_h2_connection(stream: TcpStream, client_addr: SocketAddr, state_arc: Arc<AppState>) {
+    let state = &*state_arc;
     let mut h2 = match h2::server::handshake(stream).await {
         Ok(conn) => conn,
         Err(e) => {
@@ -27,6 +38,19 @@ pub async fn handle_h2_connection(stream: TcpStream, client_addr: SocketAddr, st
     };
 
     tracing::debug!("[HTTP2] Connection established from {}", client_addr);
+
+    // ── Phase 1: Pre-connection validators (IP-based, run once per connection) ──
+    let ctx = ConnectionContext::new(client_addr, uuid::Uuid::new_v4(), state).await;
+    for result in [
+        validators::validate_ip_filter(&ctx, state).await,
+        validators::validate_geo_block(&ctx, state).await,
+        validators::validate_ip_rate_limit(&ctx, state).await,
+    ] {
+        if let Verdict::Deny(reason) = result {
+            tracing::warn!("[HTTP2] {} denied: {}", client_addr, reason);
+            return;
+        }
+    }
 
     // Accept incoming h2 streams (multiplexed requests)
     while let Some(result) = h2.accept().await {
@@ -52,7 +76,7 @@ pub async fn handle_h2_connection(stream: TcpStream, client_addr: SocketAddr, st
             let response = http::Response::builder()
                 .status(http::StatusCode::METHOD_NOT_ALLOWED)
                 .body(())
-                .unwrap();
+                .unwrap_or_else(|_| http::Response::new(()));
             let _ = respond.send_response(response, true);
             continue;
         }
@@ -65,33 +89,288 @@ pub async fn handle_h2_connection(stream: TcpStream, client_addr: SocketAddr, st
                 let response = http::Response::builder()
                     .status(http::StatusCode::BAD_REQUEST)
                     .body(())
-                    .unwrap();
+                    .unwrap_or_else(|_| http::Response::new(()));
                 let _ = respond.send_response(response, true);
                 continue;
             }
         };
 
-        let _state_ref = state;
+        // Extract auth header from the CONNECT request
+        let auth_header = request
+            .headers()
+            .get("proxy-authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
         let addr = client_addr;
 
         // Spawn a task for each CONNECT stream (h2 is multiplexed)
+        // Each stream gets its own validation pipeline
+        let state_ref = state_arc.clone();
         tokio::spawn(async move {
-            handle_h2_connect(authority, addr, request, respond).await;
+            handle_h2_connect_validated(
+                authority,
+                addr,
+                auth_header,
+                request,
+                respond,
+                &state_ref,
+            )
+            .await;
         });
     }
 
     tracing::debug!("[HTTP2] Connection closed from {}", client_addr);
 }
 
-/// Handle a single HTTP/2 CONNECT tunnel.
-async fn handle_h2_connect(
+/// Handle a single HTTP/2 CONNECT tunnel with full validation.
+async fn handle_h2_connect_validated(
     authority: String,
     client_addr: SocketAddr,
+    auth_header: Option<String>,
     request: http::Request<h2::RecvStream>,
     mut respond: h2::server::SendResponse<bytes::Bytes>,
+    state: &AppState,
 ) {
+    let conn_id = uuid::Uuid::new_v4();
+    let mut ctx = ConnectionContext::new(client_addr, conn_id, state).await;
+    ctx.protocol = Some(ProxyProtocol::HTTP2);
+
+    // ── Authentication ──
+    if ctx.config.auth_required {
+        let user_id = match &auth_header {
+            Some(header) => authenticate_h2(header, state).await,
+            None => None,
+        };
+
+        match user_id {
+            Some(uid) => {
+                ctx.user_id = Some(uid);
+                crate::metrics::AUTH_TOTAL
+                    .with_label_values(&["h2", "success"])
+                    .inc();
+            }
+            None => {
+                tracing::warn!("[HTTP2] Auth failed for {} -> {}", client_addr, authority);
+                crate::metrics::AUTH_TOTAL
+                    .with_label_values(&["h2", "failed"])
+                    .inc();
+                let response = http::Response::builder()
+                    .status(http::StatusCode::PROXY_AUTHENTICATION_REQUIRED)
+                    .header("proxy-authenticate", "Basic realm=\"Proxy\"")
+                    .body(())
+                    .unwrap_or_else(|_| http::Response::new(()));
+                let _ = respond.send_response(response, true);
+                return;
+            }
+        }
+    }
+
+    // Resolve admin status
+    if let Some(uid) = ctx.effective_uid() {
+        ctx.is_admin = state
+            .cached_user_by_id(uid)
+            .await
+            .map(|u| u.role == "root_admin" || u.role == "admin")
+            .unwrap_or(false);
+    }
+
+    // ── Phase 2: Post-Auth validators ──
+    for result in [
+        validators::validate_protocol_restriction(&ctx, state).await,
+        validators::validate_approval(&ctx, state).await,
+        validators::validate_user_rate_limit(&ctx, state).await,
+    ] {
+        if let Verdict::Deny(reason) = result {
+            tracing::warn!("[HTTP2] {} denied: {}", client_addr, reason);
+            let response = http::Response::builder()
+                .status(http::StatusCode::FORBIDDEN)
+                .body(())
+                .unwrap_or_else(|_| http::Response::new(()));
+            let _ = respond.send_response(response, true);
+            return;
+        }
+    }
+
+    // Parse host and port from authority
+    let (host, port) = parse_authority(&authority);
+    ctx.target_host = Some(host.clone());
+
+    // ── Phase 3: Post-Target validators ──
+    for result in [
+        validators::validate_target_domain(&ctx, state).await,
+        validators::validate_access_schedule(&ctx, state).await,
+    ] {
+        if let Verdict::Deny(reason) = result {
+            tracing::warn!("[HTTP2] {} denied: {}", client_addr, reason);
+            let response = http::Response::builder()
+                .status(http::StatusCode::FORBIDDEN)
+                .body(())
+                .unwrap_or_else(|_| http::Response::new(()));
+            let _ = respond.send_response(response, true);
+            return;
+        }
+    }
+
+    // ── Connection tracking + metrics ──
+    let conn_info = crate::state::backend::ConnectionInfo {
+        id: conn_id,
+        client_addr,
+        target_addr: authority.clone(),
+        protocol: ProxyProtocol::HTTP2,
+        state: crate::connection::ConnectionState::Active,
+        user_id: ctx.user_id,
+        bytes_sent: 0,
+        bytes_received: 0,
+        created_at: chrono::Utc::now().timestamp(),
+    };
+    let _ = state.state.set_connection(conn_id, conn_info).await;
+    crate::metrics::ACTIVE_CONNECTIONS
+        .with_label_values(&["HTTP2"])
+        .inc();
+    crate::metrics::REQUESTS_TOTAL
+        .with_label_values(&["HTTP2", "started"])
+        .inc();
+
+    // ── Phase 4: Quota + connection limit ──
+    for result in [
+        validators::validate_quota(&ctx, state).await,
+        validators::validate_connection_limit(&ctx, state).await,
+    ] {
+        if let Verdict::Deny(reason) = result {
+            tracing::warn!("[HTTP2] {} denied: {}", client_addr, reason);
+            crate::metrics::ACTIVE_CONNECTIONS
+                .with_label_values(&["HTTP2"])
+                .dec();
+            let response = http::Response::builder()
+                .status(http::StatusCode::TOO_MANY_REQUESTS)
+                .body(())
+                .unwrap_or_else(|_| http::Response::new(()));
+            let _ = respond.send_response(response, true);
+            return;
+        }
+    }
+
+    // ── Relay ──
+    let started_at = chrono::Utc::now().timestamp();
+    let result = handle_h2_tunnel(&authority, client_addr, host, port, request, respond, state).await;
+
+    crate::metrics::ACTIVE_CONNECTIONS
+        .with_label_values(&["HTTP2"])
+        .dec();
+    let _ = state.state.delete_connection(conn_id).await;
+
+    let ended_at = chrono::Utc::now().timestamp();
+    match result {
+        Ok((bytes_sent, bytes_received)) => {
+            crate::metrics::BYTES_TRANSFERRED
+                .with_label_values(&["sent"])
+                .inc_by(bytes_sent);
+            crate::metrics::BYTES_TRANSFERRED
+                .with_label_values(&["received"])
+                .inc_by(bytes_received);
+            crate::metrics::REQUESTS_TOTAL
+                .with_label_values(&["HTTP2", "success"])
+                .inc();
+            if let Some(uid) = ctx.effective_uid() {
+                let _ = crate::db::usage::record_usage(
+                    &state.db_pool,
+                    uid,
+                    &conn_id,
+                    &client_addr.ip().to_string(),
+                    &authority,
+                    "HTTP2",
+                    started_at,
+                    ended_at,
+                    bytes_sent as i64,
+                    bytes_received as i64,
+                    "success",
+                )
+                .await;
+                state
+                    .track_bandwidth(uid, bytes_sent as i64 + bytes_received as i64)
+                    .await;
+                state.invalidate_quota_cache(uid).await;
+            }
+        }
+        Err(e) => {
+            tracing::error!("[HTTP2] Tunnel error for {} -> {}: {}", client_addr, authority, e);
+            crate::metrics::REQUESTS_TOTAL
+                .with_label_values(&["HTTP2", "failed"])
+                .inc();
+            if let Some(uid) = ctx.effective_uid() {
+                let _ = crate::db::usage::record_usage(
+                    &state.db_pool,
+                    uid,
+                    &conn_id,
+                    &client_addr.ip().to_string(),
+                    &authority,
+                    "HTTP2",
+                    started_at,
+                    ended_at,
+                    0,
+                    0,
+                    "failed",
+                )
+                .await;
+                state.invalidate_quota_cache(uid).await;
+            }
+        }
+    }
+}
+
+/// Authenticate an HTTP/2 request via Proxy-Authorization header.
+/// Returns Some(user_id) on success, None on failure.
+async fn authenticate_h2(auth_header: &str, state: &AppState) -> Option<i64> {
+    if !auth_header.starts_with("Basic ") {
+        return None;
+    }
+    let encoded = &auth_header[6..];
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    let credentials = String::from_utf8(decoded).ok()?;
+    let mut parts = credentials.splitn(2, ':');
+    let username = parts.next()?;
+    let password = parts.next()?;
+
+    ProxyProtocol::validate_credentials_public(username, password, state).await
+}
+
+/// Parse "host:port" from authority string; defaults to port 443 for CONNECT.
+fn parse_authority(authority: &str) -> (String, u16) {
+    if let Some(colon_pos) = authority.rfind(':') {
+        let host = &authority[..colon_pos];
+        let port = authority[colon_pos + 1..]
+            .parse::<u16>()
+            .unwrap_or(443);
+        (host.to_string(), port)
+    } else {
+        (authority.to_string(), 443)
+    }
+}
+
+/// Handle the actual TCP tunnel for an HTTP/2 CONNECT stream.
+/// Returns (bytes_sent, bytes_received) on success.
+async fn handle_h2_tunnel(
+    authority: &str,
+    client_addr: SocketAddr,
+    host: String,
+    port: u16,
+    request: http::Request<h2::RecvStream>,
+    mut respond: h2::server::SendResponse<bytes::Bytes>,
+    state: &AppState,
+) -> Result<(u64, u64), Box<dyn std::error::Error + Send + Sync>> {
+    // Resolve via DNS cache
+    let resolved_addr = timeout(
+        Duration::from_secs(5),
+        state.dns_cache.resolve(&host, port),
+    )
+    .await
+    .map_err(|_| "DNS resolution timeout")??;
+
     // Connect to upstream
-    let upstream = match timeout(Duration::from_secs(10), TcpStream::connect(&authority)).await {
+    let upstream = match timeout(Duration::from_secs(10), TcpStream::connect(resolved_addr)).await {
         Ok(Ok(stream)) => stream,
         Ok(Err(e)) => {
             tracing::error!(
@@ -103,9 +382,10 @@ async fn handle_h2_connect(
             let response = http::Response::builder()
                 .status(http::StatusCode::BAD_GATEWAY)
                 .body(())
-                .unwrap();
+                .unwrap_or_else(|_| http::Response::new(()));
             let _ = respond.send_response(response, true);
-            return;
+            state.dns_cache.invalidate(&host, port);
+            return Err(Box::new(e));
         }
         Err(_) => {
             tracing::error!(
@@ -116,24 +396,28 @@ async fn handle_h2_connect(
             let response = http::Response::builder()
                 .status(http::StatusCode::GATEWAY_TIMEOUT)
                 .body(())
-                .unwrap();
+                .unwrap_or_else(|_| http::Response::new(()));
             let _ = respond.send_response(response, true);
-            return;
+            return Err("Connection timeout".into());
         }
     };
 
     let _ = upstream.set_nodelay(true);
 
+    crate::metrics::UPSTREAM_CONNECT_DURATION
+        .with_label_values(&["HTTP2"])
+        .observe(0.0); // TODO: track actual duration
+
     // Send 200 OK to indicate the tunnel is established
     let response = http::Response::builder()
         .status(http::StatusCode::OK)
         .body(())
-        .unwrap();
+        .unwrap_or_else(|_| http::Response::new(()));
     let mut send_stream = match respond.send_response(response, false) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("[HTTP2] Failed to send response for {}: {}", authority, e);
-            return;
+            return Err(Box::new(e));
         }
     };
 
@@ -146,6 +430,16 @@ async fn handle_h2_connect(
         authority
     );
 
+    let mut bytes_sent: u64 = 0;
+    let mut bytes_received: u64 = 0;
+
+    // Use Arc+AtomicU64 to share byte counts between the two tasks
+    let sent_counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let recv_counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    let sent_c = sent_counter.clone();
+    let recv_c = recv_counter.clone();
+
     // Bridge: h2 recv_stream -> upstream writer
     let h2_to_upstream = async {
         loop {
@@ -154,6 +448,7 @@ async fn handle_h2_connect(
                     if data.is_empty() {
                         break;
                     }
+                    sent_c.fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
                     // Release flow control capacity
                     let _ = recv_stream.flow_control().release_capacity(data.len());
                     if let Err(e) = upstream_writer.write_all(&data).await {
@@ -177,6 +472,7 @@ async fn handle_h2_connect(
             match upstream_reader.read(&mut buf).await {
                 Ok(0) => break,
                 Ok(n) => {
+                    recv_c.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                     let data = bytes::Bytes::copy_from_slice(&buf[..n]);
                     if let Err(e) = send_stream.send_data(data, false) {
                         tracing::debug!("[HTTP2] h2 send error: {}", e);
@@ -196,5 +492,16 @@ async fn handle_h2_connect(
     // Run both directions concurrently
     tokio::join!(h2_to_upstream, upstream_to_h2);
 
-    tracing::info!("[HTTP2] Tunnel closed: {} <-> {}", client_addr, authority);
+    bytes_sent = sent_counter.load(std::sync::atomic::Ordering::Relaxed);
+    bytes_received = recv_counter.load(std::sync::atomic::Ordering::Relaxed);
+
+    tracing::info!(
+        "[HTTP2] Tunnel closed: {} <-> {} (sent: {}, received: {})",
+        client_addr,
+        authority,
+        bytes_sent,
+        bytes_received
+    );
+
+    Ok((bytes_sent, bytes_received))
 }
