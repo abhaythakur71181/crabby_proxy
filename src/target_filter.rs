@@ -81,7 +81,10 @@ fn default_tz() -> String {
 pub fn is_within_schedule(schedule_json: &str) -> bool {
     let schedule: AccessSchedule = match serde_json::from_str(schedule_json) {
         Ok(s) => s,
-        Err(_) => return true, // Invalid schedule → allow (fail-open for schedule parsing)
+        Err(e) => {
+            tracing::warn!("Invalid access schedule JSON, denying access (fail-closed): {}", e);
+            return false;
+        }
     };
     let now = chrono::Utc::now();
     let hour = now.format("%H").to_string().parse::<u32>().unwrap_or(0);
@@ -259,8 +262,9 @@ mod tests {
     }
 
     #[test]
-    fn test_schedule_parsing_invalid_fails_open() {
-        assert!(is_within_schedule("invalid json"));
-        assert!(is_within_schedule("{}"));
+    fn test_schedule_parsing_invalid_fails_closed() {
+        assert!(!is_within_schedule("invalid json"));
+        // Empty object has default fields — days will be empty so access is denied
+        assert!(!is_within_schedule("{}"));
     }
 }
