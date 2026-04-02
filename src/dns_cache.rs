@@ -19,10 +19,14 @@ struct DnsEntry {
     counter: AtomicU64,
 }
 
-/// Async DNS cache backed by `DashMap`.
+/// Default maximum number of cached DNS entries.
+const DEFAULT_MAX_ENTRIES: usize = 10_000;
+
+/// Async DNS cache backed by `DashMap` with a bounded size.
 pub struct DnsCache {
     cache: DashMap<String, DnsEntry>,
     ttl: Duration,
+    max_entries: usize,
 }
 
 impl DnsCache {
@@ -32,6 +36,16 @@ impl DnsCache {
         Self {
             cache: DashMap::new(),
             ttl: Duration::from_secs(ttl_secs),
+            max_entries: DEFAULT_MAX_ENTRIES,
+        }
+    }
+
+    /// Create a new DNS cache with a custom max entries limit.
+    pub fn with_max_entries(ttl_secs: u64, max_entries: usize) -> Self {
+        Self {
+            cache: DashMap::new(),
+            ttl: Duration::from_secs(ttl_secs),
+            max_entries,
         }
     }
 
@@ -62,6 +76,16 @@ impl DnsCache {
         }
 
         let first = addrs[0];
+
+        // Evict expired entries if cache is at capacity
+        if self.cache.len() >= self.max_entries {
+            self.cleanup_expired();
+        }
+        // If still at capacity after cleanup, evict oldest entries
+        if self.cache.len() >= self.max_entries {
+            self.evict_oldest(self.max_entries / 10); // evict ~10%
+        }
+
         self.cache.insert(
             key,
             DnsEntry {
@@ -91,6 +115,21 @@ impl DnsCache {
     pub fn cleanup_expired(&self) {
         self.cache
             .retain(|_, entry| entry.cached_at.elapsed() < self.ttl);
+    }
+
+    /// Evict the oldest `count` entries to make room when cache is full.
+    fn evict_oldest(&self, count: usize) {
+        // Collect keys sorted by age (oldest first)
+        let mut entries: Vec<(String, Instant)> = self
+            .cache
+            .iter()
+            .map(|e| (e.key().clone(), e.cached_at))
+            .collect();
+        entries.sort_by_key(|(_, cached_at)| *cached_at);
+
+        for (key, _) in entries.into_iter().take(count) {
+            self.cache.remove(&key);
+        }
     }
 }
 
