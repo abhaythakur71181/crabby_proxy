@@ -46,7 +46,7 @@ const App = () => (
               <Route path="/tunnels" element={<Tunnels />} />
               <Route path="/audit-log" element={<AuditLog />} />
               <Route path="/configuration" element={<Configuration />} />
-              <Route path="/health" element={<SystemHealth />} />
+              <Route path="/system-health" element={<SystemHealth />} />
             </Route>
             <Route path="*" element={<NotFound />} />
           </Routes>

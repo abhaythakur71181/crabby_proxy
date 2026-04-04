@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 import { formatBytes, formatRelativeTime, formatDuration, formatNumber, truncateUuid } from '@/lib/format';
@@ -25,9 +25,12 @@ import type { UserRole, Protocol } from '@/lib/types';
 
 export default function UserDetail() {
   const { id } = useParams<{ id: string }>();
-  const userId = Number(id);
   const navigate = useNavigate();
   const { hasRole, user: authUser } = useAuth();
+  const location = useLocation();
+  // If no :id param (e.g. /api-keys route), use the logged-in user's own ID
+  const userId = id ? Number(id) : (authUser?.id ?? 0);
+  const defaultTab = location.pathname === '/api-keys' ? 'api-keys' : 'profile';
   const qc = useQueryClient();
   const isAdmin = hasRole('root_admin');
 
@@ -107,7 +110,7 @@ export default function UserDetail() {
         )}
       </div>
 
-      <Tabs defaultValue="profile">
+      <Tabs defaultValue={defaultTab}>
         <TabsList className="bg-secondary/50">
           <TabsTrigger value="profile">Profile</TabsTrigger>
           <TabsTrigger value="api-keys"><Key className="h-3.5 w-3.5 mr-1" />API Keys</TabsTrigger>

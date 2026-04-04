@@ -30,11 +30,20 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   const res = await fetch(path, { ...options, headers });
 
-  if (res.status === 401 || res.status === 403) {
-    // Token expired/invalid, or permission denied – force logout
+  if (res.status === 401) {
+    // Token expired/invalid – force logout
     localStorage.removeItem('crabby_auth');
     window.location.href = '/login';
-    throw new Error(res.status === 403 ? 'Permission denied' : 'Session expired');
+    throw new Error('Session expired');
+  }
+
+  if (res.status === 403) {
+    let errorMessage = 'Permission denied';
+    try {
+      const body = await res.json();
+      errorMessage = body.error || errorMessage;
+    } catch { /* body not JSON */ }
+    throw new Error(errorMessage);
   }
 
   if (res.status === 204) {

@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from '@/components/ui/table';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog';
 import { Plus } from 'lucide-react';
@@ -20,6 +21,7 @@ export default function Approvals() {
   const [newApproval, setNewApproval] = useState({ user_id: '', client_ip: '', duration_hours: '24', reason: '' });
 
   const { data: approvals, isLoading } = useQuery({ queryKey: ['approvals'], queryFn: api.getApprovals });
+  const { data: usersData } = useQuery({ queryKey: ['users'], queryFn: () => api.getUsers(), enabled: createOpen });
 
   const createMut = useMutation({
     mutationFn: () => api.createApproval({ user_id: Number(newApproval.user_id), client_ip: newApproval.client_ip, duration_hours: Number(newApproval.duration_hours), reason: newApproval.reason }),
@@ -67,7 +69,19 @@ export default function Approvals() {
         <DialogContent>
           <DialogHeader><DialogTitle>Create Approval</DialogTitle></DialogHeader>
           <div className="space-y-4">
-            <div className="space-y-2"><Label>User ID</Label><Input type="number" value={newApproval.user_id} onChange={e => setNewApproval({ ...newApproval, user_id: e.target.value })} /></div>
+            <div className="space-y-2">
+              <Label>User</Label>
+              <Select value={newApproval.user_id} onValueChange={v => setNewApproval({ ...newApproval, user_id: v })}>
+                <SelectTrigger><SelectValue placeholder="Select a user" /></SelectTrigger>
+                <SelectContent>
+                  {(usersData?.items || []).map((u: any) => (
+                    <SelectItem key={u.id} value={String(u.id)}>
+                      {u.username} (ID: {u.id})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
             <div className="space-y-2"><Label>Client IP</Label><Input value={newApproval.client_ip} onChange={e => setNewApproval({ ...newApproval, client_ip: e.target.value })} placeholder="203.0.113.50" /></div>
             <div className="space-y-2"><Label>Duration (hours)</Label><Input type="number" value={newApproval.duration_hours} onChange={e => setNewApproval({ ...newApproval, duration_hours: e.target.value })} /></div>
             <div className="space-y-2"><Label>Reason</Label><Textarea value={newApproval.reason} onChange={e => setNewApproval({ ...newApproval, reason: e.target.value })} /></div>
