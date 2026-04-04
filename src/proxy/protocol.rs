@@ -369,7 +369,7 @@ impl ProxyProtocol {
     /// Detect the protocol from a client stream
     pub async fn detect_from_stream(client_stream: &mut TcpStream) -> Result<Self, io::Error> {
         let mut peek_buf = [0u8; 4];
-        match timeout(Duration::from_secs(5), client_stream.peek(&mut peek_buf)).await {
+        match timeout(crate::constants::PEEK_TIMEOUT, client_stream.peek(&mut peek_buf)).await {
             Ok(Ok(_)) => Ok(Self::detect_from_peek(&peek_buf).unwrap_or(ProxyProtocol::TCP)),
             Ok(Err(e)) => Err(e),
             Err(_) => Ok(ProxyProtocol::TCP),
@@ -475,12 +475,11 @@ impl ProxyProtocol {
                 // be sent to the target server, breaking the connection.
                 if method == "CONNECT" {
                     // Read and discard headers until we hit the empty line (\r\n\r\n)
-                    const MAX_HEADER_SIZE: usize = 16 * 1024; // 16KB limit
                     let mut header_buf = Vec::new();
                     let mut last_four = [0u8; 4];
 
                     loop {
-                        if header_buf.len() >= MAX_HEADER_SIZE {
+                        if header_buf.len() >= crate::constants::MAX_HTTP_HEADER_SIZE {
                             return Err(io::Error::new(
                                 io::ErrorKind::InvalidData,
                                 "HTTP headers exceed 16KB limit",
@@ -731,9 +730,7 @@ impl ProxyProtocol {
 
     async fn parse_tcp_target(stream: &mut ClientStream) -> io::Result<ProxyTarget> {
         // Robust parsing with timeout and error handling
-        let timeout_duration = Duration::from_secs(5);
-
-        let target = timeout(timeout_duration, async {
+        let target = timeout(crate::constants::PEEK_TIMEOUT, async {
             let mut length_buf = [0u8; 2];
             match stream.read_exact(&mut length_buf).await {
                 Ok(_) => {}

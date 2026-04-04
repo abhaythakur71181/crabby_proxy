@@ -6,9 +6,7 @@ use byte_pool::BytePool;
 use lazy_static::lazy_static;
 use tokio::net::TcpStream;
 
-const INITIAL_HTTP_HEADER_SIZE: usize = 1024;
-/// Maximum size for HTTP headers when parsing response (16KB)
-const MAX_HEADER_SIZE: usize = 16 * 1024;
+use crate::constants::{INITIAL_HTTP_HEADER_SIZE, MAX_HTTP_HEADER_SIZE};
 
 lazy_static! {
     static ref BUFFER_POOL: BytePool<Vec<u8>> = BytePool::<Vec<u8>>::new();
@@ -32,10 +30,10 @@ pub async fn hand_shake(
 
     let partially_read_body_start_index;
     loop {
-        if buffer.len() >= MAX_HEADER_SIZE {
+        if buffer.len() >= MAX_HTTP_HEADER_SIZE {
             return Err(ProxyError::BadGateway(anyhow!(
                 "Server response headers exceed {} bytes",
-                MAX_HEADER_SIZE
+                MAX_HTTP_HEADER_SIZE
             )));
         }
 

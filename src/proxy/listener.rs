@@ -404,7 +404,7 @@ async fn async_handle_client_with_target(
 
     // Resolve via DNS cache (avoids repeated DNS lookups for same host)
     let resolved_addr = timeout(
-        Duration::from_secs(5),
+        crate::constants::DNS_RESOLVE_TIMEOUT,
         state.dns_cache.resolve(&target.host, target.port),
     )
     .await
