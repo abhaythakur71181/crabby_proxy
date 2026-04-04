@@ -180,11 +180,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Signal shutdown to all servers
+    // Signal shutdown to all servers (stops accepting new connections)
     tracing::info!("Initiating graceful shutdown...");
     let _ = state.shutdown_tx.send(());
-    tracing::info!("Waiting for active connections to drain (max {:?})...", constants::SHUTDOWN_DRAIN_TIMEOUT);
-    tokio::time::sleep(constants::SHUTDOWN_DRAIN_TIMEOUT).await;
+
+    // Poll active connections until drained or timeout
+    let drain_start = std::time::Instant::now();
+    let drain_timeout = constants::SHUTDOWN_DRAIN_TIMEOUT;
+    loop {
+        let active_count = state
+            .state
+            .list_connections()
+            .await
+            .map(|c| c.len())
+            .unwrap_or(0);
+        if active_count == 0 {
+            tracing::info!("All connections drained");
+            break;
+        }
+        if drain_start.elapsed() >= drain_timeout {
+            tracing::warn!(
+                "Shutdown drain timeout reached with {} connections still active — forcing close",
+                active_count
+            );
+            break;
+        }
+        tracing::info!(
+            "Waiting for {} active connections to drain ({:.0}s remaining)...",
+            active_count,
+            (drain_timeout - drain_start.elapsed()).as_secs_f64()
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+
     tracing::info!("Graceful shutdown complete");
     Ok(())
 }
