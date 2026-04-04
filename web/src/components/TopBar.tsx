@@ -13,7 +13,7 @@ const routeNames: Record<string, string> = {
   '/tunnels': 'Tunnels',
   '/audit-log': 'Audit Log',
   '/configuration': 'Configuration',
-  '/health': 'System Health',
+  '/system-health': 'System Health',
 };
 
 export function TopBar() {

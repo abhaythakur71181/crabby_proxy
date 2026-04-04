@@ -23,7 +23,7 @@ const navItems = [
   { title: 'Tunnels', url: '/tunnels', icon: Landmark },
   { title: 'Audit Log', url: '/audit-log', icon: ScrollText },
   { title: 'Configuration', url: '/configuration', icon: Settings },
-  { title: 'System Health', url: '/health', icon: HeartPulse },
+  { title: 'System Health', url: '/system-health', icon: HeartPulse },
 ];
 
 export function AppSidebar() {
