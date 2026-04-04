@@ -60,7 +60,7 @@ pub async fn create_user(
     Ok((StatusCode::CREATED, Json(UserResponse::from(user))))
 }
 
-/// List all users (admin+). Supports optional `?limit=&offset=` pagination.
+/// List users. Admins see all users; regular users see only themselves.
 pub async fn list_users(
     State(state): State<Arc<AppState>>,
     Extension(current_user_id): Extension<i64>,
@@ -70,8 +70,15 @@ pub async fn list_users(
         .await?
         .ok_or_else(|| ApiError::unauthorized("Invalid session"))?;
 
+    // Regular users only see their own profile
     if current_user.get_role() == Role::User {
-        return Err(ApiError::forbidden("Admin access required"));
+        let items = vec![UserResponse::from(current_user)];
+        return Ok(Json(serde_json::json!({
+            "items": items,
+            "total": 1,
+            "limit": 1,
+            "offset": 0,
+        })));
     }
 
     // If pagination params are provided, use paginated query
