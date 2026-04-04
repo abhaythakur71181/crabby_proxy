@@ -1,3 +1,4 @@
+pub mod approval_requests;
 pub mod approvals;
 pub mod audit;
 pub mod auth;
