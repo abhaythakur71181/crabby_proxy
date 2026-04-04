@@ -6,6 +6,7 @@ mod config;
 mod config_env;
 mod connection;
 mod connection_pool;
+mod constants;
 mod db;
 mod dns_cache;
 mod error;
@@ -149,7 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let dns_state = state.clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                tokio::time::sleep(constants::DNS_CLEANUP_INTERVAL).await;
                 dns_state.dns_cache.cleanup_expired();
             }
         });
@@ -160,7 +161,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pool_ref = pool.clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                tokio::time::sleep(constants::POOL_CLEANUP_INTERVAL).await;
                 pool_ref.cleanup_expired();
             }
         });
@@ -182,8 +183,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Signal shutdown to all servers
     tracing::info!("Initiating graceful shutdown...");
     let _ = state.shutdown_tx.send(());
-    tracing::info!("Waiting for active connections to drain (max 30s)...");
-    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+    tracing::info!("Waiting for active connections to drain (max {:?})...", constants::SHUTDOWN_DRAIN_TIMEOUT);
+    tokio::time::sleep(constants::SHUTDOWN_DRAIN_TIMEOUT).await;
     tracing::info!("Graceful shutdown complete");
     Ok(())
 }

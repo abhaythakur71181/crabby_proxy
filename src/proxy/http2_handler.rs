@@ -363,14 +363,14 @@ async fn handle_h2_tunnel(
 ) -> Result<(u64, u64), Box<dyn std::error::Error + Send + Sync>> {
     // Resolve via DNS cache
     let resolved_addr = timeout(
-        Duration::from_secs(5),
+        crate::constants::DNS_RESOLVE_TIMEOUT,
         state.dns_cache.resolve(&host, port),
     )
     .await
     .map_err(|_| "DNS resolution timeout")??;
 
     // Connect to upstream
-    let upstream = match timeout(Duration::from_secs(10), TcpStream::connect(resolved_addr)).await {
+    let upstream = match timeout(crate::constants::UPSTREAM_CONNECT_TIMEOUT, TcpStream::connect(resolved_addr)).await {
         Ok(Ok(stream)) => stream,
         Ok(Err(e)) => {
             tracing::error!(
@@ -467,7 +467,7 @@ async fn handle_h2_tunnel(
 
     // Bridge: upstream reader -> h2 send_stream
     let upstream_to_h2 = async {
-        let mut buf = vec![0u8; 16 * 1024];
+        let mut buf = vec![0u8; crate::constants::H2_RELAY_BUFFER_SIZE];
         loop {
             match upstream_reader.read(&mut buf).await {
                 Ok(0) => break,
