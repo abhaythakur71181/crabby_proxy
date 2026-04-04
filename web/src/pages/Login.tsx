@@ -71,7 +71,7 @@ export default function Login() {
 
           <div className="text-center">
             <p className="text-xs text-muted-foreground">
-              Demo: <span className="font-mono text-primary">root_admin</span> / any password
+              Authenticating: <span className="font-mono text-primary">crabby</span> / please wait (O(n) worst case 😬)
             </p>
           </div>
         </div>

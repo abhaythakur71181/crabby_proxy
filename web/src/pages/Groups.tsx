@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { api } from '@/lib/api';
 import { formatRelativeTime } from '@/lib/format';
+import { useAuth } from '@/contexts/AuthContext';
 import { EmptyState } from '@/components/EmptyState';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -15,6 +16,8 @@ import { Plus, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 export default function Groups() {
+  const { hasRole } = useAuth();
+  const isAdmin = hasRole('admin', 'root_admin');
   const qc = useQueryClient();
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteId, setDeleteId] = useState<number | null>(null);
@@ -36,19 +39,19 @@ export default function Groups() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">Groups</h1>
-        <Button size="sm" onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4 mr-1" /> Create Group</Button>
+        {isAdmin && <Button size="sm" onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4 mr-1" /> Create Group</Button>}
       </div>
 
       {isLoading ? (
         <div className="space-y-2">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-12" />)}</div>
       ) : !groups?.length ? (
-        <EmptyState title="No groups" description="Create a group to organize users." icon="📦" action={{ label: 'Create Group', onClick: () => setCreateOpen(true) }} />
+        <EmptyState title="No groups" description="Create a group to organize users." icon="📦" action={isAdmin ? { label: 'Create Group', onClick: () => setCreateOpen(true) } : undefined} />
       ) : (
         <div className="glass-card overflow-hidden">
           <Table>
             <TableHeader>
               <TableRow className="border-border/50">
-                <TableHead>ID</TableHead><TableHead>Name</TableHead><TableHead>Description</TableHead><TableHead className="text-right">Members</TableHead><TableHead>Created</TableHead><TableHead></TableHead>
+                <TableHead>ID</TableHead><TableHead>Name</TableHead><TableHead>Description</TableHead><TableHead className="text-right">Members</TableHead><TableHead>Created</TableHead>{isAdmin && <TableHead></TableHead>}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -59,7 +62,7 @@ export default function Groups() {
                   <TableCell className="text-sm text-muted-foreground">{g.description}</TableCell>
                   <TableCell className="text-right font-mono">{g.member_count}</TableCell>
                   <TableCell className="text-xs text-muted-foreground">{formatRelativeTime(g.created_at)}</TableCell>
-                  <TableCell><Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => setDeleteId(g.id)}><Trash2 className="h-3.5 w-3.5" /></Button></TableCell>
+                  {isAdmin && <TableCell><Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => setDeleteId(g.id)}><Trash2 className="h-3.5 w-3.5" /></Button></TableCell>}
                 </TableRow>
               ))}
             </TableBody>
