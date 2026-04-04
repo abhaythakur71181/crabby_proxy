@@ -119,12 +119,9 @@ pub async fn validate_approval(ctx: &ConnectionContext, state: &AppState) -> Ver
     if ctx.is_admin {
         return Verdict::Allow;
     }
-    match crate::db::approvals::is_ip_approved(
-        &state.db_pool,
-        uid,
-        &ctx.client_addr.ip().to_string(),
-    )
-    .await
+    match state
+        .cached_ip_approved(uid, &ctx.client_addr.ip().to_string())
+        .await
     {
         Ok(true) => Verdict::Allow,
         Ok(false) => Verdict::Deny(format!(
