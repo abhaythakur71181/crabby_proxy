@@ -1,6 +1,8 @@
 pub mod api_keys;
 pub mod api_keys_crud;
 #[allow(dead_code)]
+pub mod approval_requests;
+#[allow(dead_code)]
 pub mod approvals;
 #[allow(dead_code)]
 pub mod audit_log;

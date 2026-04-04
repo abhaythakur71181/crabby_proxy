@@ -179,7 +179,7 @@ export const api = {
   removeGroupMember: (groupId: number, userId: number) =>
     del<any>(`/api/groups/${groupId}/members/${userId}`),
 
-  // ── Approvals ──
+  // ── Approvals (direct admin management) ──
   getApprovals: () => get<any[]>('/api/approvals'),
   createApproval: (data: { user_id: number; client_ip: string; duration_hours: number; reason?: string }) =>
     post<any>('/api/approvals', data),
@@ -187,6 +187,16 @@ export const api = {
     del<any>(`/api/approvals/${id}`, { reason }),
   getUserApprovals: (userId: number) =>
     get<any[]>(`/api/users/${userId}/approvals`),
+
+  // ── Approval Requests (request/approve/reject workflow) ──
+  getApprovalRequests: (status?: string) =>
+    get<any[]>(`/api/approval-requests${status ? `?status=${status}` : ''}`),
+  createApprovalRequest: (data: { client_ip: string; duration_hours: number; reason?: string }) =>
+    post<any>('/api/approval-requests', data),
+  approveRequest: (id: number, reason?: string) =>
+    post<any>(`/api/approval-requests/${id}/approve`, { reason }),
+  rejectRequest: (id: number, reason?: string) =>
+    post<any>(`/api/approval-requests/${id}/reject`, { reason }),
 
   // ── Tunnels ──
   getTunnels: () => get<any>('/api/tunnels'),
