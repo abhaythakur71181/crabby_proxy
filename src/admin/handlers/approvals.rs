@@ -1,8 +1,10 @@
+use super::models::ApiError;
 use crate::app_state::AppState;
 use crate::db::approvals;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
+    response::IntoResponse,
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -38,7 +40,7 @@ pub async fn create_approval(
     State(state): State<Arc<AppState>>,
     axum::Extension(current_user_id): axum::Extension<i64>,
     Json(payload): Json<CreateApprovalRequest>,
-) -> Result<(StatusCode, Json<ApprovalResponse>), StatusCode> {
+) -> Result<impl IntoResponse, ApiError> {
     let current_user =
         crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
     current_user.require_admin()?;
@@ -54,7 +56,7 @@ pub async fn create_approval(
     .await
     .map_err(|e| {
         tracing::error!("Failed to create approval: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
+        ApiError::internal("Failed to create approval")
     })?;
 
     // Invalidate cached approvals for this user so proxy picks up the new approval
@@ -80,7 +82,7 @@ pub async fn create_approval(
 pub async fn list_approvals(
     State(state): State<Arc<AppState>>,
     axum::Extension(current_user_id): axum::Extension<i64>,
-) -> Result<Json<Vec<ApprovalResponse>>, StatusCode> {
+) -> Result<Json<Vec<ApprovalResponse>>, ApiError> {
     let current_user =
         crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
     current_user.require_admin()?;
@@ -89,7 +91,7 @@ pub async fn list_approvals(
         .await
         .map_err(|e| {
             tracing::error!("Failed to list approvals: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            ApiError::internal("Failed to list approvals")
         })?;
 
     Ok(Json(
@@ -114,18 +116,18 @@ pub async fn list_user_approvals(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
     axum::Extension(current_user_id): axum::Extension<i64>,
-) -> Result<Json<Vec<ApprovalResponse>>, StatusCode> {
+) -> Result<Json<Vec<ApprovalResponse>>, ApiError> {
     let current_user =
         crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
     if !current_user.can_access_user(user_id) {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(ApiError::forbidden("Cannot access other users' approvals"));
     }
 
     let records = approvals::list_user_approvals(&state.db_pool, user_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to list user approvals: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            ApiError::internal("Failed to list approvals")
         })?;
 
     Ok(Json(
@@ -151,7 +153,7 @@ pub async fn terminate_approval(
     Path(approval_id): Path<i64>,
     axum::Extension(current_user_id): axum::Extension<i64>,
     Json(payload): Json<TerminateRequest>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<impl IntoResponse, ApiError> {
     let current_user =
         crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
     current_user.require_admin()?;
@@ -165,18 +167,12 @@ pub async fn terminate_approval(
     .await
     .map_err(|e| {
         tracing::error!("Failed to terminate approval: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
+        ApiError::internal("Failed to terminate approval")
     })?;
-
-    // Invalidate cached approvals — we need the user_id from the approval record.
-    // Since we don't have it directly, invalidate by looking up the approval first.
-    // For simplicity, the approval was already terminated; the cache entries will
-    // expire naturally (2min TTL). For immediate effect, we'd need to fetch the
-    // approval's user_id before termination. This is acceptable for a terminate op.
 
     if terminated {
         Ok(StatusCode::OK)
     } else {
-        Err(StatusCode::NOT_FOUND)
+        Err(ApiError::not_found(format!("Approval {} not found", approval_id)))
     }
 }

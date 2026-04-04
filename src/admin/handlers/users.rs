@@ -24,18 +24,22 @@ pub async fn create_user(
     State(state): State<Arc<AppState>>,
     Extension(current_user_id): Extension<i64>,
     Json(request): Json<super::models::CreateUserRequest>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<impl IntoResponse, ApiError> {
     let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .await?
+        .ok_or_else(|| ApiError::unauthorized("Invalid session"))?;
     if current_user.get_role() != Role::RootAdmin {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(ApiError::forbidden("Only root_admin can create users"));
     }
-    crate::validation::validate_username(&request.username).map_err(|_| StatusCode::BAD_REQUEST)?;
-    crate::validation::validate_password(&request.password).map_err(|_| StatusCode::BAD_REQUEST)?;
+    crate::validation::validate_username(&request.username)
+        .map_err(|e| ApiError::bad_request(e))?;
+    crate::validation::validate_password(&request.password)
+        .map_err(|e| ApiError::bad_request(e))?;
     if let Ok(Some(_)) = users::get_user_by_username(&state.db_pool, &request.username).await {
-        return Err(StatusCode::CONFLICT);
+        return Err(ApiError::conflict(format!(
+            "Username '{}' already exists",
+            request.username
+        )));
     }
     let db_request = crate::db::models::CreateUserRequest {
         username: request.username,
@@ -49,12 +53,10 @@ pub async fn create_user(
         notes: None,
     };
     let user_id = users::create_user(&state.db_pool, &db_request, Some(current_user_id))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .await?;
     let user = users::get_user_by_id(&state.db_pool, user_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        .await?
+        .ok_or_else(|| ApiError::internal("Failed to retrieve created user"))?;
     Ok((StatusCode::CREATED, Json(UserResponse::from(user))))
 }
 
@@ -63,27 +65,21 @@ pub async fn list_users(
     State(state): State<Arc<AppState>>,
     Extension(current_user_id): Extension<i64>,
     Query(pagination): Query<PaginationQuery>,
-) -> Result<impl IntoResponse, StatusCode> {
-    // Check if current user is at least admin
+) -> Result<impl IntoResponse, ApiError> {
     let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .await?
+        .ok_or_else(|| ApiError::unauthorized("Invalid session"))?;
 
     if current_user.get_role() == Role::User {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(ApiError::forbidden("Admin access required"));
     }
 
     // If pagination params are provided, use paginated query
     if pagination.limit.is_some() || pagination.offset.is_some() {
         let limit = pagination.limit.unwrap_or(50).min(200);
         let offset = pagination.offset.unwrap_or(0);
-        let total = users::count_all_users(&state.db_pool)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let users_list = users::list_users_paginated(&state.db_pool, limit, offset)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let total = users::count_all_users(&state.db_pool).await?;
+        let users_list = users::list_users_paginated(&state.db_pool, limit, offset).await?;
         let items: Vec<UserResponse> = users_list.into_iter().map(UserResponse::from).collect();
         return Ok(Json(serde_json::json!({
             "items": items,
@@ -94,9 +90,7 @@ pub async fn list_users(
     }
 
     // Backwards-compatible: no pagination params → return flat array
-    let users_list = users::list_users(&state.db_pool)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let users_list = users::list_users(&state.db_pool).await?;
     let response: Vec<UserResponse> = users_list.into_iter().map(UserResponse::from).collect();
     Ok(Json(serde_json::json!(response)))
 }
@@ -222,15 +216,14 @@ pub async fn create_api_key(
     Path(user_id): Path<i64>,
     Extension(current_user_id): Extension<i64>,
     Json(request): Json<CreateApiKeyRequest>,
-) -> Result<(StatusCode, Json<CreateApiKeyResponse>), StatusCode> {
+) -> Result<impl IntoResponse, ApiError> {
     // Extract fields from request immediately to avoid holding non-Send types across .await
     let req_name = request.name;
     let req_expires = request.expires_in_days;
 
     let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .await?
+        .ok_or_else(|| ApiError::unauthorized("Invalid session"))?;
 
     // Allow if creating for self or if admin+
     let is_self = current_user_id == user_id;
@@ -238,7 +231,7 @@ pub async fn create_api_key(
         current_user.get_role() == Role::RootAdmin || current_user.get_role() == Role::Admin;
 
     if !is_self && !is_admin_plus {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(ApiError::forbidden("Cannot create API keys for other users"));
     }
 
     let name = if req_name.is_empty() {
@@ -255,7 +248,10 @@ pub async fn create_api_key(
     let (plaintext_key, api_key) =
         api_keys_crud::create_api_key(&state.db_pool, user_id, name, expires_in_days)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|e| {
+                tracing::error!("Failed to create API key: {}", e);
+                ApiError::internal("Failed to create API key")
+            })?;
 
     let response = CreateApiKeyResponse {
         key: plaintext_key,
@@ -270,11 +266,10 @@ pub async fn list_api_keys(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
     Extension(current_user_id): Extension<i64>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<impl IntoResponse, ApiError> {
     let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .await?
+        .ok_or_else(|| ApiError::unauthorized("Invalid session"))?;
 
     // Allow if viewing own keys or if admin+
     let is_self = current_user_id == user_id;
@@ -282,12 +277,10 @@ pub async fn list_api_keys(
         current_user.get_role() == Role::RootAdmin || current_user.get_role() == Role::Admin;
 
     if !is_self && !is_admin_plus {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(ApiError::forbidden("Cannot view other users' API keys"));
     }
 
-    let keys = api_keys_crud::list_api_keys(&state.db_pool, user_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let keys = api_keys_crud::list_api_keys(&state.db_pool, user_id).await?;
 
     let response: Vec<ApiKeyResponse> = keys.into_iter().map(ApiKeyResponse::from).collect();
 
@@ -299,21 +292,23 @@ pub async fn revoke_api_key(
     State(state): State<Arc<AppState>>,
     Path((user_id, key_id)): Path<(i64, i64)>,
     Extension(current_user_id): Extension<i64>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<impl IntoResponse, ApiError> {
     let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .await?
+        .ok_or_else(|| ApiError::unauthorized("Invalid session"))?;
     // Allow if revoking own key or if admin+
     let is_self = current_user_id == user_id;
     let is_admin_plus =
         current_user.get_role() == Role::RootAdmin || current_user.get_role() == Role::Admin;
     if !is_self && !is_admin_plus {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(ApiError::forbidden("Cannot revoke other users' API keys"));
     }
     api_keys_crud::revoke_api_key(&state.db_pool, key_id, user_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            tracing::error!("Failed to revoke API key: {}", e);
+            ApiError::internal("Failed to revoke API key")
+        })?;
 
     // Invalidate cached API key verifications for this user
     state.invalidate_api_key_cache(user_id).await;
