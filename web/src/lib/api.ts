@@ -224,7 +224,8 @@ export const api = {
   getDeepHealth: () => get<any>('/health/deep'),
 
   // ── Metrics ──
-  getMetrics: () => get<string>('/metrics'),
+  getMetrics: () => get<any>('/api/metrics'),
+  getMetricsRaw: () => get<string>('/metrics'),
 
   // ── Sessions ──
   getUserSessions: (userId: number) =>

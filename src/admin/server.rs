@@ -27,6 +27,7 @@ pub async fn run_admin_server(
     let protected_routes = Router::new()
         .route("/stats", get(handlers::health::stats))
         .route("/api/dashboard", get(handlers::health::dashboard))
+        .route("/api/metrics", get(handlers::health::json_metrics))
         .route(
             "/api/connections",
             get(handlers::connections::list_connections),

@@ -149,14 +149,57 @@ export default function Approvals() {
       </div>
 
       {isAdmin ? (
-        <Tabs defaultValue="pending">
+        <Tabs defaultValue="all">
           <TabsList className="bg-secondary/50">
+            <TabsTrigger value="all">All Requests</TabsTrigger>
             <TabsTrigger value="pending">
-              Pending Requests {pendingRequests.length > 0 && <Badge variant="destructive" className="ml-1.5 h-5 px-1.5 text-[10px]">{pendingRequests.length}</Badge>}
+              Pending {pendingRequests.length > 0 && <Badge variant="destructive" className="ml-1.5 h-5 px-1.5 text-[10px]">{pendingRequests.length}</Badge>}
             </TabsTrigger>
-            <TabsTrigger value="history">Request History</TabsTrigger>
+            <TabsTrigger value="history">History</TabsTrigger>
             <TabsTrigger value="active">Active Approvals</TabsTrigger>
           </TabsList>
+
+          {/* All Requests */}
+          <TabsContent value="all" className="mt-4">
+            {!(requests || []).length ? (
+              <EmptyState title="No requests" description="No approval requests have been submitted yet." icon="📋" />
+            ) : (
+              <div className="glass-card overflow-hidden">
+                <Table>
+                  <TableHeader><TableRow className="border-border/50">
+                    <TableHead>ID</TableHead><TableHead>User</TableHead><TableHead>Client IP</TableHead><TableHead>Duration</TableHead><TableHead>Status</TableHead><TableHead>Reason</TableHead><TableHead>Requested</TableHead><TableHead></TableHead>
+                  </TableRow></TableHeader>
+                  <TableBody>
+                    {(requests || []).map(r => (
+                      <TableRow key={r.id} className="border-border/30">
+                        <TableCell className="font-mono text-muted-foreground">{r.id}</TableCell>
+                        <TableCell className="text-primary text-sm">{r.username || `User #${r.user_id}`}</TableCell>
+                        <TableCell className="font-mono text-xs">{r.client_ip}</TableCell>
+                        <TableCell className="text-xs">{r.duration_hours}h</TableCell>
+                        <TableCell>
+                          <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border ${statusBadge[r.status]}`}>{r.status}</span>
+                        </TableCell>
+                        <TableCell className="text-xs max-w-[200px] truncate">{r.reason || '—'}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground">{formatRelativeTime(r.requested_at)}</TableCell>
+                        <TableCell>
+                          {r.status === 'pending' && (
+                            <div className="flex gap-1">
+                              <Button variant="ghost" size="icon" className="h-7 w-7 text-emerald-400" onClick={() => { setDecisionId(r.id); setDecisionAction('approve'); }}>
+                                <Check className="h-4 w-4" />
+                              </Button>
+                              <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => { setDecisionId(r.id); setDecisionAction('reject'); }}>
+                                <X className="h-4 w-4" />
+                              </Button>
+                            </div>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </TabsContent>
 
           {/* Pending Requests */}
           <TabsContent value="pending" className="mt-4">
