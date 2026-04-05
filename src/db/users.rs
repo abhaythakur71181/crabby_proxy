@@ -297,6 +297,30 @@ pub async fn list_users(pool: &SqlitePool) -> Result<Vec<User>, sqlx::Error> {
     Ok(users)
 }
 
+/// List users with pagination.
+pub async fn list_users_paginated(
+    pool: &SqlitePool,
+    limit: i32,
+    offset: i32,
+) -> Result<Vec<User>, sqlx::Error> {
+    let users = sqlx::query_as::<_, User>(
+        "SELECT * FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?",
+    )
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+    Ok(users)
+}
+
+/// Count total users.
+pub async fn count_all_users(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
+    let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
+        .fetch_one(pool)
+        .await?;
+    Ok(row.0)
+}
+
 /// Count active users
 pub async fn count_users(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
     let row = sqlx::query("SELECT COUNT(*) FROM users WHERE is_active = 1")
