@@ -4,12 +4,19 @@ use super::models::{
 use crate::app_state::AppState;
 use crate::db::{api_keys_crud, models::Role, users};
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Json},
     Extension,
 };
+use serde::Deserialize;
 use std::sync::Arc;
+
+#[derive(Deserialize)]
+pub struct PaginationQuery {
+    pub limit: Option<i32>,
+    pub offset: Option<i32>,
+}
 
 /// Create a new user (root_admin only)
 pub async fn create_user(
@@ -50,10 +57,11 @@ pub async fn create_user(
     Ok((StatusCode::CREATED, Json(UserResponse::from(user))))
 }
 
-/// List all users (admin+)
+/// List all users (admin+). Supports optional `?limit=&offset=` pagination.
 pub async fn list_users(
     State(state): State<Arc<AppState>>,
     Extension(current_user_id): Extension<i64>,
+    Query(pagination): Query<PaginationQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
     // Check if current user is at least admin
     let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
@@ -65,13 +73,31 @@ pub async fn list_users(
         return Err(StatusCode::FORBIDDEN);
     }
 
+    // If pagination params are provided, use paginated query
+    if pagination.limit.is_some() || pagination.offset.is_some() {
+        let limit = pagination.limit.unwrap_or(50).min(200);
+        let offset = pagination.offset.unwrap_or(0);
+        let total = users::count_all_users(&state.db_pool)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let users_list = users::list_users_paginated(&state.db_pool, limit, offset)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let items: Vec<UserResponse> = users_list.into_iter().map(UserResponse::from).collect();
+        return Ok(Json(serde_json::json!({
+            "items": items,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        })));
+    }
+
+    // Backwards-compatible: no pagination params → return flat array
     let users_list = users::list_users(&state.db_pool)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
     let response: Vec<UserResponse> = users_list.into_iter().map(UserResponse::from).collect();
-
-    Ok(Json(response))
+    Ok(Json(serde_json::json!(response)))
 }
 
 /// Get user details (admin+ or self)
