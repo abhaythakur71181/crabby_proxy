@@ -19,6 +19,7 @@ pub async fn run_admin_server(
     // Public routes (no auth required)
     let public_routes = Router::new()
         .route("/health", get(handlers::health::health_check))
+        .route("/health/deep", get(handlers::health::deep_health_check))
         .route("/metrics", get(handlers::metrics::prometheus_metrics))
         .route("/api/login", post(handlers::auth::login));
 

@@ -29,6 +29,83 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResp
     })
 }
 
+/// Deep health check that verifies database and state backend connectivity.
+#[derive(Serialize)]
+pub struct DeepHealthResponse {
+    pub status: String,
+    pub uptime_seconds: u64,
+    pub version: String,
+    pub checks: HealthChecks,
+}
+
+#[derive(Serialize)]
+pub struct HealthChecks {
+    pub database: ComponentHealth,
+    pub state_backend: ComponentHealth,
+    pub dns_cache: ComponentHealth,
+}
+
+#[derive(Serialize)]
+pub struct ComponentHealth {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// GET /api/health/deep — Verify connectivity to all backing services.
+pub async fn deep_health_check(State(state): State<Arc<AppState>>) -> Json<DeepHealthResponse> {
+    // Check SQLite
+    let db_health = match sqlx::query("SELECT 1")
+        .fetch_one(&state.db_pool)
+        .await
+    {
+        Ok(_) => ComponentHealth {
+            status: "ok".to_string(),
+            detail: None,
+        },
+        Err(e) => ComponentHealth {
+            status: "error".to_string(),
+            detail: Some(e.to_string()),
+        },
+    };
+
+    // Check state backend (memory or Redis)
+    let state_health = match state.state.count_connections().await {
+        Ok(_) => ComponentHealth {
+            status: "ok".to_string(),
+            detail: None,
+        },
+        Err(e) => ComponentHealth {
+            status: "error".to_string(),
+            detail: Some(e.to_string()),
+        },
+    };
+
+    // Check DNS cache
+    let (dns_entries, dns_addrs) = state.dns_cache.stats();
+    let dns_health = ComponentHealth {
+        status: "ok".to_string(),
+        detail: Some(format!("{} entries, {} addresses cached", dns_entries, dns_addrs)),
+    };
+
+    let all_ok = db_health.status == "ok" && state_health.status == "ok";
+
+    Json(DeepHealthResponse {
+        status: if all_ok {
+            "healthy".to_string()
+        } else {
+            "degraded".to_string()
+        },
+        uptime_seconds: state.uptime().as_secs(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        checks: HealthChecks {
+            database: db_health,
+            state_backend: state_health,
+            dns_cache: dns_health,
+        },
+    })
+}
+
 /// Server statistics endpoint
 pub async fn stats(State(state): State<Arc<AppState>>) -> Json<StatsResponse> {
     let active_count = state.state.count_connections().await.unwrap_or(0);
