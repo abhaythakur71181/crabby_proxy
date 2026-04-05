@@ -62,6 +62,18 @@ pub async fn create_approval(
     // Invalidate cached approvals for this user so proxy picks up the new approval
     state.invalidate_approval_cache(payload.user_id).await;
 
+    // Audit log
+    let _ = crate::db::audit_log::log_action(
+        &state.db_pool,
+        current_user_id,
+        "approval_created",
+        Some("approval"),
+        Some(&id.to_string()),
+        Some(&format!("User {}, IP: {}, duration: {}h", payload.user_id, payload.client_ip, payload.duration_hours)),
+        None,
+    )
+    .await;
+
     let now = chrono::Utc::now().timestamp();
     Ok((
         StatusCode::CREATED,
@@ -171,6 +183,17 @@ pub async fn terminate_approval(
     })?;
 
     if terminated {
+        // Audit log
+        let _ = crate::db::audit_log::log_action(
+            &state.db_pool,
+            current_user_id,
+            "approval_terminated",
+            Some("approval"),
+            Some(&approval_id.to_string()),
+            Some(&payload.reason),
+            None,
+        )
+        .await;
         Ok(StatusCode::OK)
     } else {
         Err(ApiError::not_found(format!("Approval {} not found", approval_id)))
