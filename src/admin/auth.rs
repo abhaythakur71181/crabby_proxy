@@ -17,7 +17,7 @@ pub async fn auth_middleware(
     next: Next,
 ) -> Result<Response, StatusCode> {
     let (auth_enabled, jwt_secret) = {
-        let config = state.config.read().await;
+        let config = state.config.load();
         (
             config.admin.auth_enabled,
             config.authentication.jwt_secret.clone(),
@@ -76,7 +76,7 @@ pub async fn auth_middleware(
                             }
                             _ => {
                                 // Fallback to Config credentials
-                                let config = state.config.read().await;
+                                let config = state.config.load();
                                 if username == config.admin.admin_username
                                     && password == config.admin.admin_password
                                 {

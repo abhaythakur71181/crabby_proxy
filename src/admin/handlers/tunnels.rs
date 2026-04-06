@@ -38,7 +38,7 @@ pub async fn create_tunnel(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateTunnelRequest>,
 ) -> Result<(StatusCode, Json<crate::tunnel::manager::TunnelInfo>), StatusCode> {
-    let config = state.config.read().await;
+    let config = state.config.load();
     if !config.features.reverse_tunnels {
         return Err(StatusCode::FORBIDDEN);
     }

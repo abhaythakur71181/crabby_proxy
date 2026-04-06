@@ -1,6 +1,6 @@
+use arc_swap::ArcSwap;
 use serde::Serialize;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use crate::config::Config;
 
@@ -29,10 +29,10 @@ pub struct WebhookPayload {
 
 /// Send a webhook notification with retry on failure (fire-and-forget).
 /// Retries up to 3 times with exponential backoff (1s, 2s, 4s).
-pub fn send_webhook(config: Arc<RwLock<Config>>, event: &str, data: serde_json::Value) {
+pub fn send_webhook(config: Arc<ArcSwap<Config>>, event: &str, data: serde_json::Value) {
     let event = event.to_string();
     tokio::spawn(async move {
-        let config = config.read().await;
+        let config = config.load();
         let url = match &config.features.webhook_url {
             Some(url) if !url.is_empty() => url.clone(),
             _ => return,

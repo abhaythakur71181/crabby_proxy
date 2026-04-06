@@ -1,3 +1,4 @@
+use arc_swap::ArcSwap;
 use crate::cache::CacheLayer;
 use crate::config::Config;
 use crate::state::{MemoryBackend, RedisBackend, StateBackend};
@@ -22,8 +23,8 @@ pub enum ConnectionEvent {
 /// Shared application state.
 /// Wrapped in `Arc<AppState>` at creation — never deep-cloned.
 pub struct AppState {
-    // Configuration (hot reload 😉)
-    pub config: Arc<RwLock<Config>>,
+    // Configuration (hot reload via lock-free ArcSwap)
+    pub config: Arc<ArcSwap<Config>>,
 
     // Pluggable state (memory or Redis)
     pub state: Arc<dyn StateBackend>,
@@ -207,7 +208,7 @@ impl AppState {
         };
 
         Ok(Self {
-            config: Arc::new(RwLock::new(config.clone())),
+            config: Arc::new(ArcSwap::from_pointee(config.clone())),
             state,
             db_pool,
             tunnels: Arc::new(RwLock::new(TunnelManager::new(
@@ -264,7 +265,7 @@ impl AppState {
     pub async fn reload_config(&self) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(path) = &self.config_path {
             let new_config = Config::from_file(path)?;
-            *self.config.write().await = new_config;
+            self.config.store(Arc::new(new_config));
             tracing::info!("Configuration reloaded from {}", path);
             Ok(())
         } else {

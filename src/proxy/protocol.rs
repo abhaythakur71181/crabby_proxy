@@ -136,7 +136,7 @@ impl ProxyProtocol {
 
         // Check if auth is enabled in config
         let auth_enabled = {
-            let config = state.config.read().await;
+            let config = state.config.load();
             config.authentication.enabled
         };
 
@@ -326,7 +326,7 @@ impl ProxyProtocol {
 
         // Fallback to Config credentials if enabled
         let config_match = {
-            let config = state.config.read().await;
+            let config = state.config.load();
             username == config.authentication.username && password == config.authentication.password
         };
         if config_match {

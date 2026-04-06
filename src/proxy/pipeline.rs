@@ -35,7 +35,7 @@ pub struct ConfigSnapshot {
 
 impl ConfigSnapshot {
     pub async fn from_state(state: &AppState) -> Self {
-        let config = state.config.read().await;
+        let config = state.config.load();
         Self {
             ip_filter_enabled: config.filtering.ip_filter_enabled,
             rate_limiting_enabled: config.rate_limiting.enabled,

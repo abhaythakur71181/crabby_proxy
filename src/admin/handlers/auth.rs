@@ -46,7 +46,7 @@ pub async fn login(
         if !user.is_active {
             return Err((StatusCode::FORBIDDEN, "Account is disabled".to_string()));
         }
-        let config = state.config.read().await;
+        let config = state.config.load();
         let secret = &config.authentication.jwt_secret;
         let expiration = config.authentication.jwt_expiration;
         let token = jwt::create_jwt(user.id, &user.username, &user.role, secret, expiration)
