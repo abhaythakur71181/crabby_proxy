@@ -88,6 +88,11 @@ pub struct AppState {
     // (fallback when Redis cache is unavailable)
     pub quota_cache: Arc<dashmap::DashMap<i64, (bool, std::time::Instant)>>,
 
+    // Live per-user quota tracker. Atomic byte counters seeded from the
+    // database, mutated on the relay hot path so connections that exceed
+    // the limit mid-stream are torn down within one buffer iteration.
+    pub quota_trackers: Arc<crate::quota_tracker::QuotaTrackerRegistry>,
+
     // Approval check cache: (user_id, client_ip) -> (approved, cached_at)
     // Avoids hitting DB on every proxy connection; 2-minute TTL
     pub approval_cache: Arc<dashmap::DashMap<(i64, String), (bool, std::time::Instant)>>,
@@ -253,6 +258,7 @@ impl AppState {
             },
             shutdown_tx,
             quota_cache: Arc::new(dashmap::DashMap::new()),
+            quota_trackers: Arc::new(crate::quota_tracker::QuotaTrackerRegistry::new()),
             approval_cache: Arc::new(dashmap::DashMap::new()),
             auth_cache: Arc::new(dashmap::DashMap::new()),
             bandwidth_throttlers: Arc::new(crate::bandwidth::ThrottlerRegistry::new()),
@@ -420,6 +426,7 @@ impl AppState {
             cache.invalidate_quota(user_id).await;
         }
         self.quota_cache.remove(&user_id);
+        self.quota_trackers.invalidate(user_id);
     }
 
     /// Check if IP is approved for user, with in-memory + Redis cache-aside.

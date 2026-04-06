@@ -132,6 +132,9 @@ pub async fn start_subscriber(
                 }
                 // Clear rate limit cache too
                 state.user_rate_limiter.invalidate_user(user_id).await;
+                // Quota limit may have changed — drop the live tracker so the
+                // next access reseeds from the database.
+                state.quota_trackers.invalidate(user_id);
             }
             ProxyEvent::UserDeleted(user_id) => {
                 tracing::info!("Event bus: user {} deleted, full cache cleanup", user_id);
@@ -145,6 +148,7 @@ pub async fn start_subscriber(
                 }
                 state.user_rate_limiter.invalidate_user(user_id).await;
                 state.quota_cache.remove(&user_id);
+                state.quota_trackers.invalidate(user_id);
             }
             ProxyEvent::IpFilterUpdated => {
                 tracing::info!("Event bus: IP filter update received");
