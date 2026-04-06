@@ -67,9 +67,10 @@ pub struct AppState {
     // Upstream connection pool (reuses idle TCP connections)
     pub connection_pool: Option<Arc<crate::connection_pool::ConnectionPool>>,
 
-    // Auth result cache: hash(username + password) -> (user_id, cached_at)
+    // Auth result cache: (username, password_hash) -> (user_id, cached_at)
     // Avoids DB + argon2 on every connection from the same user (60s TTL)
-    pub auth_cache: Arc<dashmap::DashMap<u64, (i64, std::time::Instant)>>,
+    // Uses full string key instead of u64 hash to prevent collision-based auth bypass.
+    pub auth_cache: Arc<dashmap::DashMap<(String, String), (i64, std::time::Instant)>>,
 
     // Graceful shutdown signal
     pub shutdown_tx: tokio::sync::broadcast::Sender<()>,

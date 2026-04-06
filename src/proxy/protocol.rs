@@ -261,9 +261,9 @@ impl ProxyProtocol {
     /// Returns Some(user_id) for DB users, Some(-1) for config-based auth, None on failure.
     async fn validate_credentials(username: &str, password: &str, state: &AppState) -> Option<i64> {
         // ── In-process auth cache (avoids DB + argon2 on repeat connections) ──
-        // Key = FNV-1a hash of "username:password", value = (user_id, cached_at).
+        // Key = (username, password) tuple — avoids hash collision risk.
         // 60-second TTL.  API-key auth has its own Redis-backed cache so we skip it here.
-        let cache_key = Self::auth_cache_key(username, password);
+        let cache_key = (username.to_string(), password.to_string());
         if let Some(entry) = state.auth_cache.get(&cache_key) {
             let (uid, cached_at) = entry.value();
             if cached_at.elapsed() < std::time::Duration::from_secs(60) {
@@ -348,22 +348,6 @@ impl ProxyProtocol {
         state: &AppState,
     ) -> Option<i64> {
         Self::validate_credentials(username, password, state).await
-    }
-
-    /// FNV-1a hash for auth cache key (NOT cryptographic — just for DashMap lookup).
-    fn auth_cache_key(username: &str, password: &str) -> u64 {
-        let mut hash: u64 = 0xcbf29ce484222325;
-        for byte in username.as_bytes() {
-            hash ^= *byte as u64;
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        hash ^= b':' as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-        for byte in password.as_bytes() {
-            hash ^= *byte as u64;
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        hash
     }
 
     /// Detect the protocol from a client stream
