@@ -34,7 +34,7 @@ pub async fn run_proxy_server(state: Arc<AppState>, addr: SocketAddr) {
 
     let mut shutdown_rx = state.shutdown_tx.subscribe();
     let max_global_conns = {
-        let config = state.config.read().await;
+        let config = state.config.load();
         config.server.max_connections
     };
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_global_conns));

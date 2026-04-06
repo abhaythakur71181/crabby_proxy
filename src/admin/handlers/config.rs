@@ -38,7 +38,7 @@ pub struct ReloadResponse {
 
 /// Get current configuration (sensitive fields redacted)
 pub async fn get_config(State(state): State<Arc<AppState>>) -> Json<ConfigResponse> {
-    let config = state.config.read().await;
+    let config = state.config.load();
     Json(ConfigResponse {
         server: ServerConfigResponse {
             proxy_bind: config.server.proxy_bind.clone(),

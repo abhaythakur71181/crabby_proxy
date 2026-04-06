@@ -143,7 +143,7 @@ pub async fn run_admin_server(
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024));
 
     // S3: Use configured CORS origins instead of allow_origin(Any)
-    let cors_origins = state.config.read().await.admin.cors_origins.clone();
+    let cors_origins = state.config.load().admin.cors_origins.clone();
     let cors = if cors_origins.is_empty() {
         tracing::warn!("⚠️  No CORS origins configured, allowing all origins");
         CorsLayer::new()

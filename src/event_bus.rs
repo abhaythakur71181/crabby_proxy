@@ -115,8 +115,7 @@ pub async fn start_subscriber(
                 if let Some(ref path) = state.config_path {
                     match crate::config::Config::from_file(path) {
                         Ok(new_config) => {
-                            let mut config = state.config.write().await;
-                            *config = new_config;
+                            state.config.store(Arc::new(new_config));
                             tracing::info!("Event bus: config reloaded from {}", path);
                         }
                         Err(e) => {
