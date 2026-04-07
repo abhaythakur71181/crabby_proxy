@@ -1,5 +1,60 @@
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use crate::db::models::{ApiKey, Role, User};
 use serde::{Deserialize, Serialize};
+
+/// Structured error response for admin API endpoints.
+/// Implements `IntoResponse` so handlers can return `Result<..., ApiError>`.
+#[derive(Debug, Serialize)]
+pub struct ApiError {
+    #[serde(skip)]
+    pub status: StatusCode,
+    pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl ApiError {
+    pub fn bad_request(msg: impl Into<String>) -> Self {
+        Self { status: StatusCode::BAD_REQUEST, error: msg.into(), detail: None }
+    }
+    pub fn unauthorized(msg: impl Into<String>) -> Self {
+        Self { status: StatusCode::UNAUTHORIZED, error: msg.into(), detail: None }
+    }
+    pub fn forbidden(msg: impl Into<String>) -> Self {
+        Self { status: StatusCode::FORBIDDEN, error: msg.into(), detail: None }
+    }
+    pub fn not_found(msg: impl Into<String>) -> Self {
+        Self { status: StatusCode::NOT_FOUND, error: msg.into(), detail: None }
+    }
+    pub fn conflict(msg: impl Into<String>) -> Self {
+        Self { status: StatusCode::CONFLICT, error: msg.into(), detail: None }
+    }
+    pub fn internal(msg: impl Into<String>) -> Self {
+        Self { status: StatusCode::INTERNAL_SERVER_ERROR, error: msg.into(), detail: None }
+    }
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let body = axum::Json(serde_json::json!({
+            "error": self.error,
+            "detail": self.detail,
+        }));
+        (self.status, body).into_response()
+    }
+}
+
+impl From<sqlx::Error> for ApiError {
+    fn from(e: sqlx::Error) -> Self {
+        tracing::error!("Database error: {}", e);
+        Self::internal("Database error")
+    }
+}
 
 // User creation/update requests
 #[derive(Debug, Deserialize)]

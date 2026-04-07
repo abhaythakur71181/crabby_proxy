@@ -1,5 +1,6 @@
 use super::models::{
-    ApiKeyResponse, CreateApiKeyRequest, CreateApiKeyResponse, UpdateUserRequest, UserResponse,
+    ApiError, ApiKeyResponse, CreateApiKeyRequest, CreateApiKeyResponse, UpdateUserRequest,
+    UserResponse,
 };
 use crate::app_state::AppState;
 use crate::db::{api_keys_crud, models::Role, users};
@@ -105,21 +106,19 @@ pub async fn get_user(
     State(state): State<Arc<AppState>>,
     Extension(current_user_id): Extension<i64>,
     Path(user_id): Path<i64>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<impl IntoResponse, ApiError> {
     let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .await?
+        .ok_or_else(|| ApiError::unauthorized("Invalid session"))?;
 
     // Allow if admin+ or viewing own profile
     if current_user.get_role() == Role::User && current_user_id != user_id {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(ApiError::forbidden("Cannot view other users"));
     }
 
     let user = users::get_user_by_id(&state.db_pool, user_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("User {} not found", user_id)))?;
 
     Ok(Json(UserResponse::from(user)))
 }
@@ -130,18 +129,17 @@ pub async fn update_user(
     Extension(current_user_id): Extension<i64>,
     Path(user_id): Path<i64>,
     Json(request): Json<UpdateUserRequest>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<impl IntoResponse, ApiError> {
     let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .await?
+        .ok_or_else(|| ApiError::unauthorized("Invalid session"))?;
 
     let is_self = current_user_id == user_id;
     let is_root_admin = current_user.get_role() == Role::RootAdmin;
 
     // Regular users can only update their own password
     if !is_root_admin && !is_self {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(ApiError::forbidden("Cannot modify other users"));
     }
 
     // Non-root users can't change role, quotas, or active status
@@ -151,13 +149,13 @@ pub async fn update_user(
             || request.bandwidth_limit_mb.is_some()
             || request.is_active.is_some())
     {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(ApiError::forbidden("Only root_admin can change role, quotas, or active status"));
     }
 
     // Validate password length if provided
     if let Some(ref pwd) = request.password {
         if pwd.len() < 8 {
-            return Err(StatusCode::BAD_REQUEST);
+            return Err(ApiError::bad_request("Password must be at least 8 characters"));
         }
     }
 
@@ -170,8 +168,7 @@ pub async fn update_user(
         request.bandwidth_limit_mb,
         request.is_active,
     )
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .await?;
 
     // Invalidate rate limit cache for this user to pick up new settings
     state.user_rate_limiter.invalidate_user(user_id).await;
@@ -190,29 +187,24 @@ pub async fn delete_user(
     State(state): State<Arc<AppState>>,
     Extension(current_user_id): Extension<i64>,
     Path(user_id): Path<i64>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<impl IntoResponse, ApiError> {
     let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .await?
+        .ok_or_else(|| ApiError::unauthorized("Invalid session"))?;
 
     if current_user.get_role() != Role::RootAdmin {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(ApiError::forbidden("Only root_admin can delete users"));
     }
 
     // Don't allow deleting yourself
     if current_user_id == user_id {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(ApiError::bad_request("Cannot delete yourself"));
     }
 
     // Fetch username before deletion for cache invalidation
-    let target_user = users::get_user_by_id(&state.db_pool, user_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let target_user = users::get_user_by_id(&state.db_pool, user_id).await?;
 
-    users::delete_user(&state.db_pool, user_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    users::delete_user(&state.db_pool, user_id).await?;
 
     // Invalidate all caches for the deleted user
     let username = target_user.map(|u| u.username).unwrap_or_default();
