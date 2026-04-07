@@ -67,10 +67,24 @@ pub async fn get_quota_stats_with_period(
     period: QuotaPeriod,
 ) -> Result<QuotaStats, sqlx::Error> {
     let window_start = period.window_start();
-    let row: (Option<i64>, i64) = sqlx::query_as(
+    // The limit lives in two places historically:
+    //   * `monthly_bandwidth_quota` (bytes, optional) — added by migration 006
+    //     and exposed via the dedicated PUT /api/users/:id/quota endpoint.
+    //   * `bandwidth_limit_mb` (megabytes, NOT NULL, default 1000) — set by
+    //     the create/update user form in the admin UI. A value of 0 means
+    //     "unlimited" in the UI.
+    //
+    // The two were never wired together: the UI writes only `bandwidth_limit_mb`
+    // while the quota tracker reads only `monthly_bandwidth_quota`, so users
+    // who set their limit through the normal admin UI ended up with an
+    // unenforceable quota. Resolve them by preferring the explicit byte value
+    // when set, and otherwise converting `bandwidth_limit_mb` to bytes
+    // (treating 0 as "no limit").
+    let row: (Option<i64>, i64, i64) = sqlx::query_as(
         r#"
         SELECT
-            monthly_bandwidth_quota as quota_bytes,
+            monthly_bandwidth_quota as quota_bytes_explicit,
+            bandwidth_limit_mb as quota_mb_legacy,
             COALESCE((SELECT SUM(bytes_sent + bytes_received) FROM usage WHERE user_id = ? AND started_at >= ?), 0) as used_bytes
         FROM users
         WHERE id = ?
@@ -81,17 +95,23 @@ pub async fn get_quota_stats_with_period(
     .bind(user_id)
     .fetch_one(pool)
     .await?;
-    let remaining_bytes = row.0.map(|q| (q - row.1).max(0));
-    let percentage_used = row.0.map(|q| {
+    let quota_bytes: Option<i64> = match row.0 {
+        Some(b) if b > 0 => Some(b),
+        _ if row.1 > 0 => Some(row.1.saturating_mul(1024 * 1024)),
+        _ => None, // 0 or NULL on both => unlimited
+    };
+    let used_bytes = row.2;
+    let remaining_bytes = quota_bytes.map(|q| (q - used_bytes).max(0));
+    let percentage_used = quota_bytes.map(|q| {
         if q > 0 {
-            (row.1 as f64 / q as f64) * 100.0
+            (used_bytes as f64 / q as f64) * 100.0
         } else {
             0.0
         }
     });
     Ok(QuotaStats {
-        quota_bytes: row.0,
-        used_bytes: row.1,
+        quota_bytes,
+        used_bytes,
         remaining_bytes,
         percentage_used,
         period,
@@ -124,6 +144,7 @@ mod tests {
             CREATE TABLE users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL UNIQUE,
+                bandwidth_limit_mb INTEGER NOT NULL DEFAULT 0,
                 monthly_bandwidth_quota INTEGER
             )
             "#,
