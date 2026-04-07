@@ -257,8 +257,7 @@ Comprehensive audit of the codebase as of 2026-03-25.
 
 ## PERFORMANCE
 
-- [ ] **R2-19** `cached_user_by_id` clones full `CachedUser` per access — `src/app_state.rs:324-346`
-  Return `Arc<CachedUser>`; biggest single perf win on the hot path.
+- [x] **R2-19** `cached_user_by_id` now returns `Arc<CachedUser>` + 5s process-local Arc cache layer in front of Redis. Saves a JSON deserialize and full struct clone on every validator call (4-6× per connection). Wired into `invalidate_quota_cache`, `event_bus::UserInvalidated`/`UserDeleted`.
 - [ ] **R2-20** `UPSTREAM_CONNECT_DURATION` observed even on pool hit — `src/proxy/listener.rs:512-514`
   Label `{result="pool_hit"|"new"}` or only observe on new connects.
 - [ ] **R2-21** `ThrottlerRegistry::get_or_create` lookup per relay — `src/proxy/listener.rs:539-553`
