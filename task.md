@@ -207,3 +207,80 @@ Comprehensive audit of the codebase as of 2026-03-25.
 - [x] #29 — Plugin/middleware system (Phase-based MiddlewareChain wired into pipeline)
 
 ## STATUS: ALL 30/30 COMPLETE
+
+---
+
+# Audit Round 2 — 2026-04-07
+
+26 findings from a fresh full-repo audit. Bandwidth quota tracker work
+(commits cbf00e3, 24f3b5e, e221fa4) is excluded.
+
+## CRITICAL / HIGH (security & correctness)
+
+- [ ] **R2-1** JWT accepts empty secret — `src/auth/jwt.rs:25-48`
+  Reject empty + enforce ≥32 bytes; fail boot if `JWT_SECRET` is weak.
+- [ ] **R2-2** Sentinel `user_id = -1` on root admin DB miss — `src/admin/auth.rs:84-92`
+  Return `Err`, do not silently degrade.
+- [ ] **R2-3** State-backend errors silently dropped on connection-tracking path
+  `src/proxy/http2_handler.rs:226,260,282`, `src/proxy/listener.rs:314`
+  Log + bump `state_backend_errors_total`; consider fail-closed for `set_connection`.
+- [ ] **R2-4** HTTP/2 basic-auth: malformed UTF-8 → generic "auth failed"
+  `src/proxy/http2_handler.rs:344-347`
+  Distinct branch + warn-log + `auth_failures{reason="malformed_b64"}`.
+
+## MEDIUM
+
+- [ ] **R2-5** `IpRateLimiter` is unbounded — `src/rate_limit.rs:54-58`
+  Wrap in LRU with configurable cap (~100k) + periodic GC of idle entries.
+- [ ] **R2-6** Cache invalidation scattered across admin handlers
+  `src/admin/handlers/users.rs:214`, `quotas.rs:84`, `groups.rs`, …
+  Add `AppState::invalidate_all_for_user(uid)`; replace every site.
+- [ ] **R2-7** Admin protocol bypass is unaudited — `src/proxy/validators.rs:78-90`
+  Info-level audit log + dedicated metric on every admin bypass.
+- [ ] **R2-8** `parse_authority` silently defaults to 443 — `src/proxy/http2_handler.rs:356-366`
+  Return `Err(BadRequest)` on parse failure.
+- [ ] **R2-9** No negative auth caching — `src/app_state.rs:75`
+  Cache failed `(username, attempted_pw)` for a few seconds, gated by login rate limiter.
+- [ ] **R2-10** Approval cache uses `String` IP keys — `src/app_state.rs:93,427`
+  Key on `IpAddr` directly to remove per-connection allocation.
+- [ ] **R2-11** `DEFAULT_QUOTA_PERIOD` hardcoded Monthly — `src/db/quota.rs:14-18`
+  Thread `period` from user record into seeding & validators, or remove from schema/UI.
+- [ ] **R2-12** `access_schedule` parsed per-connection — `src/proxy/validators.rs:233-247`
+  Parse once, cache compiled schedule on `CachedUser`.
+- [ ] **R2-13** `record_usage` is fire-and-forget without back-pressure
+  `src/proxy/listener.rs:382-391`, `http2_handler.rs:278-287`
+  Bounded MPSC + writer task; drop with `usage_records_dropped_total`.
+- [ ] **R2-14** `KEYS` used in Redis cache invalidation — `src/cache.rs:130-142`
+  Replace with `SCAN` cursor or maintain a per-user index set.
+- [ ] **R2-15** Connection-pool not invalidated on connect error — `src/proxy/listener.rs:489-511`
+  Invalidate pool entry alongside DNS cache on failure.
+- [ ] **R2-16** Event-bus subscriber blocks graceful shutdown — `src/event_bus.rs:58-89`
+  Subscribe to `state.shutdown_tx` and break.
+- [ ] **R2-17** Login rate limit by username only — `src/rate_limit.rs` `LoginRateLimiter`
+  Rate-limit on `(client_ip, username)` and `client_ip` independently.
+- [ ] **R2-18** CORS likely too permissive on admin server — `src/admin/server.rs`
+  Restrict to configured origins; reject `*` when credentials are sent.
+
+## PERFORMANCE
+
+- [ ] **R2-19** `cached_user_by_id` clones full `CachedUser` per access — `src/app_state.rs:324-346`
+  Return `Arc<CachedUser>`; biggest single perf win on the hot path.
+- [ ] **R2-20** `UPSTREAM_CONNECT_DURATION` observed even on pool hit — `src/proxy/listener.rs:512-514`
+  Label `{result="pool_hit"|"new"}` or only observe on new connects.
+- [ ] **R2-21** `ThrottlerRegistry::get_or_create` lookup per relay — `src/proxy/listener.rs:539-553`
+  Stash `Arc<Throttler>` alongside the live quota tracker entry.
+- [ ] **R2-22** Per-connection `format!` for tunnel labels — `src/proxy/listener.rs:535-536`
+  Replace with `tracing::Span` fields.
+- [ ] **R2-23** `H2_FORWARD_CLIENT` has no per-host limits — `src/proxy/http2_handler.rs:506`
+  `pool_max_idle_per_host` + per-host semaphore.
+
+## UNFINISHED / DEAD CODE
+
+- [ ] **R2-24** `MiddlewareChain` constructed but never invoked
+  `src/middleware.rs:93-120`, `src/app_state.rs:259`
+  Wire into the validator pipeline as a final stage, or delete.
+- [ ] **R2-25** `src/proxy/relay.rs::hand_shake` is `#[allow(dead_code)]` — `src/proxy/relay.rs:15`
+  Delete; superseded by the protocol module.
+- [ ] **R2-26** Tests use `panic!("Expected …")` instead of `assert!(matches!())`
+  `src/tunnel/error.rs:165,175,188,201,215`, `src/tunnel/port_allocator.rs:220,258,273,285,331`
+  Mechanical replacement.
