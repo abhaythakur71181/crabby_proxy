@@ -123,34 +123,15 @@ pub async fn start_subscriber(
                     }
                 }
             }
-            ProxyEvent::UserInvalidated(user_id) => {
+            ProxyEvent::UserInvalidated(user_id) | ProxyEvent::UserDeleted(user_id) => {
                 tracing::debug!("Event bus: invalidating caches for user {}", user_id);
-                if let Some(cached) = state.cached_user_by_id(user_id).await {
-                    if let Some(ref cache) = state.cache {
-                        cache.invalidate_user(user_id, &cached.username).await;
-                    }
-                }
-                // Clear rate limit cache too
-                state.user_rate_limiter.invalidate_user(user_id).await;
-                state.invalidate_user_arc_cache(user_id);
-                // Quota limit may have changed — drop the live tracker so the
-                // next access reseeds from the database.
-                state.quota_trackers.invalidate(user_id);
-            }
-            ProxyEvent::UserDeleted(user_id) => {
-                tracing::info!("Event bus: user {} deleted, full cache cleanup", user_id);
-                if let Some(cached) = state.cached_user_by_id(user_id).await {
-                    if let Some(ref cache) = state.cache {
-                        cache.invalidate_user(user_id, &cached.username).await;
-                        cache.invalidate_api_keys_for_user(user_id).await;
-                        cache.invalidate_approvals_for_user(user_id).await;
-                        cache.invalidate_quota(user_id).await;
-                    }
-                }
-                state.user_rate_limiter.invalidate_user(user_id).await;
-                state.invalidate_user_arc_cache(user_id);
-                state.quota_cache.remove(&user_id);
-                state.quota_trackers.invalidate(user_id);
+                let username = state
+                    .cached_user_by_id(user_id)
+                    .await
+                    .map(|cu| cu.username.clone());
+                state
+                    .invalidate_all_for_user(user_id, username.as_deref())
+                    .await;
             }
             ProxyEvent::IpFilterUpdated => {
                 tracing::info!("Event bus: IP filter update received");
