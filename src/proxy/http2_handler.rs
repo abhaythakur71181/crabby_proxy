@@ -191,8 +191,26 @@ async fn handle_h2_connect_validated(
         }
     }
 
-    // Parse host and port from authority
-    let (host, port) = parse_authority(&authority);
+    // Parse host and port from authority. Reject malformed authorities up
+    // front rather than silently coercing them to port 443 — a CONNECT to
+    // "evil.example:abc" should fail loudly so it can't tunnel to the
+    // wrong port.
+    let (host, port) = match parse_authority(&authority) {
+        Some(parsed) => parsed,
+        None => {
+            tracing::warn!(
+                "[HTTP2] {} rejected: malformed CONNECT authority {:?}",
+                client_addr,
+                authority
+            );
+            let response = http::Response::builder()
+                .status(http::StatusCode::BAD_REQUEST)
+                .body(())
+                .unwrap_or_else(|_| http::Response::new(()));
+            let _ = respond.send_response(response, true);
+            return;
+        }
+    };
     ctx.target_host = Some(host.clone());
 
     // ── Phase 3: Post-Target validators ──
@@ -368,16 +386,40 @@ async fn authenticate_h2(auth_header: &str, state: &AppState) -> Option<i64> {
     ProxyProtocol::validate_credentials_public(username, password, state).await
 }
 
-/// Parse "host:port" from authority string; defaults to port 443 for CONNECT.
-fn parse_authority(authority: &str) -> (String, u16) {
+/// Parse "host:port" from a CONNECT authority. Returns `None` for empty
+/// inputs, unparseable ports, or port 0 — callers should reply 400 in those
+/// cases instead of silently coercing to 443. Bare hosts (no `:port`) are
+/// treated as port 443 since that is the only sensible default for CONNECT.
+fn parse_authority(authority: &str) -> Option<(String, u16)> {
+    if authority.is_empty() {
+        return None;
+    }
+    // IPv6 literal: [::1]:443
+    if let Some(rest) = authority.strip_prefix('[') {
+        let close = rest.find(']')?;
+        let host = &rest[..close];
+        let after = &rest[close + 1..];
+        let port = if let Some(p) = after.strip_prefix(':') {
+            p.parse::<u16>().ok()?
+        } else if after.is_empty() {
+            443
+        } else {
+            return None;
+        };
+        if port == 0 || host.is_empty() {
+            return None;
+        }
+        return Some((host.to_string(), port));
+    }
     if let Some(colon_pos) = authority.rfind(':') {
         let host = &authority[..colon_pos];
-        let port = authority[colon_pos + 1..]
-            .parse::<u16>()
-            .unwrap_or(443);
-        (host.to_string(), port)
+        let port = authority[colon_pos + 1..].parse::<u16>().ok()?;
+        if port == 0 || host.is_empty() {
+            return None;
+        }
+        Some((host.to_string(), port))
     } else {
-        (authority.to_string(), 443)
+        Some((authority.to_string(), 443))
     }
 }
 
@@ -796,52 +838,49 @@ mod tests {
 
     #[test]
     fn test_parse_authority_with_port() {
-        let (host, port) = parse_authority("example.com:8080");
-        assert_eq!(host, "example.com");
-        assert_eq!(port, 8080);
+        assert_eq!(
+            parse_authority("example.com:8080"),
+            Some(("example.com".to_string(), 8080))
+        );
     }
 
     #[test]
     fn test_parse_authority_default_port() {
-        let (host, port) = parse_authority("example.com");
-        assert_eq!(host, "example.com");
-        assert_eq!(port, 443);
+        assert_eq!(
+            parse_authority("example.com"),
+            Some(("example.com".to_string(), 443))
+        );
     }
 
     #[test]
     fn test_parse_authority_ipv4_with_port() {
-        let (host, port) = parse_authority("192.168.1.1:443");
-        assert_eq!(host, "192.168.1.1");
-        assert_eq!(port, 443);
+        assert_eq!(
+            parse_authority("192.168.1.1:443"),
+            Some(("192.168.1.1".to_string(), 443))
+        );
     }
 
     #[test]
-    fn test_parse_authority_invalid_port_defaults_443() {
-        let (host, port) = parse_authority("example.com:notaport");
-        assert_eq!(host, "example.com");
-        assert_eq!(port, 443);
+    fn test_parse_authority_invalid_port_rejected() {
+        assert_eq!(parse_authority("example.com:notaport"), None);
     }
 
     #[test]
-    fn test_parse_authority_empty_string() {
-        let (host, port) = parse_authority("");
-        assert_eq!(host, "");
-        assert_eq!(port, 443);
+    fn test_parse_authority_empty_string_rejected() {
+        assert_eq!(parse_authority(""), None);
     }
 
     #[test]
-    fn test_parse_authority_port_zero() {
-        let (host, port) = parse_authority("example.com:0");
-        assert_eq!(host, "example.com");
-        assert_eq!(port, 0);
+    fn test_parse_authority_port_zero_rejected() {
+        assert_eq!(parse_authority("example.com:0"), None);
     }
 
     #[test]
     fn test_parse_authority_ipv6_bracket_notation() {
-        // IPv6 in bracket notation: [::1]:8080
-        let (host, port) = parse_authority("[::1]:8080");
-        assert_eq!(host, "[::1]");
-        assert_eq!(port, 8080);
+        assert_eq!(
+            parse_authority("[::1]:8080"),
+            Some(("::1".to_string(), 8080))
+        );
     }
 
     #[test]
