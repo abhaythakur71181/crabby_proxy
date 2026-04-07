@@ -94,6 +94,14 @@ pub struct RateLimitConfig {
     pub requests_per_second: u32,
     pub burst_size: u32,
     pub ban_duration: u64,
+    /// Cap on number of distinct IPs tracked by the in-process IP rate limiter.
+    /// Bounds memory under IP-spray attacks. Defaults to 100_000 if absent.
+    #[serde(default = "default_max_tracked_ips")]
+    pub max_tracked_ips: usize,
+}
+
+fn default_max_tracked_ips() -> usize {
+    crate::rate_limit::DEFAULT_MAX_TRACKED_IPS
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -238,6 +246,7 @@ impl Default for Config {
                 requests_per_second: 100,
                 burst_size: 200,
                 ban_duration: 300,
+                max_tracked_ips: crate::rate_limit::DEFAULT_MAX_TRACKED_IPS,
             },
             filtering: FilterConfig {
                 ip_allowlist: vec![],

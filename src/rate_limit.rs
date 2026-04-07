@@ -30,11 +30,26 @@ fn normalize_ip(ip: IpAddr) -> IpAddr {
 pub struct IpRateLimiter {
     limiters: Arc<DashMap<IpAddr, GovernorRateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
     quota: Quota,
+    /// Maximum number of tracked IPs before random eviction kicks in.
+    /// Bounds memory so an attacker cannot exhaust RAM by spraying source IPs.
+    max_entries: usize,
 }
 
+/// Default cap on tracked IPs. ~100k entries × ~200 bytes ≈ 20 MB upper bound.
+pub const DEFAULT_MAX_TRACKED_IPS: usize = 100_000;
+
 impl IpRateLimiter {
-    /// Create new IP rate limiter
+    /// Create new IP rate limiter with the default tracked-IP cap.
     pub fn new(requests_per_second: u32, burst_size: u32) -> Self {
+        Self::with_max_entries(requests_per_second, burst_size, DEFAULT_MAX_TRACKED_IPS)
+    }
+
+    /// Create new IP rate limiter with an explicit cap on tracked IPs.
+    pub fn with_max_entries(
+        requests_per_second: u32,
+        burst_size: u32,
+        max_entries: usize,
+    ) -> Self {
         let quota = Quota::per_second(
             std::num::NonZeroU32::new(requests_per_second).unwrap_or(nonzero!(10u32)),
         )
@@ -43,6 +58,7 @@ impl IpRateLimiter {
         Self {
             limiters: Arc::new(DashMap::new()),
             quota,
+            max_entries: max_entries.max(1),
         }
     }
 
@@ -51,11 +67,38 @@ impl IpRateLimiter {
     pub async fn check_ip(&self, ip: IpAddr) -> bool {
         // INFO: Normalize IPv4-mapped IPv6 (::ffff:x.x.x.x) to IPv4
         let ip = normalize_ip(ip);
+
+        // If we're at the cap and this IP is new, evict a small batch first.
+        // We check `contains_key` to avoid evicting on the hot path for IPs
+        // that already have a limiter. Eviction is opportunistic — random
+        // entries via DashMap iteration order, which is good enough to keep
+        // the map bounded under spray attacks.
+        if self.limiters.len() >= self.max_entries && !self.limiters.contains_key(&ip) {
+            self.evict_some();
+        }
+
         let limiter = self
             .limiters
             .entry(ip)
             .or_insert_with(|| GovernorRateLimiter::direct(self.quota));
         limiter.check().is_ok()
+    }
+
+    /// Evict ~8 arbitrary entries to make room. DashMap iteration order is
+    /// not deterministic, so this approximates random eviction without the
+    /// cost of maintaining LRU metadata on the hot path.
+    fn evict_some(&self) {
+        const EVICT_BATCH: usize = 8;
+        let victims: Vec<IpAddr> = self
+            .limiters
+            .iter()
+            .take(EVICT_BATCH)
+            .map(|e| *e.key())
+            .collect();
+        for ip in victims {
+            self.limiters.remove(&ip);
+            crate::metrics::IP_RATE_LIMIT_EVICTIONS.inc();
+        }
     }
 
     /// Get number of tracked IPs
@@ -453,6 +496,26 @@ mod tests {
 
         // IPv6 should still work
         assert!(limiter.check_ip(ipv6).await);
+    }
+
+    #[tokio::test]
+    async fn test_ip_rate_limiter_evicts_when_full() {
+        // Tiny cap so we can prove eviction without inserting 100k entries.
+        let limiter = IpRateLimiter::with_max_entries(100, 100, 16);
+
+        // Insert past the cap.
+        for i in 0..64u32 {
+            let ip = IpAddr::V4(Ipv4Addr::new(10, 0, (i / 256) as u8, (i % 256) as u8));
+            limiter.check_ip(ip).await;
+        }
+
+        // The map must remain bounded near `max_entries` (eviction batches
+        // of 8 mean we may temporarily sit slightly above, but never far above).
+        assert!(
+            limiter.count().await <= 16,
+            "expected <=16 entries after eviction, got {}",
+            limiter.count().await
+        );
     }
 
     // === New UserRateLimiter Tests ===
