@@ -202,16 +202,16 @@ pub async fn validate_target_domain(ctx: &ConnectionContext, state: &AppState) -
         None => return Verdict::Allow,
     };
     // Use cached user lookup (Redis -> in-memory -> DB) instead of direct DB query
-    let (allowed_targets, blocked_targets) = match state.cached_user_by_id(uid).await {
-        Some(cu) => (cu.allowed_targets, cu.blocked_targets),
+    let cu = match state.cached_user_by_id(uid).await {
+        Some(cu) => cu,
         None => return Verdict::Allow, // Fail-open if user fetch fails
     };
     if !crate::target_filter::is_target_allowed(
         host,
         &ctx.config.global_allowed_targets,
         &ctx.config.global_blocked_targets,
-        allowed_targets.as_deref(),
-        blocked_targets.as_deref(),
+        cu.allowed_targets.as_deref(),
+        cu.blocked_targets.as_deref(),
     ) {
         return Verdict::Deny(format!(
             "Target {} blocked for user {} by domain filter",
@@ -230,12 +230,11 @@ pub async fn validate_access_schedule(ctx: &ConnectionContext, state: &AppState)
     if ctx.is_admin {
         return Verdict::Allow;
     }
-    let schedule = match state.cached_user_by_id(uid).await {
-        Some(cu) => cu
-            .access_schedule
-            .or(ctx.config.default_access_schedule.clone()),
-        None => ctx.config.default_access_schedule.clone(),
-    };
+    let schedule = state
+        .cached_user_by_id(uid)
+        .await
+        .and_then(|cu| cu.access_schedule.clone())
+        .or_else(|| ctx.config.default_access_schedule.clone());
     if let Some(sched) = schedule {
         if !crate::target_filter::is_within_schedule(&sched) {
             return Verdict::Deny(format!(
