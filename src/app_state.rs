@@ -464,6 +464,32 @@ impl AppState {
         }
     }
 
+    /// Single entry point for "this user changed in some way — drop every
+    /// cached derivative". Replaces the scattered ad-hoc combinations of
+    /// invalidate_user_cache + invalidate_quota_cache + rate limiter +
+    /// arc cache that admin handlers used to call individually. Pass the
+    /// username if known so the Redis username-keyed entry is dropped too.
+    pub async fn invalidate_all_for_user(&self, user_id: i64, username: Option<&str>) {
+        if let Some(ref cache) = self.cache {
+            if let Some(name) = username {
+                cache.invalidate_user(user_id, name).await;
+            }
+            cache.invalidate_api_keys_for_user(user_id).await;
+            cache.invalidate_approvals_for_user(user_id).await;
+            cache.invalidate_quota(user_id).await;
+        }
+        self.user_rate_limiter.invalidate_user(user_id).await;
+        self.invalidate_user_arc_cache(user_id);
+        self.quota_cache.remove(&user_id);
+        // Refresh the live quota tracker's limit in place (preserve `used`).
+        if let Ok(stats) = crate::db::quota::get_quota_stats(&self.db_pool, user_id).await {
+            self.quota_trackers
+                .update_limit(user_id, stats.quota_bytes);
+        } else {
+            self.quota_trackers.invalidate(user_id);
+        }
+    }
+
     pub async fn invalidate_quota_cache(&self, user_id: i64) {
         if let Some(ref cache) = self.cache {
             cache.invalidate_quota(user_id).await;

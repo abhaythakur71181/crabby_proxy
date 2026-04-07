@@ -171,14 +171,9 @@ pub async fn update_user(
     )
     .await?;
 
-    // Invalidate rate limit cache for this user to pick up new settings
-    state.user_rate_limiter.invalidate_user(user_id).await;
-
-    // Invalidate Redis caches for this user
     state
-        .invalidate_user_cache(user_id, &updated_user.username)
+        .invalidate_all_for_user(user_id, Some(&updated_user.username))
         .await;
-    state.invalidate_api_key_cache(user_id).await;
 
     Ok(Json(UserResponse::from(updated_user)))
 }
@@ -209,10 +204,9 @@ pub async fn delete_user(
 
     // Invalidate all caches for the deleted user
     let username = target_user.map(|u| u.username).unwrap_or_default();
-    state.invalidate_user_cache(user_id, &username).await;
-    state.invalidate_api_key_cache(user_id).await;
-    state.invalidate_quota_cache(user_id).await;
-    state.invalidate_approval_cache(user_id).await;
+    state
+        .invalidate_all_for_user(user_id, Some(&username))
+        .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
