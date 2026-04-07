@@ -101,6 +101,17 @@ lazy_static! {
         "Number of connections remaining during shutdown drain"
     )
     .unwrap();
+
+    /// State-backend errors (Redis/memory). Labelled by operation so we can
+    /// tell whether the failure was setting/deleting a connection record,
+    /// counting connections, etc. A non-zero rate here means connection
+    /// limits and approval logic may be silently incorrect.
+    pub static ref STATE_BACKEND_ERRORS: IntCounterVec = register_int_counter_vec!(
+        "proxy_state_backend_errors_total",
+        "Errors returned by the state backend (memory or Redis)",
+        &["operation"]
+    )
+    .unwrap();
 }
 
 /// Export all metrics in Prometheus format.
