@@ -80,20 +80,36 @@ pub async fn auth_middleware(
                                 if username == config.admin.admin_username
                                     && password == config.admin.admin_password
                                 {
-                                    // Look up root admin user from DB for accurate user_id
-                                    let user_id = match crate::db::users::get_user_by_username(
+                                    // Look up root admin user from DB for an accurate
+                                    // user_id. We refuse to fall back to a sentinel — a
+                                    // negative id can confuse downstream code that does
+                                    // `user_id > 0` checks and may quietly bypass per-user
+                                    // accounting (quotas, audit logs, rate limits).
+                                    match crate::db::users::get_user_by_username(
                                         &state.db_pool,
                                         "root_admin",
                                     )
                                     .await
                                     {
-                                        Ok(Some(user)) => user.id,
-                                        _ => -1i64, // Sentinel if root_admin not found
-                                    };
-                                    request.extensions_mut().insert(user_id);
-
-                                    // Root admin bypasses rate limiting
-                                    return Ok(next.run(request).await);
+                                        Ok(Some(user)) => {
+                                            request.extensions_mut().insert(user.id);
+                                            // Root admin bypasses rate limiting.
+                                            return Ok(next.run(request).await);
+                                        }
+                                        Ok(None) => {
+                                            tracing::error!(
+                                                "Config admin login succeeded but root_admin user is missing from database; rejecting to avoid sentinel user_id"
+                                            );
+                                            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                "Config admin login: failed to look up root_admin: {}",
+                                                e
+                                            );
+                                            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                                        }
+                                    }
                                 }
                             }
                         }
