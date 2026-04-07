@@ -52,7 +52,7 @@ enabled = false
 method = "basic"
 username = "test"
 password = "testpass"
-jwt_secret = "test_secret_key_12345"
+jwt_secret = "test_secret_key_at_least_32_bytes_long_xxx"
 jwt_expiration = 3600
 
 [protocols]
