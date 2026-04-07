@@ -172,9 +172,10 @@ impl AppState {
         };
 
         // Initialize rate limiters
-        let ip_rate_limiter = crate::rate_limit::IpRateLimiter::new(
+        let ip_rate_limiter = crate::rate_limit::IpRateLimiter::with_max_entries(
             config.rate_limiting.requests_per_second,
             config.rate_limiting.burst_size,
+            config.rate_limiting.max_tracked_ips,
         );
         let user_rate_limiter = crate::rate_limit::UserRateLimiter::new();
         let login_rate_limiter = crate::rate_limit::LoginRateLimiter::new();
