@@ -1,9 +1,7 @@
 use super::protocol::ProxyTarget;
 use crate::app_state::AppState;
 use crate::proxy::protocol::ProxyProtocol;
-use crate::stream::{
-    BufferedClientStream, ClientStream,
-};
+use crate::stream::{BufferedClientStream, ClientStream};
 use crate::utils;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -155,6 +153,7 @@ async fn handle_client(
     let state: &AppState = &state_arc;
     let mut ctx = super::pipeline::ConnectionContext::new(client_addr, conn_id, state).await;
     // ── Phase 1: Pre-Connection (IP-based, no stream needed) ────────────
+    // Note: cannot skip on is_admin here — auth hasn't happened yet.
     for result in [
         validators::validate_ip_filter(&ctx, state).await,
         validators::validate_geo_block(&ctx, state).await,
@@ -182,8 +181,7 @@ async fn handle_client(
     // HTTP/2: hand off to dedicated h2 handler (multiplexed streams)
     if protocol == ProxyProtocol::HTTP2 {
         if ctx.config.http2_enabled {
-            super::http2_handler::handle_h2_connection(client_stream, client_addr, state_arc)
-                .await;
+            super::http2_handler::handle_h2_connection(client_stream, client_addr, state_arc).await;
         } else {
             tracing::warn!("{}: HTTP/2 detected but disabled in config", client_addr);
         }
@@ -245,14 +243,16 @@ async fn handle_client(
             .unwrap_or(false);
     }
     // ── Phase 2: Post-Auth validators ───────────────────────────────────
-    for result in [
-        validators::validate_protocol_restriction(&ctx, state).await,
-        validators::validate_approval(&ctx, state).await,
-        validators::validate_user_rate_limit(&ctx, state).await,
-    ] {
-        if let Verdict::Deny(reason) = result {
-            tracing::warn!("{} denied: {}", client_addr, reason);
-            return;
+    if !ctx.is_admin {
+        for result in [
+            validators::validate_protocol_restriction(&ctx, state).await,
+            validators::validate_approval(&ctx, state).await,
+            validators::validate_user_rate_limit(&ctx, state).await,
+        ] {
+            if let Verdict::Deny(reason) = result {
+                tracing::warn!("{} denied: {}", client_addr, reason);
+                return;
+            }
         }
     }
     // Run PostAuth plugin middleware
@@ -292,13 +292,15 @@ async fn handle_client(
     // Update context with target
     ctx.target_host = Some(target.host.clone());
     // ── Phase 3: Post-Target validators ─────────────────────────────────
-    for result in [
-        validators::validate_target_domain(&ctx, state).await,
-        validators::validate_access_schedule(&ctx, state).await,
-    ] {
-        if let Verdict::Deny(reason) = result {
-            tracing::warn!("{} denied: {}", client_addr, reason);
-            return;
+    if !ctx.is_admin {
+        for result in [
+            validators::validate_target_domain(&ctx, state).await,
+            validators::validate_access_schedule(&ctx, state).await,
+        ] {
+            if let Verdict::Deny(reason) = result {
+                tracing::warn!("{} denied: {}", client_addr, reason);
+                return;
+            }
         }
     }
     // Run PostTarget plugin middleware
@@ -338,22 +340,24 @@ async fn handle_client(
         .with_label_values(&[proto_label, "started"])
         .inc();
     // ── Phase 4: Post-Setup validators (quota + connection limit) ───────
-    for result in [
-        validators::validate_quota(&ctx, state).await,
-        validators::validate_connection_limit(&ctx, state).await,
-    ] {
-        if let Verdict::Deny(reason) = result {
-            tracing::warn!("{} denied: {}", client_addr, reason);
-            crate::metrics::ACTIVE_CONNECTIONS
-                .with_label_values(&[proto_label])
-                .dec();
-            let _ = send_error_response(
-                ctx.protocol.as_ref().unwrap(),
-                &mut stream,
-                ErrorType::QuotaExceeded,
-            )
-            .await;
-            return;
+    if !ctx.is_admin {
+        for result in [
+            validators::validate_quota(&ctx, state).await,
+            validators::validate_connection_limit(&ctx, state).await,
+        ] {
+            if let Verdict::Deny(reason) = result {
+                tracing::warn!("{} denied: {}", client_addr, reason);
+                crate::metrics::ACTIVE_CONNECTIONS
+                    .with_label_values(&[proto_label])
+                    .dec();
+                let _ = send_error_response(
+                    ctx.protocol.as_ref().unwrap(),
+                    &mut stream,
+                    ErrorType::QuotaExceeded,
+                )
+                .await;
+                return;
+            }
         }
     }
     // ── Relay + record usage ────────────────────────────────────────────
@@ -397,11 +401,20 @@ async fn handle_client(
                 let proto = proto_label.to_string();
                 tokio::spawn(async move {
                     if let Err(e) = crate::db::usage::record_usage(
-                        &db, uid, &conn_id, &ip, &target, &proto,
-                        started_at, ended_at,
-                        bytes_sent as i64, bytes_received as i64,
+                        &db,
+                        uid,
+                        &conn_id,
+                        &ip,
+                        &target,
+                        &proto,
+                        started_at,
+                        ended_at,
+                        bytes_sent as i64,
+                        bytes_received as i64,
                         "success",
-                    ).await {
+                    )
+                    .await
+                    {
                         tracing::error!("Failed to record usage for user {}: {}", uid, e);
                     }
                 });
@@ -463,9 +476,11 @@ async fn handle_client(
                 let err_label = error_label.to_string();
                 tokio::spawn(async move {
                     if let Err(e) = crate::db::usage::record_usage(
-                        &db, uid, &conn_id, &ip, &target, &proto,
-                        started_at, ended_at, 0, 0, &err_label,
-                    ).await {
+                        &db, uid, &conn_id, &ip, &target, &proto, started_at, ended_at, 0, 0,
+                        &err_label,
+                    )
+                    .await
+                    {
                         tracing::error!("Failed to record usage for user {}: {}", uid, e);
                     }
                 });

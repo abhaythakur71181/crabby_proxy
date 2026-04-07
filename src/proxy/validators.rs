@@ -9,7 +9,7 @@ use crate::app_state::AppState;
 
 /// Check client IP against the configured allowlist/blocklist.
 pub async fn validate_ip_filter(ctx: &ConnectionContext, state: &AppState) -> Verdict {
-    if !ctx.config.ip_filter_enabled {
+    if ctx.is_admin || !ctx.config.ip_filter_enabled {
         return Verdict::Allow;
     }
     let ip_filter = state.ip_filter.read().await;
@@ -27,7 +27,7 @@ pub async fn validate_ip_filter(ctx: &ConnectionContext, state: &AppState) -> Ve
 
 /// Block or allow by country using the GeoIP database.
 pub async fn validate_geo_block(ctx: &ConnectionContext, state: &AppState) -> Verdict {
-    if !ctx.config.geo_blocking_enabled {
+    if ctx.is_admin || !ctx.config.geo_blocking_enabled {
         return Verdict::Allow;
     }
     let geo = match &state.geo_filter {
@@ -51,7 +51,7 @@ pub async fn validate_geo_block(ctx: &ConnectionContext, state: &AppState) -> Ve
 
 /// Per-IP rate limiting via the global rate limiter.
 pub async fn validate_ip_rate_limit(ctx: &ConnectionContext, state: &AppState) -> Verdict {
-    if !ctx.config.rate_limiting_enabled {
+    if ctx.is_admin || !ctx.config.rate_limiting_enabled {
         return Verdict::Allow;
     }
     if !state.ip_rate_limiter.check_ip(ctx.client_addr.ip()).await {
@@ -109,16 +109,13 @@ pub async fn validate_protocol_restriction(ctx: &ConnectionContext, state: &AppS
 
 /// Require active IP approval for non-admin users when connection_approval is enabled.
 pub async fn validate_approval(ctx: &ConnectionContext, state: &AppState) -> Verdict {
-    if !ctx.config.connection_approval {
+    if ctx.is_admin || !ctx.config.connection_approval {
         return Verdict::Allow;
     }
     let uid = match ctx.effective_uid() {
         Some(uid) => uid,
         None => return Verdict::Allow,
     };
-    if ctx.is_admin {
-        return Verdict::Allow;
-    }
     match state
         .cached_ip_approved(uid, &ctx.client_addr.ip().to_string())
         .await
@@ -138,6 +135,9 @@ pub async fn validate_approval(ctx: &ConnectionContext, state: &AppState) -> Ver
 
 /// Per-user RPS rate limiting. Also caches user config for later use.
 pub async fn validate_user_rate_limit(ctx: &ConnectionContext, state: &AppState) -> Verdict {
+    if ctx.is_admin {
+        return Verdict::Allow;
+    }
     let uid = match ctx.effective_uid() {
         Some(uid) => uid,
         None => return Verdict::Allow,
@@ -190,13 +190,13 @@ pub async fn validate_user_rate_limit(ctx: &ConnectionContext, state: &AppState)
 
 /// Check target domain against global + per-user allow/blocklists (union logic).
 pub async fn validate_target_domain(ctx: &ConnectionContext, state: &AppState) -> Verdict {
+    if ctx.is_admin {
+        return Verdict::Allow;
+    }
     let uid = match ctx.effective_uid() {
         Some(uid) => uid,
         None => return Verdict::Allow,
     };
-    if ctx.is_admin {
-        return Verdict::Allow;
-    }
     let host = match &ctx.target_host {
         Some(h) => h,
         None => return Verdict::Allow,
@@ -223,13 +223,13 @@ pub async fn validate_target_domain(ctx: &ConnectionContext, state: &AppState) -
 
 /// Enforce time-based access restrictions (per-user schedule or global default).
 pub async fn validate_access_schedule(ctx: &ConnectionContext, state: &AppState) -> Verdict {
+    if ctx.is_admin {
+        return Verdict::Allow;
+    }
     let uid = match ctx.effective_uid() {
         Some(uid) => uid,
         None => return Verdict::Allow,
     };
-    if ctx.is_admin {
-        return Verdict::Allow;
-    }
     let schedule = state
         .cached_user_by_id(uid)
         .await
@@ -256,6 +256,9 @@ pub async fn validate_access_schedule(ctx: &ConnectionContext, state: &AppState)
 /// enforcement always agree. There is no per-connection SUM() and no
 /// 30s staleness window.
 pub async fn validate_quota(ctx: &ConnectionContext, state: &AppState) -> Verdict {
+    if ctx.is_admin {
+        return Verdict::Allow;
+    }
     let uid = match ctx.effective_uid() {
         Some(uid) => uid,
         None => return Verdict::Allow,
@@ -281,6 +284,9 @@ pub async fn validate_quota(ctx: &ConnectionContext, state: &AppState) -> Verdic
 
 /// Enforce per-user concurrent connection limit.
 pub async fn validate_connection_limit(ctx: &ConnectionContext, state: &AppState) -> Verdict {
+    if ctx.is_admin {
+        return Verdict::Allow;
+    }
     let uid = match ctx.effective_uid() {
         Some(uid) => uid,
         None => return Verdict::Allow,
