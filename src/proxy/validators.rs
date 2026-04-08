@@ -117,7 +117,7 @@ pub async fn validate_approval(ctx: &ConnectionContext, state: &AppState) -> Ver
         None => return Verdict::Allow,
     };
     match state
-        .cached_ip_approved(uid, &ctx.client_addr.ip().to_string())
+        .cached_ip_approved(uid, ctx.client_addr.ip())
         .await
     {
         Ok(true) => Verdict::Allow,
