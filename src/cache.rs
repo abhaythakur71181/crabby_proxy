@@ -128,18 +128,7 @@ impl CacheLayer {
 
     pub async fn invalidate_api_keys_for_user(&self, user_id: i64) {
         let pattern = format!("{}cache:apikey:{}:*", self.prefix, user_id);
-        let mut conn = self.conn.clone();
-        let keys: Vec<String> = match redis::cmd("KEYS")
-            .arg(&pattern)
-            .query_async::<Vec<String>>(&mut conn)
-            .await
-        {
-            Ok(keys) => keys,
-            Err(_) => return,
-        };
-        for key in keys {
-            let _: Result<(), _> = conn.del(&key).await;
-        }
+        self.scan_and_delete(&pattern).await;
     }
 
     // ─── Quota cache ───────────────────────────────────────────────────
@@ -181,17 +170,34 @@ impl CacheLayer {
 
     pub async fn invalidate_approvals_for_user(&self, user_id: i64) {
         let pattern = format!("{}cache:approval:{}:*", self.prefix, user_id);
+        self.scan_and_delete(&pattern).await;
+    }
+
+    /// Cursor-based SCAN + DEL helper. Replaces blocking KEYS so a single
+    /// invalidate doesn't stall the Redis server with a full keyspace scan.
+    async fn scan_and_delete(&self, pattern: &str) {
         let mut conn = self.conn.clone();
-        let keys: Vec<String> = match redis::cmd("KEYS")
-            .arg(&pattern)
-            .query_async::<Vec<String>>(&mut conn)
-            .await
-        {
-            Ok(keys) => keys,
-            Err(_) => return,
-        };
-        for key in keys {
-            let _: Result<(), _> = conn.del(&key).await;
+        let mut cursor: u64 = 0;
+        loop {
+            let res: redis::RedisResult<(u64, Vec<String>)> = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(pattern)
+                .arg("COUNT")
+                .arg(256)
+                .query_async(&mut conn)
+                .await;
+            let (next_cursor, keys) = match res {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            for key in keys {
+                let _: Result<(), _> = conn.del(&key).await;
+            }
+            if next_cursor == 0 {
+                return;
+            }
+            cursor = next_cursor;
         }
     }
 
