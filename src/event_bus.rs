@@ -88,8 +88,20 @@ pub async fn start_subscriber(
 
     let mut msg_stream = pubsub_conn.into_on_message();
     use futures_lite::StreamExt;
+    let mut shutdown_rx = state.shutdown_tx.subscribe();
 
-    while let Some(msg) = msg_stream.next().await {
+    loop {
+        let msg = tokio::select! {
+            biased;
+            _ = shutdown_rx.recv() => {
+                tracing::info!("Event bus subscriber: shutdown signal received");
+                break;
+            }
+            next = msg_stream.next() => match next {
+                Some(m) => m,
+                None => break,
+            },
+        };
         let payload: String = match msg.get_payload() {
             Ok(p) => p,
             Err(e) => {
