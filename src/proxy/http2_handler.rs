@@ -375,21 +375,66 @@ async fn handle_h2_connect_validated(
 }
 
 /// Authenticate an HTTP/2 request via Proxy-Authorization header.
-/// Returns Some(user_id) on success, None on failure.
+/// Returns Some(user_id) on success, None on failure. Increments the
+/// `proxy_auth_failures_total` metric with a distinct reason label so
+/// operators can tell apart malformed credentials from invalid ones.
 async fn authenticate_h2(auth_header: &str, state: &AppState) -> Option<i64> {
     if !auth_header.starts_with("Basic ") {
+        tracing::warn!("[HTTP2] auth: non-Basic Proxy-Authorization scheme");
+        crate::metrics::AUTH_FAILURES
+            .with_label_values(&["scheme_unsupported"])
+            .inc();
         return None;
     }
     let encoded = &auth_header[6..];
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(encoded)
-        .ok()?;
-    let credentials = String::from_utf8(decoded).ok()?;
+    let decoded = match base64::engine::general_purpose::STANDARD.decode(encoded) {
+        Ok(d) => d,
+        Err(_) => {
+            tracing::warn!("[HTTP2] auth: malformed base64 in Proxy-Authorization");
+            crate::metrics::AUTH_FAILURES
+                .with_label_values(&["malformed_b64"])
+                .inc();
+            return None;
+        }
+    };
+    let credentials = match String::from_utf8(decoded) {
+        Ok(c) => c,
+        Err(_) => {
+            tracing::warn!("[HTTP2] auth: invalid UTF-8 in decoded credentials");
+            crate::metrics::AUTH_FAILURES
+                .with_label_values(&["malformed_utf8"])
+                .inc();
+            return None;
+        }
+    };
     let mut parts = credentials.splitn(2, ':');
-    let username = parts.next()?;
-    let password = parts.next()?;
+    let username = match parts.next() {
+        Some(u) => u,
+        None => {
+            crate::metrics::AUTH_FAILURES
+                .with_label_values(&["malformed_credentials"])
+                .inc();
+            return None;
+        }
+    };
+    let password = match parts.next() {
+        Some(p) => p,
+        None => {
+            tracing::warn!("[HTTP2] auth: credentials missing ':' separator");
+            crate::metrics::AUTH_FAILURES
+                .with_label_values(&["malformed_credentials"])
+                .inc();
+            return None;
+        }
+    };
 
-    ProxyProtocol::validate_credentials_public(username, password, state).await
+    let result = ProxyProtocol::validate_credentials_public(username, password, state).await;
+    if result.is_none() {
+        crate::metrics::AUTH_FAILURES
+            .with_label_values(&["invalid_credentials"])
+            .inc();
+    }
+    result
 }
 
 /// Parse "host:port" from a CONNECT authority. Returns `None` for empty
