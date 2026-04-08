@@ -61,6 +61,16 @@ lazy_static! {
     )
     .unwrap();
 
+    /// Admin/root_admin bypassed a normally-restrictive validator.
+    /// Audit signal — high counts on a single rule may indicate misuse
+    /// of admin accounts for proxy traffic.
+    pub static ref ADMIN_BYPASS_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "proxy_admin_bypass_total",
+        "Total times an admin/root_admin bypassed a validator rule",
+        &["rule"]
+    )
+    .unwrap();
+
     /// Connection duration histogram (seconds)
     pub static ref CONNECTION_DURATION: HistogramVec = register_histogram_vec!(
         "proxy_connection_duration_seconds",

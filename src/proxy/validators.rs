@@ -77,7 +77,16 @@ pub async fn validate_protocol_restriction(ctx: &ConnectionContext, state: &AppS
     // SOCKS4 disabled check
     if *protocol == crate::proxy::protocol::ProxyProtocol::SOCKS4 && !ctx.config.socks4_enabled {
         if ctx.is_admin {
-            tracing::debug!("SOCKS4 allowed for admin user {:?}", ctx.user_id);
+            tracing::info!(
+                target: "audit",
+                user_id = ?ctx.user_id,
+                client_addr = %ctx.client_addr,
+                rule = "socks4_disabled",
+                "admin bypass: SOCKS4 allowed for admin user"
+            );
+            crate::metrics::ADMIN_BYPASS_TOTAL
+                .with_label_values(&["socks4_disabled"])
+                .inc();
             return Verdict::Allow;
         }
         crate::metrics::AUTH_FAILURES
