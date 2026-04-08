@@ -140,6 +140,33 @@ impl ConnectionPool {
         });
     }
 
+    /// Drop all idle pooled connections for this address. Use this when an
+    /// upstream connect attempt fails — the host is likely down and any
+    /// pooled keep-alive sockets are almost certainly stale too.
+    pub fn invalidate_addr(&self, addr: &str) {
+        if let Some((_, queue)) = self.pools.remove(addr) {
+            if !queue.is_empty() {
+                tracing::debug!(
+                    "[pool] invalidated {} idle connection(s) to {}",
+                    queue.len(),
+                    addr
+                );
+            }
+        }
+    }
+
+    /// Try to get a pooled connection without creating a new one.
+    /// Public form of `try_get` for callers that want to attribute pool hits
+    /// vs. new connects in their own metrics.
+    pub async fn try_get_pub(&self, addr: &str) -> Option<TcpStream> {
+        self.try_get(addr).await
+    }
+
+    /// Increment the miss counter without going through `get_or_connect`.
+    pub fn record_miss(&self) {
+        self.misses.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Evict all expired idle connections. Call periodically.
     pub fn cleanup_expired(&self) {
         let idle_timeout = self.idle_timeout;
