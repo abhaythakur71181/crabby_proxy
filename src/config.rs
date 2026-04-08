@@ -26,6 +26,10 @@ pub struct ServerConfig {
     pub tls_enabled: bool,
     pub tls_cert_path: String,
     pub tls_key_path: String,
+    /// Enable HAProxy PROXY protocol v1 header parsing on incoming connections.
+    /// When enabled, the real client IP is extracted from the PROXY header.
+    #[serde(default)]
+    pub proxy_protocol_enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -187,6 +191,7 @@ impl Default for Config {
                 tls_enabled: false,
                 tls_cert_path: String::new(),
                 tls_key_path: String::new(),
+                proxy_protocol_enabled: false,
             },
             database: DatabaseConfig {
                 path: "sqlite:proxy.db".to_string(),

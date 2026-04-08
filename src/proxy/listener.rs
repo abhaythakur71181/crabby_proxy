@@ -46,7 +46,7 @@ pub async fn run_proxy_server(state: Arc<AppState>, addr: SocketAddr) {
     loop {
         tokio::select! {
             // Accept new connections
-            Ok((client_stream, client_addr)) = listener.accept() => {
+            Ok((mut client_stream, client_addr)) = listener.accept() => {
                 let _ = client_stream.set_nodelay(true);
                 let permit = match semaphore.clone().try_acquire_owned() {
                     Ok(permit) => permit,
@@ -57,6 +57,25 @@ pub async fn run_proxy_server(state: Arc<AppState>, addr: SocketAddr) {
                     }
                 };
 
+                // Parse PROXY protocol header if enabled (extracts real client IP)
+                let proxy_protocol_enabled = state.config.load().server.proxy_protocol_enabled;
+                let real_addr = if proxy_protocol_enabled {
+                    match crate::proxy_protocol::parse_proxy_protocol_v1(&mut client_stream).await {
+                        Ok(Some(addr)) => {
+                            tracing::debug!("PROXY protocol: real client {} (socket: {})", addr, client_addr);
+                            addr
+                        }
+                        Ok(None) => client_addr, // PROXY UNKNOWN
+                        Err(e) => {
+                            tracing::warn!("PROXY protocol parse error from {}: {}", client_addr, e);
+                            drop(client_stream);
+                            continue;
+                        }
+                    }
+                } else {
+                    client_addr
+                };
+
                 let state = state.clone();
                 tokio::spawn(async move {
                     let _permit = permit; // Hold permit until task completes
@@ -64,8 +83,8 @@ pub async fn run_proxy_server(state: Arc<AppState>, addr: SocketAddr) {
                     let conn_id = uuid::Uuid::new_v4();
                     // Notify: New connection accepted
                     let _ = state.notify_tx.send(crate::app_state::ConnectionEvent::NewConnection(conn_id)).await;
-                    // Handle the client connection
-                    handle_client(client_stream, client_addr, state.clone(), conn_id).await;
+                    // Handle the client connection (using real_addr from PROXY protocol or socket addr)
+                    handle_client(client_stream, real_addr, state.clone(), conn_id).await;
                     // Directly clean up connection state (belt-and-suspenders with event system)
                     let _ = state.state.delete_connection(conn_id).await;
                     // Notify: Connection closed

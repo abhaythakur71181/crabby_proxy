@@ -15,6 +15,7 @@ mod geo_filter;
 mod ip_filter;
 mod metrics;
 mod proxy;
+mod proxy_protocol;
 mod rate_limit;
 mod state;
 mod stream;
