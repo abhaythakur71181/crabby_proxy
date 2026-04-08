@@ -30,8 +30,16 @@ pub async fn login(
     // Rate limiting: prevent brute force attacks
     let client_ip = extract_client_ip(&headers);
 
-    if !state.login_rate_limiter.check(&client_ip).await {
-        tracing::warn!("Login rate limit exceeded for IP: {}", client_ip);
+    if !state
+        .login_rate_limiter
+        .check_user(&client_ip, &payload.username)
+        .await
+    {
+        tracing::warn!(
+            "Login rate limit exceeded for IP: {} (user: {})",
+            client_ip,
+            payload.username
+        );
         return Err((
             StatusCode::TOO_MANY_REQUESTS,
             "Too many login attempts. Please try again later.".to_string(),
