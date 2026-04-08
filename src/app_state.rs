@@ -95,7 +95,7 @@ pub struct AppState {
 
     // Approval check cache: (user_id, client_ip) -> (approved, cached_at)
     // Avoids hitting DB on every proxy connection; 2-minute TTL
-    pub approval_cache: Arc<dashmap::DashMap<(i64, String), (bool, std::time::Instant)>>,
+    pub approval_cache: Arc<dashmap::DashMap<(i64, std::net::IpAddr), (bool, std::time::Instant)>>,
 
     // Redis cache layer for users, API keys, quotas, approvals
     pub cache: Option<CacheLayer>,
@@ -516,8 +516,8 @@ impl AppState {
 
     /// Check if IP is approved for user, with in-memory + Redis cache-aside.
     /// Returns true/false. DB is only hit on cache miss.
-    pub async fn cached_ip_approved(&self, user_id: i64, client_ip: &str) -> Result<bool, sqlx::Error> {
-        let cache_key = (user_id, client_ip.to_string());
+    pub async fn cached_ip_approved(&self, user_id: i64, client_ip: std::net::IpAddr) -> Result<bool, sqlx::Error> {
+        let cache_key = (user_id, client_ip);
         let ttl = std::time::Duration::from_secs(crate::constants::APPROVAL_CACHE_TTL_SECS);
 
         // 1. Check in-memory cache
@@ -530,23 +530,26 @@ impl AppState {
             self.approval_cache.remove(&cache_key);
         }
 
+        // Format only on miss (Redis + DB still want a String).
+        let ip_str = client_ip.to_string();
+
         // 2. Check Redis cache
         if let Some(ref cache) = self.cache {
-            if let Some(approved) = cache.get_ip_approved(user_id, client_ip).await {
+            if let Some(approved) = cache.get_ip_approved(user_id, &ip_str).await {
                 self.approval_cache.insert(cache_key, (approved, std::time::Instant::now()));
                 return Ok(approved);
             }
         }
 
         // 3. DB lookup
-        let approved = crate::db::approvals::is_ip_approved(&self.db_pool, user_id, client_ip).await?;
+        let approved = crate::db::approvals::is_ip_approved(&self.db_pool, user_id, &ip_str).await?;
 
         // Store in Redis
         if let Some(ref cache) = self.cache {
-            cache.set_ip_approved(user_id, client_ip, approved).await;
+            cache.set_ip_approved(user_id, &ip_str, approved).await;
         }
         // Store in memory
-        self.approval_cache.insert((user_id, client_ip.to_string()), (approved, std::time::Instant::now()));
+        self.approval_cache.insert(cache_key, (approved, std::time::Instant::now()));
 
         Ok(approved)
     }
