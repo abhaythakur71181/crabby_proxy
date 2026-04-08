@@ -74,6 +74,12 @@ pub struct AppState {
     // Uses full string key instead of u64 hash to prevent collision-based auth bypass.
     pub auth_cache: Arc<dashmap::DashMap<(String, String), (i64, std::time::Instant)>>,
 
+    // Negative auth cache: failed (username, attempted_password) -> cached_at.
+    // Short TTL (5s) absorbs credential-stuffing bursts so a flood of bad
+    // attempts hits argon2 once instead of once per try. Bounded to avoid
+    // memory blow-up — capped insert silently drops on overflow.
+    pub auth_negative_cache: Arc<dashmap::DashMap<(String, String), std::time::Instant>>,
+
     /// Per-user bandwidth throttler registry.
     pub bandwidth_throttlers: Arc<crate::bandwidth::ThrottlerRegistry>,
 
@@ -269,6 +275,7 @@ impl AppState {
             quota_trackers: Arc::new(crate::quota_tracker::QuotaTrackerRegistry::new()),
             approval_cache: Arc::new(dashmap::DashMap::new()),
             auth_cache: Arc::new(dashmap::DashMap::new()),
+            auth_negative_cache: Arc::new(dashmap::DashMap::new()),
             bandwidth_throttlers: Arc::new(crate::bandwidth::ThrottlerRegistry::new()),
             middleware: Arc::new(crate::middleware::MiddlewareChain::new()),
             cache,
