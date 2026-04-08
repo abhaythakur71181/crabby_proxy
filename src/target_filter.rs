@@ -76,18 +76,33 @@ fn default_tz() -> String {
     "UTC".to_string()
 }
 
+/// Parse a schedule JSON string. Returns `None` (and logs) if invalid.
+pub fn parse_schedule(schedule_json: &str) -> Option<AccessSchedule> {
+    match serde_json::from_str(schedule_json) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::warn!("Invalid access schedule JSON: {}", e);
+            None
+        }
+    }
+}
+
 /// Check if current time is within the access schedule.
 /// Returns true if access is allowed right now.
 /// Respects the `timezone` field (e.g. "Asia/Kolkata", "US/Eastern"); defaults to UTC.
 pub fn is_within_schedule(schedule_json: &str) -> bool {
-    let schedule: AccessSchedule = match serde_json::from_str(schedule_json) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("Invalid access schedule JSON, denying access (fail-closed): {}", e);
+    let schedule = match parse_schedule(schedule_json) {
+        Some(s) => s,
+        None => {
+            tracing::warn!("Denying access — unparseable schedule (fail-closed)");
             return false;
         }
     };
+    is_within_parsed_schedule(&schedule)
+}
 
+/// Same as `is_within_schedule` but takes a pre-parsed schedule.
+pub fn is_within_parsed_schedule(schedule: &AccessSchedule) -> bool {
     // Convert current time to the configured timezone
     let now_utc = chrono::Utc::now();
     let now = if schedule.timezone.eq_ignore_ascii_case("utc") {

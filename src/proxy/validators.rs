@@ -230,13 +230,21 @@ pub async fn validate_access_schedule(ctx: &ConnectionContext, state: &AppState)
         Some(uid) => uid,
         None => return Verdict::Allow,
     };
-    let schedule = state
-        .cached_user_by_id(uid)
-        .await
-        .and_then(|cu| cu.access_schedule.clone())
-        .or_else(|| ctx.config.default_access_schedule.clone());
-    if let Some(sched) = schedule {
-        if !crate::target_filter::is_within_schedule(&sched) {
+    // Per-user parsed schedule cache. Avoids serde_json::from_str on the
+    // hot path when the same user reconnects repeatedly.
+    if let Some(parsed) = state.parsed_schedule_for_user(uid).await {
+        if !crate::target_filter::is_within_parsed_schedule(&parsed) {
+            return Verdict::Deny(format!(
+                "Access denied for user {} — outside access schedule",
+                uid
+            ));
+        }
+        return Verdict::Allow;
+    }
+    // No per-user schedule — fall back to global default (parsed each call,
+    // but the default is rarely set in practice).
+    if let Some(ref sched) = ctx.config.default_access_schedule {
+        if !crate::target_filter::is_within_schedule(sched) {
             return Verdict::Deny(format!(
                 "Access denied for user {} — outside access schedule",
                 uid
