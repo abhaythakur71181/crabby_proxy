@@ -592,26 +592,11 @@ async fn async_handle_client_with_target(
     let label_c2t = format!("[{}]: C[{}]->T[{}]", protocol, client_addr, target_addr);
     let label_t2c = format!("[{}]: T[{}]->C[{}]", protocol, target_addr, client_addr);
 
-    // Look up per-user bandwidth throttle
-    let throttler = if let Some(uid) = user_id {
-        if let Some(user) = state.cached_user_by_id(uid).await {
-            if user.bandwidth_rate_bps > 0 {
-                state
-                    .bandwidth_throttlers
-                    .get_or_create(uid, user.bandwidth_rate_bps as u64)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
     // Resolve the live quota tracker for this user. The relay loop will
     // increment its atomic counter on every chunk and abort the tunnel
-    // the moment the user crosses their configured limit.
+    // the moment the user crosses their configured limit. The tracker
+    // also stashes the per-user bandwidth throttler so we don't pay for
+    // a separate `bandwidth_throttlers.get_or_create` lookup per relay.
     let quota_tracker = if let Some(uid) = user_id {
         state
             .quota_trackers
@@ -620,6 +605,30 @@ async fn async_handle_client_with_target(
             .ok()
     } else {
         None
+    };
+    let throttler = match (user_id, quota_tracker.as_ref()) {
+        (Some(uid), Some(tracker)) => {
+            // Fast path: throttler already cached on the tracker.
+            if let Some(t) = tracker.throttler_cached() {
+                t
+            } else {
+                // Cold path: resolve once and stash on the tracker. Subsequent
+                // connections in the same quota window hit the cached arm above.
+                let resolved = if let Some(user) = state.cached_user_by_id(uid).await {
+                    if user.bandwidth_rate_bps > 0 {
+                        state
+                            .bandwidth_throttlers
+                            .get_or_create(uid, user.bandwidth_rate_bps as u64)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                tracker.throttler_or_init(|| resolved.clone())
+            }
+        }
+        _ => None,
     };
 
     match crate::stream::create_throttled_tunnel(
