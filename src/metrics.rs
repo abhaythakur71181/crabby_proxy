@@ -71,6 +71,13 @@ lazy_static! {
     )
     .unwrap();
 
+    /// Usage records dropped by the bounded usage writer (channel full or closed).
+    pub static ref USAGE_RECORDS_DROPPED: prometheus::IntCounter = prometheus::register_int_counter!(
+        "proxy_usage_records_dropped_total",
+        "Total usage records dropped because the writer channel was full"
+    )
+    .unwrap();
+
     /// Connection duration histogram (seconds)
     pub static ref CONNECTION_DURATION: HistogramVec = register_histogram_vec!(
         "proxy_connection_duration_seconds",
