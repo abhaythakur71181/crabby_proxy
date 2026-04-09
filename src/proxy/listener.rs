@@ -393,30 +393,17 @@ async fn handle_client(
                 .with_label_values(&["received"])
                 .inc_by(bytes_received);
             if let Some(uid) = ctx.effective_uid() {
-                // Fire-and-forget: record usage in background to avoid blocking
-                // the semaphore permit while SQLite writes complete.
-                let db = state.db_pool.clone();
-                let target = target_addr_str.clone();
-                let ip = client_ip_str.clone();
-                let proto = proto_label.to_string();
-                tokio::spawn(async move {
-                    if let Err(e) = crate::db::usage::record_usage(
-                        &db,
-                        uid,
-                        &conn_id,
-                        &ip,
-                        &target,
-                        &proto,
-                        started_at,
-                        ended_at,
-                        bytes_sent as i64,
-                        bytes_received as i64,
-                        "success",
-                    )
-                    .await
-                    {
-                        tracing::error!("Failed to record usage for user {}: {}", uid, e);
-                    }
+                state.usage_writer.submit(crate::usage_writer::UsageRecord {
+                    user_id: uid,
+                    connection_id: conn_id,
+                    client_ip: client_ip_str.clone(),
+                    target_host: target_addr_str.clone(),
+                    protocol: proto_label.to_string(),
+                    started_at,
+                    ended_at,
+                    bytes_sent: bytes_sent as i64,
+                    bytes_received: bytes_received as i64,
+                    status: "success".to_string(),
                 });
                 state
                     .track_bandwidth(uid, bytes_sent as i64 + bytes_received as i64)
@@ -469,20 +456,17 @@ async fn handle_client(
                 "connection failed"
             );
             if let Some(uid) = ctx.effective_uid() {
-                let db = state.db_pool.clone();
-                let target = target_addr_str.clone();
-                let ip = client_ip_str.clone();
-                let proto = proto_label.to_string();
-                let err_label = error_label.to_string();
-                tokio::spawn(async move {
-                    if let Err(e) = crate::db::usage::record_usage(
-                        &db, uid, &conn_id, &ip, &target, &proto, started_at, ended_at, 0, 0,
-                        &err_label,
-                    )
-                    .await
-                    {
-                        tracing::error!("Failed to record usage for user {}: {}", uid, e);
-                    }
+                state.usage_writer.submit(crate::usage_writer::UsageRecord {
+                    user_id: uid,
+                    connection_id: conn_id,
+                    client_ip: client_ip_str.clone(),
+                    target_host: target_addr_str.clone(),
+                    protocol: proto_label.to_string(),
+                    started_at,
+                    ended_at,
+                    bytes_sent: 0,
+                    bytes_received: 0,
+                    status: error_label.to_string(),
                 });
             }
             if error_type != ErrorType::Tunnel {

@@ -334,18 +334,17 @@ async fn handle_h2_connect_validated(
                 .with_label_values(&["HTTP2", "success"])
                 .inc();
             if let Some(uid) = ctx.effective_uid() {
-                let db = state.db_pool.clone();
-                let ip = client_addr.ip().to_string();
-                let auth = authority.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = crate::db::usage::record_usage(
-                        &db, uid, &conn_id, &ip, &auth, "HTTP2",
-                        started_at, ended_at,
-                        bytes_sent as i64, bytes_received as i64,
-                        "success",
-                    ).await {
-                        tracing::error!("[HTTP2] Failed to record usage for conn {}: {}", conn_id, e);
-                    }
+                state.usage_writer.submit(crate::usage_writer::UsageRecord {
+                    user_id: uid,
+                    connection_id: conn_id,
+                    client_ip: client_addr.ip().to_string(),
+                    target_host: authority.clone(),
+                    protocol: "HTTP2".to_string(),
+                    started_at,
+                    ended_at,
+                    bytes_sent: bytes_sent as i64,
+                    bytes_received: bytes_received as i64,
+                    status: "success".to_string(),
                 });
                 state
                     .track_bandwidth(uid, bytes_sent as i64 + bytes_received as i64)
@@ -358,16 +357,17 @@ async fn handle_h2_connect_validated(
                 .with_label_values(&["HTTP2", "failed"])
                 .inc();
             if let Some(uid) = ctx.effective_uid() {
-                let db = state.db_pool.clone();
-                let ip = client_addr.ip().to_string();
-                let auth = authority.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = crate::db::usage::record_usage(
-                        &db, uid, &conn_id, &ip, &auth, "HTTP2",
-                        started_at, ended_at, 0, 0, "failed",
-                    ).await {
-                        tracing::error!("[HTTP2] Failed to record usage for conn {}: {}", conn_id, e);
-                    }
+                state.usage_writer.submit(crate::usage_writer::UsageRecord {
+                    user_id: uid,
+                    connection_id: conn_id,
+                    client_ip: client_addr.ip().to_string(),
+                    target_host: authority.clone(),
+                    protocol: "HTTP2".to_string(),
+                    started_at,
+                    ended_at,
+                    bytes_sent: 0,
+                    bytes_received: 0,
+                    status: "failed".to_string(),
                 });
             }
         }

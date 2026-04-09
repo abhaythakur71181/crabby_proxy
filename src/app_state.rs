@@ -89,6 +89,9 @@ pub struct AppState {
     // Graceful shutdown signal
     pub shutdown_tx: tokio::sync::broadcast::Sender<()>,
 
+    // Bounded background writer for the `usage` table.
+    pub usage_writer: crate::usage_writer::UsageWriter,
+
     // Quota check cache: user_id -> (allowed, cached_at)
     // Caches the boolean result of check_quota for 30s to avoid SUM() per connection
     // (fallback when Redis cache is unavailable)
@@ -249,7 +252,7 @@ impl AppState {
         Ok(Self {
             config: Arc::new(ArcSwap::from_pointee(config.clone())),
             state,
-            db_pool,
+            db_pool: db_pool.clone(),
             tunnels: Arc::new(RwLock::new(TunnelManager::new(
                 config.features.tunnel_port_start,
                 config.features.tunnel_port_end,
@@ -277,6 +280,7 @@ impl AppState {
                 None
             },
             shutdown_tx,
+            usage_writer: crate::usage_writer::UsageWriter::spawn(db_pool.clone()),
             quota_cache: Arc::new(dashmap::DashMap::new()),
             quota_trackers: Arc::new(crate::quota_tracker::QuotaTrackerRegistry::new()),
             approval_cache: Arc::new(dashmap::DashMap::new()),
