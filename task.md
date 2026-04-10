@@ -174,21 +174,27 @@ Comprehensive audit of the codebase as of 2026-03-25.
 - [x] #2 — Metrics export panic — replaced unwrap() with error handling
 - [x] #3 — Schedule fail-open → fail-closed
 - [x] #4 — Timezone support in access schedules (chrono-tz)
+- [x] #5 — Auth cache collision risk — replaced u64 hash with full string tuple key
 - [x] #6 — HTTP/2 response builder unwraps (fixed in #1)
 - [x] #7 — Quota SUM performance — covering index added
 - [x] #8 — DNS cache bounded (max 10k entries, LRU eviction)
 - [x] #9 — Shared reqwest::Client for webhooks
+- [x] #10 — Config lock contention — replaced RwLock with lock-free ArcSwap
 - [x] #11 — Webhook retry with exponential backoff (3 retries)
 - [x] #12 — Graceful shutdown drains active connections
+- [x] #14 — HAProxy PROXY protocol v1 support
+- [x] #16 — Drain metrics (proxy_draining, proxy_draining_connections gauges)
+- [x] #17 — Daily/weekly/monthly quota periods (QuotaPeriod enum)
 - [x] #18 — Pagination on list users endpoint
 - [x] #20 — Constants module for magic numbers
+- [x] #24 — Structured ApiError type for admin API responses
+- [x] #26 — Structured access logging (target: access_log)
 - [x] #30 — Deep health check endpoint (/health/deep)
 
-## REMAINING PRIORITY MATRIX
+## REMAINING
 
 | Priority | Items | Effort |
 |----------|-------|--------|
-| **P1 - High** | #5 (auth cache collision), #10 (config lock) | Medium |
-| **P2 - Medium** | #21 (integration tests), #22 (h2 tests), #23 (clone audit), #24 (API errors) | Varies |
-| **P3 - Low** | #13 (mTLS), #14 (PROXY protocol), #15 (h2 non-CONNECT), #16 (drain metrics), #17 (daily quota), #19 (WebSocket) | High |
-| **P4 - Future** | #25-29 | High |
+| **P2 - Medium** | #21 (integration tests), #22 (h2 tests), #23 (clone audit) | Varies |
+| **P3 - Low** | #13 (mTLS), #15 (h2 non-CONNECT), #19 (WebSocket) | High |
+| **P4 - Future** | #25 (distributed rate limit), #27 (bandwidth shaping), #28 (TLS hot reload), #29 (plugin system) | High |
