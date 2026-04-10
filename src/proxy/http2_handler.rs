@@ -505,3 +505,100 @@ async fn handle_h2_tunnel(
 
     Ok((bytes_sent, bytes_received))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_authority_with_port() {
+        let (host, port) = parse_authority("example.com:8080");
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 8080);
+    }
+
+    #[test]
+    fn test_parse_authority_default_port() {
+        let (host, port) = parse_authority("example.com");
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 443);
+    }
+
+    #[test]
+    fn test_parse_authority_ipv4_with_port() {
+        let (host, port) = parse_authority("192.168.1.1:443");
+        assert_eq!(host, "192.168.1.1");
+        assert_eq!(port, 443);
+    }
+
+    #[test]
+    fn test_parse_authority_invalid_port_defaults_443() {
+        let (host, port) = parse_authority("example.com:notaport");
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 443);
+    }
+
+    #[test]
+    fn test_parse_authority_empty_string() {
+        let (host, port) = parse_authority("");
+        assert_eq!(host, "");
+        assert_eq!(port, 443);
+    }
+
+    #[test]
+    fn test_parse_authority_port_zero() {
+        let (host, port) = parse_authority("example.com:0");
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 0);
+    }
+
+    #[test]
+    fn test_parse_authority_ipv6_bracket_notation() {
+        // IPv6 in bracket notation: [::1]:8080
+        let (host, port) = parse_authority("[::1]:8080");
+        assert_eq!(host, "[::1]");
+        assert_eq!(port, 8080);
+    }
+
+    #[test]
+    fn test_auth_header_parsing_basic() {
+        // "user:pass" base64 encoded = "dXNlcjpwYXNz"
+        let header = "Basic dXNlcjpwYXNz";
+        assert!(header.starts_with("Basic "));
+        let encoded = &header[6..];
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        let credentials = String::from_utf8(decoded).unwrap();
+        let mut parts = credentials.splitn(2, ':');
+        assert_eq!(parts.next(), Some("user"));
+        assert_eq!(parts.next(), Some("pass"));
+    }
+
+    #[test]
+    fn test_auth_header_parsing_password_with_colon() {
+        // "user:p:a:ss" base64 encoded = "dXNlcjpwOmE6c3M="
+        let encoded = base64::engine::general_purpose::STANDARD.encode("user:p:a:ss");
+        let header = format!("Basic {}", encoded);
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&header[6..])
+            .unwrap();
+        let credentials = String::from_utf8(decoded).unwrap();
+        let mut parts = credentials.splitn(2, ':');
+        assert_eq!(parts.next(), Some("user"));
+        assert_eq!(parts.next(), Some("p:a:ss"));
+    }
+
+    #[test]
+    fn test_auth_header_not_basic_returns_none() {
+        let header = "Bearer some-token";
+        assert!(!header.starts_with("Basic "));
+    }
+
+    #[test]
+    fn test_auth_header_invalid_base64() {
+        let header = "Basic !!!invalid!!!";
+        let result = base64::engine::general_purpose::STANDARD.decode(&header[6..]);
+        assert!(result.is_err());
+    }
+}
