@@ -22,7 +22,10 @@ pub struct CacheLayer {
 impl CacheLayer {
     pub async fn new(redis_url: &str, prefix: String) -> Result<Self, Box<dyn std::error::Error>> {
         let client = redis::Client::open(redis_url)?;
-        let conn = ConnectionManager::new(client).await?;
+        let conn = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            ConnectionManager::new(client)
+        ).await??;
         tracing::info!("Cache layer connected to Redis at {}", redis_url);
         Ok(Self { conn, prefix })
     }
