@@ -65,19 +65,12 @@ pub async fn handle_h2_connection(stream: TcpStream, client_addr: SocketAddr, st
         let method = request.method().clone();
         let uri = request.uri().clone();
 
-        // Only support CONNECT for proxying
+        // Non-CONNECT requests: forward as HTTP proxy (GET, POST, etc.)
         if method != http::Method::CONNECT {
-            tracing::warn!(
-                "[HTTP2] Non-CONNECT method {} from {} (uri: {})",
-                method,
-                client_addr,
-                uri
-            );
-            let response = http::Response::builder()
-                .status(http::StatusCode::METHOD_NOT_ALLOWED)
-                .body(())
-                .unwrap_or_else(|_| http::Response::new(()));
-            let _ = respond.send_response(response, true);
+            let state_ref = state_arc.clone();
+            tokio::spawn(async move {
+                handle_h2_forward(request, respond, client_addr, &state_ref).await;
+            });
             continue;
         }
 
@@ -504,6 +497,121 @@ async fn handle_h2_tunnel(
     );
 
     Ok((bytes_sent, bytes_received))
+}
+
+/// Forward a non-CONNECT HTTP/2 request to the upstream server.
+/// This handles regular HTTP methods (GET, POST, etc.) as a forward proxy.
+async fn handle_h2_forward(
+    request: http::Request<h2::RecvStream>,
+    mut respond: h2::server::SendResponse<bytes::Bytes>,
+    client_addr: SocketAddr,
+    state: &AppState,
+) {
+    let method = request.method().clone();
+    let uri = request.uri().clone();
+
+    // Extract the target URL from the request URI
+    let target_url = uri.to_string();
+    if !target_url.starts_with("http://") && !target_url.starts_with("https://") {
+        tracing::warn!(
+            "[HTTP2] Non-CONNECT request with non-absolute URI from {}: {} {}",
+            client_addr,
+            method,
+            uri
+        );
+        let resp = http::Response::builder()
+            .status(http::StatusCode::BAD_REQUEST)
+            .body(())
+            .unwrap_or_else(|_| http::Response::new(()));
+        let _ = respond.send_response(resp, true);
+        return;
+    }
+
+    tracing::debug!(
+        "[HTTP2] Forwarding {} {} for {}",
+        method,
+        target_url,
+        client_addr
+    );
+
+    // Read request body
+    let mut recv_stream = request.into_body();
+    let mut body_data = Vec::new();
+    while let Some(chunk) = recv_stream.data().await {
+        match chunk {
+            Ok(data) => {
+                let _ = recv_stream.flow_control().release_capacity(data.len());
+                body_data.extend_from_slice(&data);
+            }
+            Err(e) => {
+                tracing::error!("[HTTP2] Error reading request body: {}", e);
+                let resp = http::Response::builder()
+                    .status(http::StatusCode::BAD_REQUEST)
+                    .body(())
+                    .unwrap_or_else(|_| http::Response::new(()));
+                let _ = respond.send_response(resp, true);
+                return;
+            }
+        }
+    }
+
+    // Forward via reqwest
+    let client = &*super::super::webhook::WEBHOOK_CLIENT;
+    let upstream_req = client
+        .request(
+            reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET),
+            &target_url,
+        )
+        .body(body_data);
+
+    match upstream_req.send().await {
+        Ok(upstream_resp) => {
+            let status = upstream_resp.status();
+            let mut builder = http::Response::builder().status(status.as_u16());
+
+            // Copy response headers (skip h2-specific ones)
+            for (name, value) in upstream_resp.headers() {
+                if name != "transfer-encoding" && name != "connection" {
+                    builder = builder.header(name, value);
+                }
+            }
+
+            let resp_body = upstream_resp.bytes().await.unwrap_or_default();
+            let response = builder.body(()).unwrap_or_else(|_| http::Response::new(()));
+
+            match respond.send_response(response, resp_body.is_empty()) {
+                Ok(mut send) => {
+                    if !resp_body.is_empty() {
+                        let _ = send.send_data(bytes::Bytes::from(resp_body), true);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("[HTTP2] Failed to send forwarded response: {}", e);
+                }
+            }
+
+            crate::metrics::REQUESTS_TOTAL
+                .with_label_values(&["HTTP2", "success"])
+                .inc();
+        }
+        Err(e) => {
+            tracing::error!(
+                "[HTTP2] Forward request failed for {} {}: {}",
+                method,
+                target_url,
+                e
+            );
+            let resp = http::Response::builder()
+                .status(http::StatusCode::BAD_GATEWAY)
+                .body(())
+                .unwrap_or_else(|_| http::Response::new(()));
+            let _ = respond.send_response(resp, true);
+
+            crate::metrics::REQUESTS_TOTAL
+                .with_label_values(&["HTTP2", "failed"])
+                .inc();
+        }
+    }
 }
 
 #[cfg(test)]

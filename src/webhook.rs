@@ -11,12 +11,12 @@ const MAX_RETRIES: u32 = 3;
 const BASE_RETRY_DELAY_SECS: u64 = 1;
 
 lazy_static::lazy_static! {
-    /// Shared HTTP client for webhook deliveries (reuses connections and DNS cache).
-    static ref WEBHOOK_CLIENT: reqwest::Client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .pool_max_idle_per_host(2)
+    /// Shared HTTP client for webhooks, HTTP forwarding, etc. (reuses connections).
+    pub static ref WEBHOOK_CLIENT: reqwest::Client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .pool_max_idle_per_host(5)
         .build()
-        .expect("Failed to create webhook HTTP client");
+        .expect("Failed to create shared HTTP client");
 }
 
 /// Webhook event types
