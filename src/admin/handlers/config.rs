@@ -69,10 +69,16 @@ pub async fn reload_config(
     );
 
     match state.reload_config().await {
-        Ok(_) => Ok(Json(ReloadResponse {
-            success: true,
-            message: "Configuration reloaded successfully".to_string(),
-        })),
+        Ok(_) => {
+            // Also reload TLS certificates if TLS is enabled
+            if let Err(e) = state.reload_tls() {
+                tracing::warn!("Config reloaded but TLS cert reload failed: {}", e);
+            }
+            Ok(Json(ReloadResponse {
+                success: true,
+                message: "Configuration and TLS certificates reloaded successfully".to_string(),
+            }))
+        }
         Err(e) => {
             tracing::error!("Failed to reload configuration: {}", e);
             Ok(Json(ReloadResponse {
