@@ -178,7 +178,7 @@ async fn handle_client(
     // ── Processing: TLS upgrade (for HTTPS) ─────────────────────────────
     let stream: ClientStream = if protocol == ProxyProtocol::HTTPS {
         match &state.tls_acceptor {
-            Some(tls_acceptor) => match tls_acceptor.accept(client_stream).await {
+            Some(tls_swap) => match tls_swap.load().accept(client_stream).await {
                 Ok(tls_stream) => {
                     tracing::debug!("TLS handshake successful for {}", client_addr);
                     ClientStream::Tls(tls_stream)

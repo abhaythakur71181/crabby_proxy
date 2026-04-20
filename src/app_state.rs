@@ -39,7 +39,8 @@ pub struct AppState {
     pub notify_tx: mpsc::Sender<ConnectionEvent>,
 
     // Optional TLS acceptor
-    pub tls_acceptor: Option<Arc<TlsAcceptor>>,
+    /// TLS acceptor, wrapped in ArcSwap for hot-reloadable certificates.
+    pub tls_acceptor: Option<Arc<ArcSwap<TlsAcceptor>>>,
 
     // Runtime start time
     pub start_time: Instant,
@@ -131,10 +132,12 @@ impl AppState {
                 tracing::warn!("TLS enabled but certificate paths not configured");
                 None
             } else {
-                Some(Arc::new(crate::utils::create_tls_acceptor(
-                    &config.server.tls_cert_path,
-                    &config.server.tls_key_path,
-                )?))
+                Some(Arc::new(ArcSwap::from_pointee(
+                    crate::utils::create_tls_acceptor(
+                        &config.server.tls_cert_path,
+                        &config.server.tls_key_path,
+                    )?,
+                )))
             }
         } else {
             None
@@ -262,6 +265,23 @@ impl AppState {
     }
 
     /// Reload configuration from file
+    /// Reload TLS certificates from disk without restarting.
+    pub fn reload_tls(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let config = self.config.load();
+        if !config.server.tls_enabled {
+            return Ok(());
+        }
+        if let Some(ref acceptor_swap) = self.tls_acceptor {
+            let new_acceptor = crate::utils::create_tls_acceptor(
+                &config.server.tls_cert_path,
+                &config.server.tls_key_path,
+            )?;
+            acceptor_swap.store(Arc::new(new_acceptor));
+            tracing::info!("TLS certificates reloaded successfully");
+        }
+        Ok(())
+    }
+
     pub async fn reload_config(&self) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(path) = &self.config_path {
             let new_config = Config::from_file(path)?;
