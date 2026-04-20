@@ -257,6 +257,85 @@ impl Default for LoginRateLimiter {
     }
 }
 
+/// Redis-backed distributed rate limiter using fixed window counters.
+/// Suitable for multi-instance deployments where in-process rate limiters
+/// don't share state.
+///
+/// Uses INCR + EXPIRE for atomic increment-and-expire in a single round trip.
+#[derive(Clone)]
+pub struct RedisRateLimiter {
+    conn: redis::aio::ConnectionManager,
+    key_prefix: String,
+    window_secs: u64,
+    max_requests: u64,
+}
+
+impl RedisRateLimiter {
+    /// Create a new Redis-backed rate limiter.
+    ///
+    /// - `key_prefix`: e.g. "rl:ip:" or "rl:user:"
+    /// - `window_secs`: time window in seconds (e.g. 1 for per-second)
+    /// - `max_requests`: max allowed requests in the window
+    pub fn new(
+        conn: redis::aio::ConnectionManager,
+        key_prefix: &str,
+        window_secs: u64,
+        max_requests: u64,
+    ) -> Self {
+        Self {
+            conn,
+            key_prefix: key_prefix.to_string(),
+            window_secs,
+            max_requests,
+        }
+    }
+
+    /// Check if a key (IP or user ID) is within the rate limit.
+    /// Returns true if allowed, false if rate limited.
+    ///
+    /// Uses a Lua script for atomic INCR + EXPIRE to avoid race conditions.
+    pub async fn check(&self, key: &str) -> bool {
+        let full_key = format!("{}{}", self.key_prefix, key);
+        let mut conn = self.conn.clone();
+
+        // Lua script: atomically increment counter and set expiry if new
+        let script = redis::Script::new(
+            r#"
+            local current = redis.call('INCR', KEYS[1])
+            if current == 1 then
+                redis.call('EXPIRE', KEYS[1], ARGV[1])
+            end
+            return current
+            "#,
+        );
+
+        match script
+            .key(&full_key)
+            .arg(self.window_secs)
+            .invoke_async::<i64>(&mut conn)
+            .await
+        {
+            Ok(count) => count <= self.max_requests as i64,
+            Err(e) => {
+                tracing::warn!("Redis rate limit check failed (allowing): {}", e);
+                true // Fail open on Redis errors
+            }
+        }
+    }
+
+    /// Get the current count for a key.
+    pub async fn get_count(&self, key: &str) -> u64 {
+        let full_key = format!("{}{}", self.key_prefix, key);
+        let mut conn = self.conn.clone();
+        redis::cmd("GET")
+            .arg(&full_key)
+            .query_async::<Option<u64>>(&mut conn)
+            .await
+            .unwrap_or(Some(0))
+            .unwrap_or(0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
