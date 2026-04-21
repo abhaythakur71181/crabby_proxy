@@ -122,14 +122,42 @@ pub async fn send_socks5_response(
 pub fn create_tls_acceptor(
     cert_path: &str,
     key_path: &str,
-) -> Result<TlsAcceptor, Box<dyn std::error::Error>> {
+) -> std::result::Result<TlsAcceptor, Box<dyn std::error::Error>> {
+    create_tls_acceptor_with_client_auth(cert_path, key_path, None)
+}
+
+/// Create a TLS acceptor with optional mutual TLS (mTLS) client certificate verification.
+///
+/// - `client_ca_path = None`: no client auth required (standard TLS)
+/// - `client_ca_path = Some(path)`: clients must present a certificate signed by the given CA
+pub fn create_tls_acceptor_with_client_auth(
+    cert_path: &str,
+    key_path: &str,
+    client_ca_path: Option<&str>,
+) -> std::result::Result<TlsAcceptor, Box<dyn std::error::Error>> {
     let certs = load_certs(cert_path)?;
     let key = load_private_key(key_path)?;
 
-    let config = ServerConfig::builder()
-        // .with_safe_defaults()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)?;
+    let config = if let Some(ca_path) = client_ca_path {
+        // mTLS: require client certificates signed by this CA
+        let ca_certs = load_certs(ca_path)?;
+        let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
+        for cert in ca_certs {
+            root_store.add(cert)?;
+        }
+        let client_verifier =
+            tokio_rustls::rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store))
+                .build()
+                .map_err(|e| format!("Failed to build client verifier: {}", e))?;
+        ServerConfig::builder()
+            .with_client_cert_verifier(client_verifier)
+            .with_single_cert(certs, key)?
+    } else {
+        // Standard TLS: no client auth
+        ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)?
+    };
 
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
