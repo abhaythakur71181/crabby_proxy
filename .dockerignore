@@ -1,0 +1,56 @@
+# VCS / IDE
+**/.git
+**/.gitignore
+**/.vscode
+**/.idea
+**/.DS_Store
+**/.classpath
+**/.project
+**/.settings
+**/.toolstarget
+**/.vs
+**/*.*proj.user
+**/*.dbmdl
+**/*.jfm
+
+# Rust build artifacts
+/target
+**/target
+/bin
+
+# Node / frontend artifacts (backend image does not consume web/)
+/web
+**/node_modules
+**/dist
+**/.vite
+**/npm-debug.log
+**/bun.lock
+**/pnpm-lock.yaml
+
+# Local runtime state — never leak into image
+/proxy.db
+/proxy.db-shm
+/proxy.db-wal
+/access.log
+/proxy.log
+/data
+
+# Secrets / env
+**/.env
+**/.env.*
+!.env.example
+**/secrets.dev.yaml
+**/values.dev.yaml
+**/charts
+
+# Docker meta (avoid self-copy)
+**/Dockerfile*
+**/compose.y*ml
+**/docker-compose*
+**/.dockerignore
+
+# Docs / non-build
+LICENSE
+README.md
+task.md
+tests
