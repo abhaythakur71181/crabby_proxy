@@ -133,9 +133,10 @@ impl AppState {
                 None
             } else {
                 Some(Arc::new(ArcSwap::from_pointee(
-                    crate::utils::create_tls_acceptor(
+                    crate::utils::create_tls_acceptor_with_client_auth(
                         &config.server.tls_cert_path,
                         &config.server.tls_key_path,
+                        config.server.tls_client_ca_path.as_deref(),
                     )?,
                 )))
             }
@@ -272,9 +273,10 @@ impl AppState {
             return Ok(());
         }
         if let Some(ref acceptor_swap) = self.tls_acceptor {
-            let new_acceptor = crate::utils::create_tls_acceptor(
+            let new_acceptor = crate::utils::create_tls_acceptor_with_client_auth(
                 &config.server.tls_cert_path,
                 &config.server.tls_key_path,
+                config.server.tls_client_ca_path.as_deref(),
             )?;
             acceptor_swap.store(Arc::new(new_acceptor));
             tracing::info!("TLS certificates reloaded successfully");
