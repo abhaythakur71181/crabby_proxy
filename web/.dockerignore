@@ -1,0 +1,25 @@
+**/.git
+**/.gitignore
+**/.vscode
+**/.idea
+**/.DS_Store
+
+# Build + deps produced inside image, never copy from host.
+node_modules
+dist
+.vite
+coverage
+playwright-report
+test-results
+
+# Local env / secrets
+.env
+.env.*
+!.env.example
+
+# Docker meta
+Dockerfile*
+.dockerignore
+
+# Docs
+README.md
