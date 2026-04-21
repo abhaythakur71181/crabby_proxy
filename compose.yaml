@@ -1,0 +1,105 @@
+name: crabby-proxy
+
+services:
+  crabby-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        RUST_VERSION: "1.90"
+    image: crabby-proxy:latest
+    container_name: crabby-proxy
+    restart: unless-stopped
+
+    # Secrets are loaded from .env. Required — container refuses to start
+    # if CRABBY_JWT_SECRET is unset (config_env.rs panics on weak secrets).
+    environment:
+      CRABBY_JWT_SECRET: ${CRABBY_JWT_SECRET:?set CRABBY_JWT_SECRET in .env (>=32 bytes)}
+      CRABBY_ADMIN_PASSWORD: ${CRABBY_ADMIN_PASSWORD:?set CRABBY_ADMIN_PASSWORD in .env}
+      CRABBY_BASIC_AUTH_PASSWORD: ${CRABBY_BASIC_AUTH_PASSWORD:?set CRABBY_BASIC_AUTH_PASSWORD in .env}
+      RUST_LOG: ${RUST_LOG:-info}
+
+    ports:
+      - "${PROXY_PORT:-8080}:8080"
+      - "${ADMIN_PORT:-8081}:8081"
+
+    volumes:
+      # SQLite DB + any app-writable state. Persisted across restarts.
+      - crabby-data:/app/data
+      # Optional: override baked-in config with a host file (read-only).
+      # Uncomment to use:
+      # - ./config.toml:/app/config.toml:ro
+
+    # File descriptor bump — proxy opens lots of sockets under load.
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+
+    # Kernel networking niceties for a forward proxy.
+    sysctls:
+      net.core.somaxconn: "4096"
+      net.ipv4.tcp_fin_timeout: "15"
+
+    security_opt:
+      - no-new-privileges:true
+
+    cap_drop:
+      - ALL
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8081/metrics"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  crabby-web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        BUN_VERSION: "1"
+        # Empty → SPA calls same-origin /api, which nginx proxies to backend.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
+    image: crabby-proxy-web:latest
+    container_name: crabby-proxy-web
+    restart: unless-stopped
+
+    depends_on:
+      crabby-proxy:
+        condition: service_healthy
+
+    ports:
+      - "${WEB_PORT:-3000}:8080"
+
+    security_opt:
+      - no-new-privileges:true
+
+    cap_drop:
+      - ALL
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  crabby-data:
+    driver: local
