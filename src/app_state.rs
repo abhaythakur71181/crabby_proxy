@@ -74,6 +74,9 @@ pub struct AppState {
     // Uses full string key instead of u64 hash to prevent collision-based auth bypass.
     pub auth_cache: Arc<dashmap::DashMap<(String, String), (i64, std::time::Instant)>>,
 
+    /// Per-user bandwidth throttler registry.
+    pub bandwidth_throttlers: Arc<crate::bandwidth::ThrottlerRegistry>,
+
     // Graceful shutdown signal
     pub shutdown_tx: tokio::sync::broadcast::Sender<()>,
 
@@ -244,6 +247,7 @@ impl AppState {
             shutdown_tx,
             quota_cache: Arc::new(dashmap::DashMap::new()),
             auth_cache: Arc::new(dashmap::DashMap::new()),
+            bandwidth_throttlers: Arc::new(crate::bandwidth::ThrottlerRegistry::new()),
             cache,
             event_bus: match crate::event_bus::EventBus::new(
                 &config.state.redis_url,
