@@ -35,6 +35,10 @@ pub async fn run_admin_server(
             "/api/connections/count",
             get(handlers::connections::count_connections),
         )
+        .route(
+            "/api/connections/live",
+            get(handlers::connections::live_connections),
+        )
         .route("/api/tunnels", get(handlers::tunnels::list_tunnels))
         .route("/api/tunnels", post(handlers::tunnels::create_tunnel))
         .route(
