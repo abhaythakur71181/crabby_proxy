@@ -359,7 +359,8 @@ mod tests {
                 access_schedule TEXT,
                 notes TEXT,
                 last_login_at INTEGER,
-                monthly_bandwidth_quota INTEGER
+                monthly_bandwidth_quota INTEGER,
+                bandwidth_rate_bps INTEGER NOT NULL DEFAULT 0
             )
             "#,
         )

@@ -169,6 +169,7 @@ mod tests {
             is_active: true,
             max_connections: 50,
             bandwidth_limit_mb: 5000,
+            bandwidth_rate_bps: 0,
             rate_limit_enabled: true,
             rate_limit_rps: 10,
             rate_limit_burst: 20,

@@ -233,6 +233,8 @@ pub struct CachedUser {
     pub allowed_targets: Option<String>,
     pub blocked_targets: Option<String>,
     pub access_schedule: Option<String>,
+    /// Bandwidth throttle in bytes/sec (0 = unlimited).
+    pub bandwidth_rate_bps: i64,
 }
 
 impl From<User> for CachedUser {
@@ -255,6 +257,7 @@ impl From<User> for CachedUser {
             allowed_targets: u.allowed_targets,
             blocked_targets: u.blocked_targets,
             access_schedule: u.access_schedule,
+            bandwidth_rate_bps: u.bandwidth_rate_bps,
         }
     }
 }
@@ -280,6 +283,7 @@ impl From<&User> for CachedUser {
             allowed_targets: u.allowed_targets.clone(),
             blocked_targets: u.blocked_targets.clone(),
             access_schedule: u.access_schedule.clone(),
+            bandwidth_rate_bps: u.bandwidth_rate_bps,
         }
     }
 }

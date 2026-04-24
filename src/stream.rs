@@ -260,6 +260,68 @@ where
     tunnel.relay_with_logging(label).await
 }
 
+/// Create a bidirectional tunnel with optional per-user bandwidth throttling.
+///
+/// If `throttler` is Some, both directions are rate-limited to the configured
+/// bytes-per-second. The throttler is shared between directions so the total
+/// bandwidth (upload + download) is capped.
+pub async fn create_throttled_tunnel<R1, W1, R2, W2>(
+    stream1: (R1, W1),
+    stream2: (R2, W2),
+    label1: &str,
+    label2: &str,
+    throttler: Option<crate::bandwidth::BandwidthThrottler>,
+) -> tokio::io::Result<(u64, u64)>
+where
+    R1: AsyncRead + AsyncReadExt + Unpin,
+    W1: AsyncWrite + AsyncWriteExt + Unpin,
+    R2: AsyncRead + AsyncReadExt + Unpin,
+    W2: AsyncWrite + AsyncWriteExt + Unpin,
+{
+    let tunnel1 = TunnelStream::new(stream1.0, stream2.1);
+    let tunnel2 = TunnelStream::new(stream2.0, stream1.1);
+
+    let t1 = throttler.clone();
+    let t2 = throttler;
+    let relay1 = relay_with_throttle(tunnel1, label1, t1);
+    let relay2 = relay_with_throttle(tunnel2, label2, t2);
+
+    tokio::try_join!(relay1, relay2)
+}
+
+/// Relay data with optional bandwidth throttling.
+async fn relay_with_throttle<R, W>(
+    mut tunnel: TunnelStream<R, W>,
+    label: &str,
+    throttler: Option<crate::bandwidth::BandwidthThrottler>,
+) -> tokio::io::Result<u64>
+where
+    R: AsyncReadExt + Unpin,
+    W: AsyncWriteExt + Unpin,
+{
+    let mut buf = [0u8; 65536];
+    let mut total = 0u64;
+
+    loop {
+        let n = tunnel.read.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+
+        // Throttle if configured
+        if let Some(ref t) = throttler {
+            t.consume(n).await;
+        }
+
+        tunnel.write.write_all(&buf[..n]).await?;
+        total += n as u64;
+    }
+
+    tracing::debug!("{} - {} bytes transferred", label, total);
+    tunnel.write.shutdown().await?;
+    Ok(total)
+}
+
 /// Create a bidirectional tunnel b/w two stream
 pub async fn create_bidirectional_tunnel<R1, W1, R2, W2>(
     stream1: (R1, W1),

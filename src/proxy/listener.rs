@@ -329,9 +329,15 @@ async fn handle_client(
     let relay_start = std::time::Instant::now();
     let target_addr_str = format!("{}:{}", target.host, target.port);
     let mut protocol = ctx.protocol.take().unwrap();
-    let result =
-        async_handle_client_with_target(&mut stream, client_addr, &mut protocol, target, state)
-            .await;
+    let result = async_handle_client_with_target(
+        &mut stream,
+        client_addr,
+        &mut protocol,
+        target,
+        state,
+        ctx.user_id,
+    )
+    .await;
 
     crate::metrics::CONNECTION_DURATION
         .with_label_values(&[proto_label])
@@ -444,6 +450,7 @@ async fn async_handle_client_with_target(
     protocol: &mut ProxyProtocol,
     target: ProxyTarget,
     state: &AppState,
+    user_id: Option<i64>,
 ) -> Result<(u64, u64), (io::Error, ErrorType)> {
     let target_addr = format!("{}:{}", target.host, target.port);
     let upstream_start = std::time::Instant::now();
@@ -511,7 +518,32 @@ async fn async_handle_client_with_target(
     let label_c2t = format!("[{}]: C[{}]->T[{}]", protocol, client_addr, target_addr);
     let label_t2c = format!("[{}]: T[{}]->C[{}]", protocol, target_addr, client_addr);
 
-    match create_bidirectional_tunnel(client_halves, target_halves, &label_c2t, &label_t2c).await {
+    // Look up per-user bandwidth throttle
+    let throttler = if let Some(uid) = user_id {
+        if let Some(user) = state.cached_user_by_id(uid).await {
+            if user.bandwidth_rate_bps > 0 {
+                state
+                    .bandwidth_throttlers
+                    .get_or_create(uid, user.bandwidth_rate_bps as u64)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    match crate::stream::create_throttled_tunnel(
+        client_halves,
+        target_halves,
+        &label_c2t,
+        &label_t2c,
+        throttler,
+    )
+    .await
+    {
         Ok((c2t, t2c)) => {
             tracing::info!(
                 "[{}]: Closed tunnel {} <-> {} (sent: {}, received: {})",

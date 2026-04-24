@@ -26,6 +26,8 @@ pub struct User {
     // Limits
     pub max_connections: i32,
     pub bandwidth_limit_mb: i64,
+    /// Per-user bandwidth throttle in bytes/sec (0 = unlimited).
+    pub bandwidth_rate_bps: i64,
 
     // Rate limiting
     pub rate_limit_enabled: bool,
@@ -75,6 +77,7 @@ mod tests {
             is_active: true,
             max_connections: 5,
             bandwidth_limit_mb: 1000,
+            bandwidth_rate_bps: 0, // Unlimited by default
             rate_limit_enabled: true,
             rate_limit_rps: 10,
             rate_limit_burst: 20,
