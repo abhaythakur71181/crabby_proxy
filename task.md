@@ -196,10 +196,16 @@ Comprehensive audit of the codebase as of 2026-03-25.
 - [x] #26 — Structured access logging (target: access_log)
 - [x] #28 — TLS certificate hot reload via ArcSwap
 - [x] #30 — Deep health check endpoint (/health/deep)
+- [x] #13 — mTLS (mutual TLS) client certificate authentication
+- [x] #15 — HTTP/2 non-CONNECT request forwarding
+- [x] #19 — WebSocket live connection monitoring (/api/connections/live)
+- [x] #21 — Integration tests (7 end-to-end tests)
+- [x] #22 — HTTP/2 handler tests (11 unit tests)
+- [x] #23 — Clone audit (codebase already optimized)
+- [x] #25 — Redis-backed distributed rate limiter
 
 ## REMAINING
 
 | Priority | Items | Effort |
 |----------|-------|--------|
-| **P3 - Low** | #13 (mTLS), #19 (WebSocket live monitoring) | High |
 | **P4 - Future** | #27 (bandwidth shaping/throttling), #29 (plugin/middleware system) | High |
