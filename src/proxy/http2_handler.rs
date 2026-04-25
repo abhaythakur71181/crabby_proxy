@@ -67,9 +67,15 @@ pub async fn handle_h2_connection(stream: TcpStream, client_addr: SocketAddr, st
 
         // Non-CONNECT requests: forward as HTTP proxy (GET, POST, etc.)
         if method != http::Method::CONNECT {
+            // Extract auth header before moving request
+            let auth_header = request
+                .headers()
+                .get("proxy-authorization")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
             let state_ref = state_arc.clone();
             tokio::spawn(async move {
-                handle_h2_forward(request, respond, client_addr, &state_ref).await;
+                handle_h2_forward_validated(request, respond, client_addr, auth_header, &state_ref).await;
             });
             continue;
         }
@@ -363,6 +369,7 @@ async fn handle_h2_tunnel(
     .map_err(|_| "DNS resolution timeout")??;
 
     // Connect to upstream
+    let connect_start = std::time::Instant::now();
     let upstream = match timeout(crate::constants::UPSTREAM_CONNECT_TIMEOUT, TcpStream::connect(resolved_addr)).await {
         Ok(Ok(stream)) => stream,
         Ok(Err(e)) => {
@@ -399,7 +406,7 @@ async fn handle_h2_tunnel(
 
     crate::metrics::UPSTREAM_CONNECT_DURATION
         .with_label_values(&["HTTP2"])
-        .observe(0.0); // TODO: track actual duration
+        .observe(connect_start.elapsed().as_secs_f64());
 
     // Send 200 OK to indicate the tunnel is established
     let response = http::Response::builder()
@@ -499,14 +506,77 @@ async fn handle_h2_tunnel(
     Ok((bytes_sent, bytes_received))
 }
 
-/// Forward a non-CONNECT HTTP/2 request to the upstream server.
-/// This handles regular HTTP methods (GET, POST, etc.) as a forward proxy.
-async fn handle_h2_forward(
+lazy_static::lazy_static! {
+    /// Dedicated HTTP client for HTTP/2 forward proxy requests.
+    /// Separate from the webhook client — has its own timeout and pool settings.
+    static ref H2_FORWARD_CLIENT: reqwest::Client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .pool_max_idle_per_host(10)
+        .user_agent("crabby-proxy/1.0")
+        .build()
+        .expect("Failed to create H2 forward proxy client");
+}
+
+/// Forward a non-CONNECT HTTP/2 request with full validation pipeline.
+async fn handle_h2_forward_validated(
     request: http::Request<h2::RecvStream>,
     mut respond: h2::server::SendResponse<bytes::Bytes>,
     client_addr: SocketAddr,
+    auth_header: Option<String>,
     state: &AppState,
 ) {
+    let conn_id = uuid::Uuid::new_v4();
+    let mut ctx = ConnectionContext::new(client_addr, conn_id, state).await;
+    ctx.protocol = Some(ProxyProtocol::HTTP2);
+
+    // ── Authentication ──
+    if ctx.config.auth_required {
+        let user_id = match &auth_header {
+            Some(header) => authenticate_h2(header, state).await,
+            None => None,
+        };
+        match user_id {
+            Some(uid) => {
+                ctx.user_id = Some(uid);
+            }
+            None => {
+                tracing::warn!("[HTTP2-FWD] Auth failed for {}", client_addr);
+                let resp = http::Response::builder()
+                    .status(http::StatusCode::PROXY_AUTHENTICATION_REQUIRED)
+                    .header("proxy-authenticate", "Basic realm=\"Proxy\"")
+                    .body(())
+                    .unwrap_or_else(|_| http::Response::new(()));
+                let _ = respond.send_response(resp, true);
+                return;
+            }
+        }
+    }
+
+    // Resolve admin status
+    if let Some(uid) = ctx.effective_uid() {
+        ctx.is_admin = state
+            .cached_user_by_id(uid)
+            .await
+            .map(|u| u.role == "root_admin" || u.role == "admin")
+            .unwrap_or(false);
+    }
+
+    // ── Phase 2: Post-Auth validators ──
+    for result in [
+        validators::validate_protocol_restriction(&ctx, state).await,
+        validators::validate_user_rate_limit(&ctx, state).await,
+    ] {
+        if let Verdict::Deny(reason) = result {
+            tracing::warn!("[HTTP2-FWD] {} denied: {}", client_addr, reason);
+            let resp = http::Response::builder()
+                .status(http::StatusCode::FORBIDDEN)
+                .body(())
+                .unwrap_or_else(|_| http::Response::new(()));
+            let _ = respond.send_response(resp, true);
+            return;
+        }
+    }
+
     let method = request.method().clone();
     let uri = request.uri().clone();
 
@@ -514,10 +584,8 @@ async fn handle_h2_forward(
     let target_url = uri.to_string();
     if !target_url.starts_with("http://") && !target_url.starts_with("https://") {
         tracing::warn!(
-            "[HTTP2] Non-CONNECT request with non-absolute URI from {}: {} {}",
-            client_addr,
-            method,
-            uri
+            "[HTTP2-FWD] Non-absolute URI from {}: {} {}",
+            client_addr, method, uri
         );
         let resp = http::Response::builder()
             .status(http::StatusCode::BAD_REQUEST)
@@ -527,11 +595,41 @@ async fn handle_h2_forward(
         return;
     }
 
+    // Extract host from URL for target validation
+    if let Some(authority) = uri.authority() {
+        ctx.target_host = Some(authority.host().to_string());
+    }
+
+    // ── Phase 3: Post-Target validators ──
+    for result in [
+        validators::validate_target_domain(&ctx, state).await,
+        validators::validate_access_schedule(&ctx, state).await,
+    ] {
+        if let Verdict::Deny(reason) = result {
+            tracing::warn!("[HTTP2-FWD] {} denied: {}", client_addr, reason);
+            let resp = http::Response::builder()
+                .status(http::StatusCode::FORBIDDEN)
+                .body(())
+                .unwrap_or_else(|_| http::Response::new(()));
+            let _ = respond.send_response(resp, true);
+            return;
+        }
+    }
+
+    // ── Phase 4: Quota check ──
+    if let Verdict::Deny(reason) = validators::validate_quota(&ctx, state).await {
+        tracing::warn!("[HTTP2-FWD] {} denied: {}", client_addr, reason);
+        let resp = http::Response::builder()
+            .status(http::StatusCode::TOO_MANY_REQUESTS)
+            .body(())
+            .unwrap_or_else(|_| http::Response::new(()));
+        let _ = respond.send_response(resp, true);
+        return;
+    }
+
     tracing::debug!(
-        "[HTTP2] Forwarding {} {} for {}",
-        method,
-        target_url,
-        client_addr
+        "[HTTP2-FWD] Forwarding {} {} for {}",
+        method, target_url, client_addr
     );
 
     // Read request body
@@ -544,7 +642,7 @@ async fn handle_h2_forward(
                 body_data.extend_from_slice(&data);
             }
             Err(e) => {
-                tracing::error!("[HTTP2] Error reading request body: {}", e);
+                tracing::error!("[HTTP2-FWD] Error reading request body: {}", e);
                 let resp = http::Response::builder()
                     .status(http::StatusCode::BAD_REQUEST)
                     .body(())
@@ -555,15 +653,15 @@ async fn handle_h2_forward(
         }
     }
 
-    // Forward via reqwest
-    let client = &*super::super::webhook::WEBHOOK_CLIENT;
-    let upstream_req = client
+    // Forward via dedicated HTTP client
+    let upstream_req = H2_FORWARD_CLIENT
         .request(
             reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET),
             &target_url,
         )
         .body(body_data);
 
+    let started_at = std::time::Instant::now();
     match upstream_req.send().await {
         Ok(upstream_resp) => {
             let status = upstream_resp.status();
@@ -577,6 +675,7 @@ async fn handle_h2_forward(
             }
 
             let resp_body = upstream_resp.bytes().await.unwrap_or_default();
+            let bytes_transferred = resp_body.len() as u64;
             let response = builder.body(()).unwrap_or_else(|_| http::Response::new(()));
 
             match respond.send_response(response, resp_body.is_empty()) {
@@ -586,20 +685,41 @@ async fn handle_h2_forward(
                     }
                 }
                 Err(e) => {
-                    tracing::error!("[HTTP2] Failed to send forwarded response: {}", e);
+                    tracing::error!("[HTTP2-FWD] Failed to send response: {}", e);
                 }
             }
 
             crate::metrics::REQUESTS_TOTAL
                 .with_label_values(&["HTTP2", "success"])
                 .inc();
+            crate::metrics::BYTES_TRANSFERRED
+                .with_label_values(&["received"])
+                .inc_by(bytes_transferred);
+
+            // Track bandwidth for quota
+            if let Some(uid) = ctx.effective_uid() {
+                state
+                    .track_bandwidth(uid, bytes_transferred as i64)
+                    .await;
+            }
+
+            tracing::info!(
+                target: "access_log",
+                client_ip = %client_addr.ip(),
+                target = %target_url,
+                protocol = "HTTP2",
+                method = %method,
+                user_id = ?ctx.effective_uid(),
+                bytes = bytes_transferred,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                status = "success",
+                "h2 forward completed"
+            );
         }
         Err(e) => {
             tracing::error!(
-                "[HTTP2] Forward request failed for {} {}: {}",
-                method,
-                target_url,
-                e
+                "[HTTP2-FWD] Forward failed for {} {}: {}",
+                method, target_url, e
             );
             let resp = http::Response::builder()
                 .status(http::StatusCode::BAD_GATEWAY)
