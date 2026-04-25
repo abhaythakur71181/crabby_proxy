@@ -203,9 +203,7 @@ Comprehensive audit of the codebase as of 2026-03-25.
 - [x] #22 — HTTP/2 handler tests (11 unit tests)
 - [x] #23 — Clone audit (codebase already optimized)
 - [x] #25 — Redis-backed distributed rate limiter
+- [x] #27 — Bandwidth shaping/throttling (token bucket per-user, ThrottlerRegistry)
+- [x] #29 — Plugin/middleware system (Phase-based MiddlewareChain wired into pipeline)
 
-## REMAINING
-
-| Priority | Items | Effort |
-|----------|-------|--------|
-| **P4 - Future** | #27 (bandwidth shaping/throttling), #29 (plugin/middleware system) | High |
+## STATUS: ALL 30/30 COMPLETE

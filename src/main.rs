@@ -15,6 +15,7 @@ mod event_bus;
 mod geo_filter;
 mod ip_filter;
 mod metrics;
+pub mod middleware;
 mod proxy;
 mod proxy_protocol;
 mod rate_limit;

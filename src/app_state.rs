@@ -77,6 +77,9 @@ pub struct AppState {
     /// Per-user bandwidth throttler registry.
     pub bandwidth_throttlers: Arc<crate::bandwidth::ThrottlerRegistry>,
 
+    /// Plugin middleware chain for custom validators.
+    pub middleware: Arc<crate::middleware::MiddlewareChain>,
+
     // Graceful shutdown signal
     pub shutdown_tx: tokio::sync::broadcast::Sender<()>,
 
@@ -248,6 +251,7 @@ impl AppState {
             quota_cache: Arc::new(dashmap::DashMap::new()),
             auth_cache: Arc::new(dashmap::DashMap::new()),
             bandwidth_throttlers: Arc::new(crate::bandwidth::ThrottlerRegistry::new()),
+            middleware: Arc::new(crate::middleware::MiddlewareChain::new()),
             cache,
             event_bus: match crate::event_bus::EventBus::new(
                 &config.state.redis_url,

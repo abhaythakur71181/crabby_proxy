@@ -143,6 +143,7 @@ async fn handle_client(
 ) {
     use super::pipeline::Verdict;
     use super::validators;
+    use crate::middleware::Phase;
     let state: &AppState = &state_arc;
     let mut ctx = super::pipeline::ConnectionContext::new(client_addr, conn_id, state).await;
     // ── Phase 1: Pre-Connection (IP-based, no stream needed) ────────────
@@ -155,6 +156,11 @@ async fn handle_client(
             tracing::warn!("{} denied: {}", client_addr, reason);
             return;
         }
+    }
+    // Run PreAuth plugin middleware
+    if let Verdict::Deny(reason) = state.middleware.run(Phase::PreAuth, &ctx, state).await {
+        tracing::warn!("{} denied by middleware: {}", client_addr, reason);
+        return;
     }
     // ── Processing: Protocol detection ──────────────────────────────────
     let protocol = match ProxyProtocol::detect_from_stream(&mut client_stream).await {
@@ -241,6 +247,11 @@ async fn handle_client(
             return;
         }
     }
+    // Run PostAuth plugin middleware
+    if let Verdict::Deny(reason) = state.middleware.run(Phase::PostAuth, &ctx, state).await {
+        tracing::warn!("{} denied by middleware: {}", client_addr, reason);
+        return;
+    }
     // ── Processing: Parse target ────────────────────────────────────────
     let (target, mut stream) = if matches!(protocol, ProxyProtocol::HTTP | ProxyProtocol::HTTPS) {
         match protocol
@@ -281,6 +292,11 @@ async fn handle_client(
             tracing::warn!("{} denied: {}", client_addr, reason);
             return;
         }
+    }
+    // Run PostTarget plugin middleware
+    if let Verdict::Deny(reason) = state.middleware.run(Phase::PostTarget, &ctx, state).await {
+        tracing::warn!("{} denied by middleware: {}", client_addr, reason);
+        return;
     }
     // ── Connection tracking + metrics ───────────────────────────────────
     let proto_label = protocol.as_str();
