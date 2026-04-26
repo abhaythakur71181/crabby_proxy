@@ -227,7 +227,7 @@ pub async fn update_user(
     let now = chrono::Utc::now().timestamp();
 
     // Build update query dynamically based on what fields are provided
-    let user = get_user_by_id(pool, user_id)
+    let _user = get_user_by_id(pool, user_id)
         .await?
         .ok_or(sqlx::Error::RowNotFound)?;
 

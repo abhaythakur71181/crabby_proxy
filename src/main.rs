@@ -5,11 +5,14 @@ mod bandwidth;
 mod cache;
 mod config;
 mod config_env;
+#[allow(dead_code)]
 mod connection;
 mod connection_pool;
+#[allow(dead_code)]
 mod constants;
 mod db;
 mod dns_cache;
+#[allow(dead_code)]
 mod error;
 mod event_bus;
 mod geo_filter;
@@ -18,13 +21,19 @@ mod metrics;
 pub mod middleware;
 mod proxy;
 mod proxy_protocol;
+#[allow(dead_code)]
 mod rate_limit;
 mod state;
+#[allow(dead_code)]
 mod stream;
 mod target_filter;
+#[allow(dead_code)]
 mod tunnel;
+#[allow(dead_code)]
 mod utils;
+#[allow(dead_code)]
 mod validation;
+#[allow(dead_code)]
 mod webhook;
 
 use crate::app_state::AppState;

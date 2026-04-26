@@ -12,6 +12,7 @@ lazy_static! {
     static ref BUFFER_POOL: BytePool<Vec<u8>> = BytePool::<Vec<u8>>::new();
 }
 
+#[allow(dead_code)]
 pub async fn hand_shake(
     mut client_stream: TcpStream,
     target: ProxyTarget,

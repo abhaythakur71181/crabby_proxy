@@ -928,10 +928,12 @@ pub struct ProxyTarget {
     pub port: u16,
 }
 
+#[allow(dead_code)]
 pub struct MultiProtocolProxy {
     listener: tokio::net::TcpListener,
 }
 
+#[allow(dead_code)]
 impl MultiProtocolProxy {
     pub async fn new(bind_addr: &str) -> io::Result<Self> {
         let listener = tokio::net::TcpListener::bind(bind_addr).await?;

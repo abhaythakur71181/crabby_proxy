@@ -420,8 +420,8 @@ async fn handle_h2_tunnel(
         authority
     );
 
-    let mut bytes_sent: u64 = 0;
-    let mut bytes_received: u64 = 0;
+    let bytes_sent: u64;
+    let bytes_received: u64;
 
     // Use Arc+AtomicU64 to share byte counts between the two tasks
     let sent_counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));

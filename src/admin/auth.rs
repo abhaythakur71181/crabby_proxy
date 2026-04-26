@@ -156,12 +156,14 @@ async fn check_user_rate_limit(state: &AppState, user_id: i64) -> Result<(), &'s
 }
 
 /// Public endpoints
+#[allow(dead_code)]
 pub fn is_public_endpoint(path: &str) -> bool {
     matches!(path, "/health" | "/metrics" | "/api/login")
 }
 
 /// Current authenticated user (extracted from JWT in middleware)
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CurrentUser {
     pub id: i64,
     pub username: String,
