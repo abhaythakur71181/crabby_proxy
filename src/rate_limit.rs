@@ -81,12 +81,12 @@ pub struct UserRateLimiter {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct UserRateLimitConfig {
-    pub(crate) rps: u32,
-    pub(crate) burst: u32,
-    pub(crate) enabled: bool,
-    pub(crate) max_connections: i32,
-    pub(crate) cached_at: std::time::Instant,
+pub struct UserRateLimitConfig {
+    pub rps: u32,
+    pub burst: u32,
+    pub enabled: bool,
+    pub max_connections: i32,
+    pub cached_at: std::time::Instant,
 }
 
 impl UserRateLimiter {
@@ -263,6 +263,7 @@ impl Default for LoginRateLimiter {
 ///
 /// Uses INCR + EXPIRE for atomic increment-and-expire in a single round trip.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct RedisRateLimiter {
     conn: redis::aio::ConnectionManager,
     key_prefix: String,

@@ -27,12 +27,14 @@ impl ApiError {
     pub fn not_found(msg: impl Into<String>) -> Self {
         Self { status: StatusCode::NOT_FOUND, error: msg.into(), detail: None }
     }
+    #[allow(dead_code)]
     pub fn conflict(msg: impl Into<String>) -> Self {
         Self { status: StatusCode::CONFLICT, error: msg.into(), detail: None }
     }
     pub fn internal(msg: impl Into<String>) -> Self {
         Self { status: StatusCode::INTERNAL_SERVER_ERROR, error: msg.into(), detail: None }
     }
+    #[allow(dead_code)]
     pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
         self
