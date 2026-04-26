@@ -10,7 +10,6 @@ use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 /// Events that can be published across instances.
 #[derive(Debug, Clone, Serialize, Deserialize)]
