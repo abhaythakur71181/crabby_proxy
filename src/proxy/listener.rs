@@ -2,12 +2,12 @@ use super::protocol::ProxyTarget;
 use crate::app_state::AppState;
 use crate::proxy::protocol::ProxyProtocol;
 use crate::stream::{
-    create_bidirectional_tunnel, BufferedClientStream, ClientStream, TunnelStream,
+    BufferedClientStream, ClientStream,
 };
 use crate::utils;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};

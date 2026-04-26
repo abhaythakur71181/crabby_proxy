@@ -3,5 +3,5 @@ pub mod memory;
 pub mod redis;
 
 pub use self::redis::RedisBackend;
-pub use backend::{ConnectionInfo, StateBackend, StateBackendError, StateResult};
+pub use backend::StateBackend;
 pub use memory::MemoryBackend;
