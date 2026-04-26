@@ -373,24 +373,25 @@ async fn handle_client(
                 .with_label_values(&["received"])
                 .inc_by(bytes_received);
             if let Some(uid) = ctx.effective_uid() {
-                let _ = crate::db::usage::record_usage(
-                    &state.db_pool,
-                    uid,
-                    &conn_id,
-                    &client_ip_str,
-                    &target_addr_str,
-                    proto_label,
-                    started_at,
-                    ended_at,
-                    bytes_sent as i64,
-                    bytes_received as i64,
-                    "success",
-                )
-                .await;
+                // Fire-and-forget: record usage in background to avoid blocking
+                // the semaphore permit while SQLite writes complete.
+                let db = state.db_pool.clone();
+                let target = target_addr_str.clone();
+                let ip = client_ip_str.clone();
+                let proto = proto_label.to_string();
+                tokio::spawn(async move {
+                    let _ = crate::db::usage::record_usage(
+                        &db, uid, &conn_id, &ip, &target, &proto,
+                        started_at, ended_at,
+                        bytes_sent as i64, bytes_received as i64,
+                        "success",
+                    ).await;
+                });
                 state
                     .track_bandwidth(uid, bytes_sent as i64 + bytes_received as i64)
                     .await;
-                state.invalidate_quota_cache(uid).await;
+                // Quota cache invalidation removed — 30s DashMap TTL handles staleness.
+                // Explicit invalidation only occurs on admin quota changes via event bus.
             }
             crate::metrics::REQUESTS_TOTAL
                 .with_label_values(&[proto_label, "success"])
@@ -437,21 +438,17 @@ async fn handle_client(
                 "connection failed"
             );
             if let Some(uid) = ctx.effective_uid() {
-                let _ = crate::db::usage::record_usage(
-                    &state.db_pool,
-                    uid,
-                    &conn_id,
-                    &client_ip_str,
-                    &target_addr_str,
-                    proto_label,
-                    started_at,
-                    ended_at,
-                    0,
-                    0,
-                    error_label,
-                )
-                .await;
-                state.invalidate_quota_cache(uid).await;
+                let db = state.db_pool.clone();
+                let target = target_addr_str.clone();
+                let ip = client_ip_str.clone();
+                let proto = proto_label.to_string();
+                let err_label = error_label.to_string();
+                tokio::spawn(async move {
+                    let _ = crate::db::usage::record_usage(
+                        &db, uid, &conn_id, &ip, &target, &proto,
+                        started_at, ended_at, 0, 0, &err_label,
+                    ).await;
+                });
             }
             if error_type != ErrorType::Tunnel {
                 let _ = send_error_response(&protocol, &mut stream, error_type).await;
