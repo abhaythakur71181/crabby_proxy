@@ -272,24 +272,20 @@ async fn handle_h2_connect_validated(
                 .with_label_values(&["HTTP2", "success"])
                 .inc();
             if let Some(uid) = ctx.effective_uid() {
-                let _ = crate::db::usage::record_usage(
-                    &state.db_pool,
-                    uid,
-                    &conn_id,
-                    &client_addr.ip().to_string(),
-                    &authority,
-                    "HTTP2",
-                    started_at,
-                    ended_at,
-                    bytes_sent as i64,
-                    bytes_received as i64,
-                    "success",
-                )
-                .await;
+                let db = state.db_pool.clone();
+                let ip = client_addr.ip().to_string();
+                let auth = authority.clone();
+                tokio::spawn(async move {
+                    let _ = crate::db::usage::record_usage(
+                        &db, uid, &conn_id, &ip, &auth, "HTTP2",
+                        started_at, ended_at,
+                        bytes_sent as i64, bytes_received as i64,
+                        "success",
+                    ).await;
+                });
                 state
                     .track_bandwidth(uid, bytes_sent as i64 + bytes_received as i64)
                     .await;
-                state.invalidate_quota_cache(uid).await;
             }
         }
         Err(e) => {
@@ -298,21 +294,15 @@ async fn handle_h2_connect_validated(
                 .with_label_values(&["HTTP2", "failed"])
                 .inc();
             if let Some(uid) = ctx.effective_uid() {
-                let _ = crate::db::usage::record_usage(
-                    &state.db_pool,
-                    uid,
-                    &conn_id,
-                    &client_addr.ip().to_string(),
-                    &authority,
-                    "HTTP2",
-                    started_at,
-                    ended_at,
-                    0,
-                    0,
-                    "failed",
-                )
-                .await;
-                state.invalidate_quota_cache(uid).await;
+                let db = state.db_pool.clone();
+                let ip = client_addr.ip().to_string();
+                let auth = authority.clone();
+                tokio::spawn(async move {
+                    let _ = crate::db::usage::record_usage(
+                        &db, uid, &conn_id, &ip, &auth, "HTTP2",
+                        started_at, ended_at, 0, 0, "failed",
+                    ).await;
+                });
             }
         }
     }
