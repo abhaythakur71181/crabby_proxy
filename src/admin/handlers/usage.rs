@@ -1,8 +1,8 @@
+use super::models::ApiError;
 use crate::app_state::AppState;
 use crate::db::usage;
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -47,19 +47,18 @@ pub async fn get_user_usage_stats(
     Path(user_id): Path<i64>,
     axum::Extension(current_user_id): axum::Extension<i64>,
     Query(params): Query<UsageQuery>,
-) -> Result<Json<UsageStatsResponse>, StatusCode> {
-    // Extract current user and check authorization
+) -> Result<Json<UsageStatsResponse>, ApiError> {
     let current_user =
         crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
     if !current_user.can_access_user(user_id) {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(ApiError::forbidden("Cannot access other users' usage data"));
     }
     let days = params.days.unwrap_or(30);
     let stats = usage::get_user_usage(&state.db_pool, user_id, days)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get user usage: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            ApiError::internal("Failed to retrieve usage statistics")
         })?;
 
     Ok(Json(UsageStatsResponse {
@@ -78,12 +77,11 @@ pub async fn get_recent_usage(
     Path(user_id): Path<i64>,
     axum::Extension(current_user_id): axum::Extension<i64>,
     Query(params): Query<UsageQuery>,
-) -> Result<Json<Vec<UsageRecordResponse>>, StatusCode> {
-    // Extract current user and check authorization
+) -> Result<Json<Vec<UsageRecordResponse>>, ApiError> {
     let current_user =
         crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
     if !current_user.can_access_user(user_id) {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(ApiError::forbidden("Cannot access other users' usage data"));
     }
     let limit = params.limit.unwrap_or(100);
 
@@ -91,7 +89,7 @@ pub async fn get_recent_usage(
         .await
         .map_err(|e| {
             tracing::error!("Failed to get recent usage: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            ApiError::internal("Failed to retrieve usage records")
         })?;
 
     let response = records
@@ -119,18 +117,17 @@ pub async fn get_all_time_usage(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
     axum::Extension(current_user_id): axum::Extension<i64>,
-) -> Result<Json<UsageStatsResponse>, StatusCode> {
-    // Extract current user and check authorization
+) -> Result<Json<UsageStatsResponse>, ApiError> {
     let current_user =
         crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
     if !current_user.can_access_user(user_id) {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(ApiError::forbidden("Cannot access other users' usage data"));
     }
     let stats = usage::get_all_time_usage(&state.db_pool, user_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get all-time usage: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            ApiError::internal("Failed to retrieve usage statistics")
         })?;
 
     Ok(Json(UsageStatsResponse {
@@ -168,7 +165,7 @@ pub async fn get_system_usage_summary(
     State(state): State<Arc<AppState>>,
     axum::Extension(current_user_id): axum::Extension<i64>,
     Query(params): Query<UsageQuery>,
-) -> Result<Json<SystemUsageSummaryResponse>, StatusCode> {
+) -> Result<Json<SystemUsageSummaryResponse>, ApiError> {
     let current_user =
         crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
     current_user.require_admin()?;
@@ -180,14 +177,14 @@ pub async fn get_system_usage_summary(
         .await
         .map_err(|e| {
             tracing::error!("Failed to get system usage stats: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            ApiError::internal("Failed to retrieve system usage statistics")
         })?;
 
     let top_users = usage::get_top_users_by_bandwidth(&state.db_pool, days, top_limit)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get top users: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            ApiError::internal("Failed to retrieve top users")
         })?;
 
     Ok(Json(SystemUsageSummaryResponse {

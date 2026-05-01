@@ -1,4 +1,5 @@
-use axum::{extract::State, http::StatusCode, Json};
+use super::models::ApiError;
+use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
 
 use crate::app_state::AppState;
@@ -59,7 +60,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> Json<ConfigRespon
 pub async fn reload_config(
     State(state): State<Arc<AppState>>,
     axum::Extension(current_user_id): axum::Extension<i64>,
-) -> Result<Json<ReloadResponse>, StatusCode> {
+) -> Result<Json<ReloadResponse>, ApiError> {
     let current_user =
         crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
     current_user.require_admin()?;

@@ -1,6 +1,8 @@
+use super::models::ApiError;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
+    response::IntoResponse,
     Json,
 };
 use serde::Deserialize;
@@ -24,12 +26,12 @@ pub struct AddMemberRequest {
 pub async fn create_group(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateGroupRequest>,
-) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
+) -> Result<impl IntoResponse, ApiError> {
     let id = groups::create_group(&state.db_pool, &req.name, req.description.as_deref())
         .await
         .map_err(|e| {
             tracing::error!("Failed to create group: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            ApiError::internal("Failed to create group")
         })?;
 
     Ok((
@@ -41,13 +43,13 @@ pub async fn create_group(
 /// GET /api/groups — List all groups
 pub async fn list_groups(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<groups::UserGroup>>, StatusCode> {
+) -> Result<Json<Vec<groups::UserGroup>>, ApiError> {
     groups::list_groups(&state.db_pool)
         .await
         .map(Json)
         .map_err(|e| {
             tracing::error!("Failed to list groups: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            ApiError::internal("Failed to list groups")
         })
 }
 
@@ -55,26 +57,29 @@ pub async fn list_groups(
 pub async fn get_group(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
-) -> Result<Json<groups::UserGroup>, StatusCode> {
+) -> Result<Json<groups::UserGroup>, ApiError> {
     groups::get_group(&state.db_pool, id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get group: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            ApiError::internal("Failed to retrieve group")
         })?
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or_else(|| ApiError::not_found(format!("Group {} not found", id)))
         .map(Json)
 }
 
 /// DELETE /api/groups/:id — Delete a group
-pub async fn delete_group(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> StatusCode {
-    match groups::delete_group(&state.db_pool, id).await {
-        Ok(_) => StatusCode::NO_CONTENT,
-        Err(e) => {
+pub async fn delete_group(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<impl IntoResponse, ApiError> {
+    groups::delete_group(&state.db_pool, id)
+        .await
+        .map_err(|e| {
             tracing::error!("Failed to delete group: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    }
+            ApiError::internal("Failed to delete group")
+        })?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// POST /api/groups/:id/members — Add a user to a group
@@ -82,40 +87,40 @@ pub async fn add_member(
     State(state): State<Arc<AppState>>,
     Path(group_id): Path<i64>,
     Json(req): Json<AddMemberRequest>,
-) -> StatusCode {
-    match groups::add_user_to_group(&state.db_pool, req.user_id, group_id).await {
-        Ok(_) => StatusCode::CREATED,
-        Err(e) => {
+) -> Result<impl IntoResponse, ApiError> {
+    groups::add_user_to_group(&state.db_pool, req.user_id, group_id)
+        .await
+        .map_err(|e| {
             tracing::error!("Failed to add member: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    }
+            ApiError::internal("Failed to add member to group")
+        })?;
+    Ok(StatusCode::CREATED)
 }
 
 /// DELETE /api/groups/:id/members/:user_id — Remove a user from a group
 pub async fn remove_member(
     State(state): State<Arc<AppState>>,
     Path((group_id, user_id)): Path<(i64, i64)>,
-) -> StatusCode {
-    match groups::remove_user_from_group(&state.db_pool, user_id, group_id).await {
-        Ok(_) => StatusCode::NO_CONTENT,
-        Err(e) => {
+) -> Result<impl IntoResponse, ApiError> {
+    groups::remove_user_from_group(&state.db_pool, user_id, group_id)
+        .await
+        .map_err(|e| {
             tracing::error!("Failed to remove member: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    }
+            ApiError::internal("Failed to remove member from group")
+        })?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// GET /api/groups/:id/members — List members of a group
 pub async fn list_members(
     State(state): State<Arc<AppState>>,
     Path(group_id): Path<i64>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let members = groups::get_group_members(&state.db_pool, group_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to list members: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            ApiError::internal("Failed to list group members")
         })?;
 
     Ok(Json(serde_json::json!({
@@ -129,12 +134,12 @@ pub async fn list_members(
 pub async fn list_user_groups(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
-) -> Result<Json<Vec<groups::UserGroup>>, StatusCode> {
+) -> Result<Json<Vec<groups::UserGroup>>, ApiError> {
     groups::get_user_groups(&state.db_pool, user_id)
         .await
         .map(Json)
         .map_err(|e| {
             tracing::error!("Failed to list user groups: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            ApiError::internal("Failed to list user groups")
         })
 }

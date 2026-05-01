@@ -1,6 +1,8 @@
+use super::models::ApiError;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
+    response::IntoResponse,
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -37,10 +39,10 @@ pub async fn list_tunnels(State(state): State<Arc<AppState>>) -> Json<TunnelsLis
 pub async fn create_tunnel(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateTunnelRequest>,
-) -> Result<(StatusCode, Json<crate::tunnel::manager::TunnelInfo>), StatusCode> {
+) -> Result<impl IntoResponse, ApiError> {
     let config = state.config.load();
     if !config.features.reverse_tunnels {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(ApiError::forbidden("Reverse tunnels are disabled"));
     }
     drop(config);
 
@@ -58,7 +60,7 @@ pub async fn create_tunnel(
         .as_deref()
         .unwrap_or("127.0.0.1:0")
         .parse()
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+        .map_err(|_| ApiError::bad_request("Invalid target address"))?;
     let mut tunnels = state.tunnels.write().await;
     match tunnels
         .create_tunnel_admin(service_type, req.port, target_addr)
@@ -70,22 +72,25 @@ pub async fn create_tunnel(
         }
         Err(e) => {
             tracing::error!("Failed to create tunnel: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            Err(ApiError::internal("Failed to create tunnel"))
         }
     }
 }
 
 /// Close a tunnel
-pub async fn close_tunnel(State(state): State<Arc<AppState>>, Path(port): Path<u16>) -> StatusCode {
+pub async fn close_tunnel(
+    State(state): State<Arc<AppState>>,
+    Path(port): Path<u16>,
+) -> Result<impl IntoResponse, ApiError> {
     let mut tunnels = state.tunnels.write().await;
     match tunnels.close_tunnel(port).await {
         Ok(_) => {
             tracing::info!("Closed tunnel on port {}", port);
-            StatusCode::NO_CONTENT
+            Ok(StatusCode::NO_CONTENT)
         }
-        Err(_) => {
-            tracing::warn!("Failed to close tunnel on port {} - not found", port);
-            StatusCode::NOT_FOUND
-        }
+        Err(_) => Err(ApiError::not_found(format!(
+            "Tunnel on port {} not found",
+            port
+        ))),
     }
 }
