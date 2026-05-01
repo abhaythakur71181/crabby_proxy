@@ -1,6 +1,6 @@
+use super::models::ApiError;
 use axum::{
     extract::{Query, State},
-    http::StatusCode,
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -29,7 +29,7 @@ pub struct AuditLogResponse {
 pub async fn list_audit_log(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AuditLogQuery>,
-) -> Result<Json<AuditLogResponse>, StatusCode> {
+) -> Result<Json<AuditLogResponse>, ApiError> {
     let limit = params.limit.unwrap_or(50).min(200);
     let offset = params.offset.unwrap_or(0);
     let entries = audit_log::get_audit_log(
@@ -42,14 +42,14 @@ pub async fn list_audit_log(
     .await
     .map_err(|e| {
         tracing::error!("Failed to get audit log: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
+        ApiError::internal("Failed to retrieve audit log")
     })?;
     let total =
         audit_log::count_audit_entries(&state.db_pool, params.user_id, params.action.as_deref())
             .await
             .map_err(|e| {
                 tracing::error!("Failed to count audit entries: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR
+                ApiError::internal("Failed to count audit entries")
             })?;
     Ok(Json(AuditLogResponse {
         entries,
@@ -63,12 +63,12 @@ pub async fn list_audit_log(
 pub async fn list_user_sessions(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(user_id): axum::extract::Path<i64>,
-) -> Result<Json<Vec<SessionInfo>>, StatusCode> {
+) -> Result<Json<Vec<SessionInfo>>, ApiError> {
     let sessions = crate::db::sessions::list_user_sessions(&state.db_pool, user_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to list sessions: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            ApiError::internal("Failed to list sessions")
         })?;
     Ok(Json(
         sessions
@@ -99,12 +99,12 @@ pub struct SessionInfo {
 pub async fn delete_user_sessions(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(user_id): axum::extract::Path<i64>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let deleted = crate::db::sessions::delete_user_sessions(&state.db_pool, user_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to delete sessions: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            ApiError::internal("Failed to delete sessions")
         })?;
     Ok(Json(serde_json::json!({
         "deleted": deleted,

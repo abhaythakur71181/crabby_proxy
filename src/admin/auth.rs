@@ -182,11 +182,11 @@ impl CurrentUser {
     }
 
     /// Require admin role
-    pub fn require_admin(&self) -> Result<(), StatusCode> {
+    pub fn require_admin(&self) -> Result<(), super::handlers::models::ApiError> {
         if self.role == "root_admin" || self.role == "admin" {
             Ok(())
         } else {
-            Err(StatusCode::FORBIDDEN)
+            Err(super::handlers::models::ApiError::forbidden("Admin access required"))
         }
     }
 
@@ -195,14 +195,14 @@ impl CurrentUser {
     pub async fn from_request_extensions(
         state: &AppState,
         user_id: i64,
-    ) -> Result<Self, StatusCode> {
+    ) -> Result<Self, super::handlers::models::ApiError> {
         let cached = state
             .cached_user_role(user_id)
             .await
-            .ok_or(StatusCode::UNAUTHORIZED)?;
+            .ok_or_else(|| super::handlers::models::ApiError::unauthorized("Invalid session"))?;
 
         if !cached.is_active {
-            return Err(StatusCode::UNAUTHORIZED);
+            return Err(super::handlers::models::ApiError::unauthorized("Account is disabled"));
         }
 
         Ok(CurrentUser {
@@ -292,7 +292,7 @@ mod tests {
         let user = regular_user(10);
         let result = user.require_admin();
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), StatusCode::FORBIDDEN);
+        assert_eq!(result.unwrap_err().status, StatusCode::FORBIDDEN);
     }
 
     #[test]

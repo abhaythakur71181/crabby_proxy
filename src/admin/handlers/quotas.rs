@@ -1,8 +1,5 @@
-use axum::{
-    extract::{Path, State},
-    http::StatusCode,
-    Json,
-};
+use super::models::ApiError;
+use axum::{extract::Path, Json, extract::State};
 use serde::{Deserialize, Serialize};
 
 use crate::app_state::AppState;
@@ -27,22 +24,27 @@ pub async fn get_user_quota(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
     axum::Extension(current_user_id): axum::Extension<i64>,
-) -> Result<Json<QuotaResponse>, StatusCode> {
+) -> Result<Json<QuotaResponse>, ApiError> {
     let current_user =
         crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
-    // Authorization check: only admins or the user themselves can view quota
     if !current_user.can_access_user(user_id) {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(ApiError::forbidden("Cannot access other users' quota"));
     }
     let user = crate::db::users::get_user_by_id(&state.db_pool, user_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            tracing::error!("Failed to get user: {}", e);
+            ApiError::internal("Database error")
+        })?;
     if user.is_none() {
-        return Err(StatusCode::NOT_FOUND);
+        return Err(ApiError::not_found(format!("User {} not found", user_id)));
     }
     let stats = crate::db::quota::get_quota_stats(&state.db_pool, user_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            tracing::error!("Failed to get quota stats: {}", e);
+            ApiError::internal("Failed to retrieve quota stats")
+        })?;
     Ok(Json(QuotaResponse {
         user_id,
         quota_bytes: stats.quota_bytes,
@@ -58,27 +60,35 @@ pub async fn update_user_quota(
     Path(user_id): Path<i64>,
     axum::Extension(current_user_id): axum::Extension<i64>,
     Json(payload): Json<UpdateQuotaRequest>,
-) -> Result<Json<QuotaResponse>, StatusCode> {
+) -> Result<Json<QuotaResponse>, ApiError> {
     let current_user =
         crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
-    // Only admins can update quotas
     current_user.require_admin()?;
     let user = crate::db::users::get_user_by_id(&state.db_pool, user_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            tracing::error!("Failed to get user: {}", e);
+            ApiError::internal("Database error")
+        })?;
     if user.is_none() {
-        return Err(StatusCode::NOT_FOUND);
+        return Err(ApiError::not_found(format!("User {} not found", user_id)));
     }
     crate::db::quota::update_quota(&state.db_pool, user_id, payload.quota_bytes)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            tracing::error!("Failed to update quota: {}", e);
+            ApiError::internal("Failed to update quota")
+        })?;
 
     // Invalidate cached quota so proxy picks up the new limit immediately
     state.invalidate_quota_cache(user_id).await;
 
     let stats = crate::db::quota::get_quota_stats(&state.db_pool, user_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            tracing::error!("Failed to get quota stats: {}", e);
+            ApiError::internal("Failed to retrieve quota stats")
+        })?;
     Ok(Json(QuotaResponse {
         user_id,
         quota_bytes: stats.quota_bytes,

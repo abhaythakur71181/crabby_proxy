@@ -1,3 +1,4 @@
+use super::models::ApiError;
 use crate::app_state::AppState;
 use crate::state::backend::ConnectionInfo;
 use axum::{
@@ -5,7 +6,6 @@ use axum::{
         ws::{Message, WebSocket},
         State, WebSocketUpgrade,
     },
-    http::StatusCode,
     response::IntoResponse,
     Json,
 };
@@ -14,12 +14,12 @@ use std::sync::Arc;
 /// GET /api/connections - List all active connections
 pub async fn list_connections(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<ConnectionInfo>>, StatusCode> {
+) -> Result<Json<Vec<ConnectionInfo>>, ApiError> {
     match state.state.list_connections().await {
         Ok(connections) => Ok(Json(connections)),
         Err(e) => {
             tracing::error!("Failed to list connections: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            Err(ApiError::internal("Failed to list connections"))
         }
     }
 }
@@ -27,12 +27,12 @@ pub async fn list_connections(
 /// GET /api/connections/count - Get count of active connections
 pub async fn count_connections(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<usize>, StatusCode> {
+) -> Result<Json<usize>, ApiError> {
     match state.state.count_connections().await {
         Ok(count) => Ok(Json(count)),
         Err(e) => {
             tracing::error!("Failed to count connections: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            Err(ApiError::internal("Failed to count connections"))
         }
     }
 }
