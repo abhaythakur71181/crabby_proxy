@@ -40,10 +40,10 @@ pub async fn create_group(
     ))
 }
 
-/// GET /api/groups — List all groups
+/// GET /api/groups — List all groups (with member counts)
 pub async fn list_groups(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<groups::UserGroup>>, ApiError> {
+) -> Result<Json<Vec<groups::UserGroupWithCount>>, ApiError> {
     groups::list_groups(&state.db_pool)
         .await
         .map(Json)
@@ -111,7 +111,7 @@ pub async fn remove_member(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// GET /api/groups/:id/members — List members of a group
+/// GET /api/groups/:id/members — List members of a group with user details
 pub async fn list_members(
     State(state): State<Arc<AppState>>,
     Path(group_id): Path<i64>,
@@ -123,10 +123,11 @@ pub async fn list_members(
             ApiError::internal("Failed to list group members")
         })?;
 
+    let total = members.len();
     Ok(Json(serde_json::json!({
         "group_id": group_id,
         "members": members,
-        "total": members.len()
+        "total": total
     })))
 }
 
