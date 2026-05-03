@@ -107,6 +107,23 @@ pub async fn run_admin_server(
             "/api/users/:id/approvals",
             get(handlers::approvals::list_user_approvals),
         )
+        // Approval request workflow routes
+        .route(
+            "/api/approval-requests",
+            post(handlers::approval_requests::create_request),
+        )
+        .route(
+            "/api/approval-requests",
+            get(handlers::approval_requests::list_requests),
+        )
+        .route(
+            "/api/approval-requests/:id/approve",
+            post(handlers::approval_requests::approve_request),
+        )
+        .route(
+            "/api/approval-requests/:id/reject",
+            post(handlers::approval_requests::reject_request),
+        )
         // Audit log routes
         .route("/api/audit-log", get(handlers::audit::list_audit_log))
         // Session management routes
