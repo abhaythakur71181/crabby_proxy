@@ -380,12 +380,14 @@ async fn handle_client(
                 let ip = client_ip_str.clone();
                 let proto = proto_label.to_string();
                 tokio::spawn(async move {
-                    let _ = crate::db::usage::record_usage(
+                    if let Err(e) = crate::db::usage::record_usage(
                         &db, uid, &conn_id, &ip, &target, &proto,
                         started_at, ended_at,
                         bytes_sent as i64, bytes_received as i64,
                         "success",
-                    ).await;
+                    ).await {
+                        tracing::error!("Failed to record usage for user {}: {}", uid, e);
+                    }
                 });
                 state
                     .track_bandwidth(uid, bytes_sent as i64 + bytes_received as i64)
@@ -444,10 +446,12 @@ async fn handle_client(
                 let proto = proto_label.to_string();
                 let err_label = error_label.to_string();
                 tokio::spawn(async move {
-                    let _ = crate::db::usage::record_usage(
+                    if let Err(e) = crate::db::usage::record_usage(
                         &db, uid, &conn_id, &ip, &target, &proto,
                         started_at, ended_at, 0, 0, &err_label,
-                    ).await;
+                    ).await {
+                        tracing::error!("Failed to record usage for user {}: {}", uid, e);
+                    }
                 });
             }
             if error_type != ErrorType::Tunnel {
