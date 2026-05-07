@@ -96,6 +96,18 @@ pub async fn create_request(
         ApiError::internal("Failed to create approval request")
     })?;
 
+    // Audit log
+    let _ = crate::db::audit_log::log_action(
+        &state.db_pool,
+        current_user_id,
+        "approval_request_created",
+        Some("approval_request"),
+        Some(&id.to_string()),
+        Some(&format!("IP: {}, duration: {}h", payload.client_ip, payload.duration_hours)),
+        None,
+    )
+    .await;
+
     let now = chrono::Utc::now().timestamp();
     Ok((
         StatusCode::CREATED,
@@ -157,6 +169,17 @@ pub async fn approve_request(
         Some(r) => {
             // Invalidate approval cache so proxy picks up the new approval immediately
             state.invalidate_approval_cache(r.user_id).await;
+            // Audit log
+            let _ = crate::db::audit_log::log_action(
+                &state.db_pool,
+                current_user_id,
+                "approval_request_approved",
+                Some("approval_request"),
+                Some(&request_id.to_string()),
+                Some(&format!("Approved for user {}", r.user_id)),
+                None,
+            )
+            .await;
             Ok(Json(serde_json::json!({
                 "id": r.id,
                 "status": "approved",
@@ -193,6 +216,17 @@ pub async fn reject_request(
     })?;
 
     if rejected {
+        // Audit log
+        let _ = crate::db::audit_log::log_action(
+            &state.db_pool,
+            current_user_id,
+            "approval_request_rejected",
+            Some("approval_request"),
+            Some(&request_id.to_string()),
+            payload.reason.as_deref(),
+            None,
+        )
+        .await;
         Ok(Json(serde_json::json!({
             "id": request_id,
             "status": "rejected",

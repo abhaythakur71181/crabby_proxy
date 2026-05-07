@@ -1,5 +1,6 @@
 use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::app_state::AppState;
@@ -218,5 +219,180 @@ pub async fn dashboard(State(state): State<Arc<AppState>>) -> Json<DashboardResp
         total_users,
         top_users_24h,
         active_tunnels,
+    })
+}
+
+/// Structured JSON metrics response for the UI
+#[derive(Serialize)]
+pub struct JsonMetricsResponse {
+    pub active_by_protocol: HashMap<String, i64>,
+    pub bytes_transferred: BytesTransferred,
+    pub requests_total: RequestsTotal,
+    pub auth_failures_by_reason: HashMap<String, u64>,
+    pub ip_filter: IpFilterStats,
+    pub rate_limit_exceeded: RateLimitStats,
+    pub connection_duration_p50: f64,
+    pub connection_duration_p95: f64,
+    pub connection_duration_p99: f64,
+    pub draining: bool,
+    pub draining_connections: i64,
+}
+
+#[derive(Serialize)]
+pub struct BytesTransferred {
+    pub sent: u64,
+    pub received: u64,
+}
+
+#[derive(Serialize)]
+pub struct RequestsTotal {
+    pub success: u64,
+    pub failed: u64,
+}
+
+#[derive(Serialize)]
+pub struct IpFilterStats {
+    pub allowed: u64,
+    pub blocked: u64,
+}
+
+#[derive(Serialize)]
+pub struct RateLimitStats {
+    pub ip: u64,
+    pub user: u64,
+}
+
+/// GET /api/metrics — Structured JSON metrics for the dashboard UI
+pub async fn json_metrics(State(_state): State<Arc<AppState>>) -> Json<JsonMetricsResponse> {
+    use prometheus::proto::MetricType;
+
+    // Collect active connections by protocol
+    let mut active_by_protocol = HashMap::new();
+    let families = prometheus::gather();
+    for fam in &families {
+        if fam.get_name() == "proxy_active_connections" {
+            for m in fam.get_metric() {
+                let protocol = m.get_label().iter()
+                    .find(|l| l.get_name() == "protocol")
+                    .map(|l| l.get_value().to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let val = m.get_gauge().get_value() as i64;
+                if val != 0 {
+                    active_by_protocol.insert(protocol, val);
+                }
+            }
+        }
+    }
+
+    // Bytes transferred
+    let bytes_sent = crate::metrics::BYTES_TRANSFERRED
+        .with_label_values(&["sent"])
+        .get() as u64;
+    let bytes_received = crate::metrics::BYTES_TRANSFERRED
+        .with_label_values(&["received"])
+        .get() as u64;
+
+    // Requests total
+    let mut success: u64 = 0;
+    let mut failed: u64 = 0;
+    for fam in &families {
+        if fam.get_name() == "proxy_requests_total" {
+            for m in fam.get_metric() {
+                let status = m.get_label().iter()
+                    .find(|l| l.get_name() == "status")
+                    .map(|l| l.get_value())
+                    .unwrap_or("unknown");
+                let val = m.get_counter().get_value() as u64;
+                if status == "success" {
+                    success += val;
+                } else {
+                    failed += val;
+                }
+            }
+        }
+    }
+
+    // Auth failures by reason
+    let mut auth_failures_by_reason = HashMap::new();
+    for fam in &families {
+        if fam.get_name() == "proxy_auth_failures_total" {
+            for m in fam.get_metric() {
+                let reason = m.get_label().iter()
+                    .find(|l| l.get_name() == "reason")
+                    .map(|l| l.get_value().to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let val = m.get_counter().get_value() as u64;
+                if val > 0 {
+                    auth_failures_by_reason.insert(reason, val);
+                }
+            }
+        }
+    }
+
+    // IP filter stats
+    let ip_allowed = crate::metrics::IP_FILTER_ACTIONS
+        .with_label_values(&["allowed"])
+        .get() as u64;
+    let ip_blocked = crate::metrics::IP_FILTER_ACTIONS
+        .with_label_values(&["blocked"])
+        .get() as u64;
+
+    // Rate limit stats
+    let rl_ip = crate::metrics::RATE_LIMIT_EXCEEDED
+        .with_label_values(&["ip"])
+        .get() as u64;
+    let rl_user = crate::metrics::RATE_LIMIT_EXCEEDED
+        .with_label_values(&["user"])
+        .get() as u64;
+
+    // Connection duration percentiles from histogram
+    let (p50, p95, p99) = {
+        let mut p50 = 0.0_f64;
+        let mut p95 = 0.0_f64;
+        let mut p99 = 0.0_f64;
+        for fam in &families {
+            if fam.get_name() == "proxy_connection_duration_seconds" && fam.get_field_type() == MetricType::HISTOGRAM {
+                // Aggregate across all protocols
+                let mut total_count: u64 = 0;
+                let mut buckets: Vec<(f64, u64)> = Vec::new();
+                for m in fam.get_metric() {
+                    let h = m.get_histogram();
+                    total_count += h.get_sample_count();
+                    for (i, b) in h.get_bucket().iter().enumerate() {
+                        if i >= buckets.len() {
+                            buckets.push((b.get_upper_bound(), b.get_cumulative_count()));
+                        } else {
+                            buckets[i].1 += b.get_cumulative_count();
+                        }
+                    }
+                }
+                if total_count > 0 {
+                    for (upper, cum) in &buckets {
+                        let pct = *cum as f64 / total_count as f64;
+                        if pct >= 0.5 && p50 == 0.0 { p50 = *upper; }
+                        if pct >= 0.95 && p95 == 0.0 { p95 = *upper; }
+                        if pct >= 0.99 && p99 == 0.0 { p99 = *upper; }
+                    }
+                }
+            }
+        }
+        (p50, p95, p99)
+    };
+
+    let draining = crate::metrics::DRAINING.get() != 0;
+    let draining_connections = crate::metrics::DRAINING_CONNECTIONS.get();
+
+    Json(JsonMetricsResponse {
+        active_by_protocol,
+        bytes_transferred: BytesTransferred { sent: bytes_sent, received: bytes_received },
+        requests_total: RequestsTotal { success, failed },
+        auth_failures_by_reason,
+        ip_filter: IpFilterStats { allowed: ip_allowed, blocked: ip_blocked },
+        rate_limit_exceeded: RateLimitStats { ip: rl_ip, user: rl_user },
+        connection_duration_p50: p50,
+        connection_duration_p95: p95,
+        connection_duration_p99: p99,
+        draining,
+        draining_connections,
     })
 }
