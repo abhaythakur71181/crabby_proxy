@@ -88,6 +88,10 @@ pub struct AppState {
     // (fallback when Redis cache is unavailable)
     pub quota_cache: Arc<dashmap::DashMap<i64, (bool, std::time::Instant)>>,
 
+    // Approval check cache: (user_id, client_ip) -> (approved, cached_at)
+    // Avoids hitting DB on every proxy connection; 2-minute TTL
+    pub approval_cache: Arc<dashmap::DashMap<(i64, String), (bool, std::time::Instant)>>,
+
     // Redis cache layer for users, API keys, quotas, approvals
     pub cache: Option<CacheLayer>,
 
@@ -249,6 +253,7 @@ impl AppState {
             },
             shutdown_tx,
             quota_cache: Arc::new(dashmap::DashMap::new()),
+            approval_cache: Arc::new(dashmap::DashMap::new()),
             auth_cache: Arc::new(dashmap::DashMap::new()),
             bandwidth_throttlers: Arc::new(crate::bandwidth::ThrottlerRegistry::new()),
             middleware: Arc::new(crate::middleware::MiddlewareChain::new()),
@@ -417,10 +422,49 @@ impl AppState {
         self.quota_cache.remove(&user_id);
     }
 
+    /// Check if IP is approved for user, with in-memory + Redis cache-aside.
+    /// Returns true/false. DB is only hit on cache miss.
+    pub async fn cached_ip_approved(&self, user_id: i64, client_ip: &str) -> Result<bool, sqlx::Error> {
+        let cache_key = (user_id, client_ip.to_string());
+        let ttl = std::time::Duration::from_secs(crate::constants::APPROVAL_CACHE_TTL_SECS);
+
+        // 1. Check in-memory cache
+        if let Some(entry) = self.approval_cache.get(&cache_key) {
+            let (approved, cached_at) = entry.value();
+            if cached_at.elapsed() < ttl {
+                return Ok(*approved);
+            }
+            drop(entry);
+            self.approval_cache.remove(&cache_key);
+        }
+
+        // 2. Check Redis cache
+        if let Some(ref cache) = self.cache {
+            if let Some(approved) = cache.get_ip_approved(user_id, client_ip).await {
+                self.approval_cache.insert(cache_key, (approved, std::time::Instant::now()));
+                return Ok(approved);
+            }
+        }
+
+        // 3. DB lookup
+        let approved = crate::db::approvals::is_ip_approved(&self.db_pool, user_id, client_ip).await?;
+
+        // Store in Redis
+        if let Some(ref cache) = self.cache {
+            cache.set_ip_approved(user_id, client_ip, approved).await;
+        }
+        // Store in memory
+        self.approval_cache.insert((user_id, client_ip.to_string()), (approved, std::time::Instant::now()));
+
+        Ok(approved)
+    }
+
     pub async fn invalidate_approval_cache(&self, user_id: i64) {
         if let Some(ref cache) = self.cache {
             cache.invalidate_approvals_for_user(user_id).await;
         }
+        // Clear in-memory entries for this user
+        self.approval_cache.retain(|k, _| k.0 != user_id);
     }
 
     pub async fn track_bandwidth(&self, user_id: i64, bytes: i64) {
