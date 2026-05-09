@@ -21,6 +21,7 @@ mod metrics;
 pub mod middleware;
 mod proxy;
 mod proxy_protocol;
+mod quota_tracker;
 #[allow(dead_code)]
 mod rate_limit;
 mod state;
