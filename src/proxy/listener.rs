@@ -552,12 +552,26 @@ async fn async_handle_client_with_target(
         None
     };
 
+    // Resolve the live quota tracker for this user. The relay loop will
+    // increment its atomic counter on every chunk and abort the tunnel
+    // the moment the user crosses their configured limit.
+    let quota_tracker = if let Some(uid) = user_id {
+        state
+            .quota_trackers
+            .get_or_seed(&state.db_pool, uid)
+            .await
+            .ok()
+    } else {
+        None
+    };
+
     match crate::stream::create_throttled_tunnel(
         client_halves,
         target_halves,
         &label_c2t,
         &label_t2c,
         throttler,
+        quota_tracker,
     )
     .await
     {

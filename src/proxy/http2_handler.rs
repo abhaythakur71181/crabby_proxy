@@ -251,8 +251,30 @@ async fn handle_h2_connect_validated(
     }
 
     // ── Relay ──
+    // Resolve the live quota tracker before entering the tunnel so both
+    // directions can share the same atomic counter and tear down the moment
+    // the limit is crossed.
+    let quota_tracker = if let Some(uid) = ctx.effective_uid() {
+        state
+            .quota_trackers
+            .get_or_seed(&state.db_pool, uid)
+            .await
+            .ok()
+    } else {
+        None
+    };
     let started_at = chrono::Utc::now().timestamp();
-    let result = handle_h2_tunnel(&authority, client_addr, host, port, request, respond, state).await;
+    let result = handle_h2_tunnel(
+        &authority,
+        client_addr,
+        host,
+        port,
+        request,
+        respond,
+        state,
+        quota_tracker,
+    )
+    .await;
 
     crate::metrics::ACTIVE_CONNECTIONS
         .with_label_values(&["HTTP2"])
@@ -353,6 +375,7 @@ async fn handle_h2_tunnel(
     request: http::Request<h2::RecvStream>,
     mut respond: h2::server::SendResponse<bytes::Bytes>,
     state: &AppState,
+    quota_tracker: Option<std::sync::Arc<crate::quota_tracker::UserQuotaTracker>>,
 ) -> Result<(u64, u64), Box<dyn std::error::Error + Send + Sync>> {
     // Resolve via DNS cache
     let resolved_addr = timeout(
@@ -435,6 +458,7 @@ async fn handle_h2_tunnel(
     let recv_c = recv_counter.clone();
 
     // Bridge: h2 recv_stream -> upstream writer
+    let q_send = quota_tracker.clone();
     let h2_to_upstream = async {
         loop {
             match recv_stream.data().await {
@@ -442,12 +466,23 @@ async fn handle_h2_tunnel(
                     if data.is_empty() {
                         break;
                     }
-                    sent_c.fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                    let n = data.len();
+                    sent_c.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                     // Release flow control capacity
-                    let _ = recv_stream.flow_control().release_capacity(data.len());
+                    let _ = recv_stream.flow_control().release_capacity(n);
                     if let Err(e) = upstream_writer.write_all(&data).await {
                         tracing::debug!("[HTTP2] upstream write error: {}", e);
                         break;
+                    }
+                    if let Some(ref q) = q_send {
+                        if q.add_and_over(n as i64) {
+                            tracing::warn!(
+                                "[HTTP2] quota exceeded mid-tunnel (used={}, limit={})",
+                                q.used(),
+                                q.limit()
+                            );
+                            break;
+                        }
                     }
                 }
                 Some(Err(e)) => {
@@ -460,6 +495,7 @@ async fn handle_h2_tunnel(
     };
 
     // Bridge: upstream reader -> h2 send_stream
+    let q_recv = quota_tracker.clone();
     let upstream_to_h2 = async {
         let mut buf = vec![0u8; crate::constants::H2_RELAY_BUFFER_SIZE];
         loop {
@@ -471,6 +507,16 @@ async fn handle_h2_tunnel(
                     if let Err(e) = send_stream.send_data(data, false) {
                         tracing::debug!("[HTTP2] h2 send error: {}", e);
                         break;
+                    }
+                    if let Some(ref q) = q_recv {
+                        if q.add_and_over(n as i64) {
+                            tracing::warn!(
+                                "[HTTP2] quota exceeded mid-tunnel (used={}, limit={})",
+                                q.used(),
+                                q.limit()
+                            );
+                            break;
+                        }
                     }
                 }
                 Err(e) => {
