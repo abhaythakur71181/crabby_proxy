@@ -260,17 +260,24 @@ where
     tunnel.relay_with_logging(label).await
 }
 
-/// Create a bidirectional tunnel with optional per-user bandwidth throttling.
+/// Create a bidirectional tunnel with optional per-user bandwidth throttling
+/// and optional in-flight quota enforcement.
 ///
 /// If `throttler` is Some, both directions are rate-limited to the configured
 /// bytes-per-second. The throttler is shared between directions so the total
 /// bandwidth (upload + download) is capped.
+///
+/// If `quota` is Some, every chunk transferred (in either direction) is added
+/// to the shared per-user atomic counter. The first direction whose chunk
+/// causes the user to cross their limit returns `ErrorKind::QuotaExceeded` and
+/// the `try_join!` tears down both halves.
 pub async fn create_throttled_tunnel<R1, W1, R2, W2>(
     stream1: (R1, W1),
     stream2: (R2, W2),
     label1: &str,
     label2: &str,
     throttler: Option<crate::bandwidth::BandwidthThrottler>,
+    quota: Option<std::sync::Arc<crate::quota_tracker::UserQuotaTracker>>,
 ) -> tokio::io::Result<(u64, u64)>
 where
     R1: AsyncRead + AsyncReadExt + Unpin,
@@ -283,17 +290,20 @@ where
 
     let t1 = throttler.clone();
     let t2 = throttler;
-    let relay1 = relay_with_throttle(tunnel1, label1, t1);
-    let relay2 = relay_with_throttle(tunnel2, label2, t2);
+    let q1 = quota.clone();
+    let q2 = quota;
+    let relay1 = relay_with_throttle(tunnel1, label1, t1, q1);
+    let relay2 = relay_with_throttle(tunnel2, label2, t2, q2);
 
     tokio::try_join!(relay1, relay2)
 }
 
-/// Relay data with optional bandwidth throttling.
+/// Relay data with optional bandwidth throttling and optional quota enforcement.
 async fn relay_with_throttle<R, W>(
     mut tunnel: TunnelStream<R, W>,
     label: &str,
     throttler: Option<crate::bandwidth::BandwidthThrottler>,
+    quota: Option<std::sync::Arc<crate::quota_tracker::UserQuotaTracker>>,
 ) -> tokio::io::Result<u64>
 where
     R: AsyncReadExt + Unpin,
@@ -315,6 +325,26 @@ where
 
         tunnel.write.write_all(&buf[..n]).await?;
         total += n as u64;
+
+        // In-flight quota enforcement: increment the live per-user counter
+        // and bail out the moment we cross the limit. This is the only path
+        // that can stop a long-lived CONNECT tunnel — admission checks alone
+        // are insufficient because usage rows are written at close.
+        if let Some(ref q) = quota {
+            if q.add_and_over(n as i64) {
+                tracing::warn!(
+                    "{} - quota exceeded mid-stream after {} bytes (used={}, limit={})",
+                    label,
+                    total,
+                    q.used(),
+                    q.limit()
+                );
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "bandwidth quota exceeded",
+                ));
+            }
+        }
     }
 
     tracing::debug!("{} - {} bytes transferred", label, total);
