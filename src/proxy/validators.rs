@@ -249,51 +249,35 @@ pub async fn validate_access_schedule(ctx: &ConnectionContext, state: &AppState)
 
 // ─── Phase 4: Post-Setup (connection tracked, metrics active) ───────────────
 
-/// Check bandwidth quota (Redis → DashMap → DB, with caching).
+/// Check bandwidth quota against the live in-process tracker.
+///
+/// The tracker is the single source of truth for quota state — it is
+/// seeded once from the database (`get_quota_stats`) and then mutated
+/// atomically by the relay loop, so admission decisions and in-flight
+/// enforcement always agree. There is no per-connection SUM() and no
+/// 30s staleness window.
 pub async fn validate_quota(ctx: &ConnectionContext, state: &AppState) -> Verdict {
     let uid = match ctx.effective_uid() {
         Some(uid) => uid,
         None => return Verdict::Allow,
     };
-    // Check Redis cache first
-    let quota_allowed = if let Some(ref cache) = state.cache {
-        cache.get_quota_allowed(uid).await
-    } else {
-        None
-    };
-    // Fallback to DashMap
-    let quota_allowed = quota_allowed.or_else(|| {
-        state.quota_cache.get(&uid).and_then(|entry| {
-            let (allowed, cached_at) = entry.value();
-            if cached_at.elapsed() < std::time::Duration::from_secs(30) {
-                Some(*allowed)
-            } else {
-                None
+    match state.quota_trackers.get_or_seed(&state.db_pool, uid).await {
+        Ok(tracker) => {
+            if tracker.is_over() {
+                return Verdict::Deny(format!(
+                    "Quota exceeded for user {} ({} / {} bytes)",
+                    uid,
+                    tracker.used(),
+                    tracker.limit()
+                ));
             }
-        })
-    });
-    let has_quota = match quota_allowed {
-        Some(allowed) => allowed,
-        None => match crate::db::quota::check_quota(&state.db_pool, uid).await {
-            Ok(allowed) => {
-                if let Some(ref cache) = state.cache {
-                    cache.set_quota_allowed(uid, allowed).await;
-                }
-                state
-                    .quota_cache
-                    .insert(uid, (allowed, std::time::Instant::now()));
-                allowed
-            }
-            Err(e) => {
-                tracing::error!("Error checking quota for user {}: {}", uid, e);
-                return Verdict::Deny(format!("Quota check failed for user {} (fail-closed)", uid));
-            }
-        },
-    };
-    if !has_quota {
-        return Verdict::Deny(format!("Quota exceeded for user {}", uid));
+            Verdict::Allow
+        }
+        Err(e) => {
+            tracing::error!("Error seeding quota tracker for user {}: {}", uid, e);
+            Verdict::Deny(format!("Quota check failed for user {} (fail-closed)", uid))
+        }
     }
-    Verdict::Allow
 }
 
 /// Enforce per-user concurrent connection limit.

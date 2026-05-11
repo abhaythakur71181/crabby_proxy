@@ -55,40 +55,6 @@ pub struct QuotaStats {
     pub period: QuotaPeriod,
 }
 
-/// Check if user has remaining quota for the given period.
-pub async fn check_quota(pool: &SqlitePool, user_id: i64) -> Result<bool, sqlx::Error> {
-    check_quota_with_period(pool, user_id, QuotaPeriod::Monthly).await
-}
-
-/// Check if user has remaining quota within a specific time window.
-pub async fn check_quota_with_period(
-    pool: &SqlitePool,
-    user_id: i64,
-    period: QuotaPeriod,
-) -> Result<bool, sqlx::Error> {
-    let window_start_ts = period.window_start();
-    let row: (Option<i64>, i64) = sqlx::query_as(
-        r#"
-        SELECT
-            monthly_bandwidth_quota as quota_bytes,
-            COALESCE((SELECT SUM(bytes_sent + bytes_received) FROM usage WHERE user_id = ? AND started_at >= ?), 0) as used_bytes
-        FROM users
-        WHERE id = ?
-        "#
-    )
-    .bind(user_id)
-    .bind(window_start_ts)
-    .bind(user_id)
-    .fetch_one(pool)
-    .await?;
-    // If quota_bytes is NULL, no limit (infinite quota)
-    if let Some(quota) = row.0 {
-        Ok(row.1 < quota)
-    } else {
-        Ok(true)
-    }
-}
-
 /// Get user's quota usage stats for a given period.
 pub async fn get_quota_stats(pool: &SqlitePool, user_id: i64) -> Result<QuotaStats, sqlx::Error> {
     get_quota_stats_with_period(pool, user_id, QuotaPeriod::Monthly).await
@@ -191,72 +157,6 @@ mod tests {
         .unwrap();
 
         pool
-    }
-
-    #[tokio::test]
-    async fn test_check_quota_no_limit() {
-        let pool = setup_test_db().await;
-
-        // User with no quota limit
-        sqlx::query("INSERT INTO users (username, monthly_bandwidth_quota) VALUES ('test', NULL)")
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        let has_quota = check_quota(&pool, 1).await.unwrap();
-        assert!(has_quota); // Should always have quota if no limit set
-    }
-
-    #[tokio::test]
-    async fn test_check_quota_under_limit() {
-        let pool = setup_test_db().await;
-
-        // User with 1MB quota
-        sqlx::query(
-            "INSERT INTO users (username, monthly_bandwidth_quota) VALUES ('test', 1048576)",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        // Use 500KB (with current timestamp so it falls in current month)
-        let now = chrono::Utc::now().timestamp();
-        sqlx::query(
-            "INSERT INTO usage (user_id, bytes_sent, bytes_received, started_at) VALUES (1, 262144, 262144, ?)",
-        )
-        .bind(now)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        let has_quota = check_quota(&pool, 1).await.unwrap();
-        assert!(has_quota); // 500KB < 1MB
-    }
-
-    #[tokio::test]
-    async fn test_check_quota_exceeded() {
-        let pool = setup_test_db().await;
-
-        // User with 1MB quota
-        sqlx::query(
-            "INSERT INTO users (username, monthly_bandwidth_quota) VALUES ('test', 1048576)",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        // Use 1.5MB (with current timestamp so it falls in current month)
-        let now = chrono::Utc::now().timestamp();
-        sqlx::query(
-            "INSERT INTO usage (user_id, bytes_sent, bytes_received, started_at) VALUES (1, 786432, 786432, ?)",
-        )
-        .bind(now)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        let has_quota = check_quota(&pool, 1).await.unwrap();
-        assert!(!has_quota); // 1.5MB > 1MB
     }
 
     #[tokio::test]
