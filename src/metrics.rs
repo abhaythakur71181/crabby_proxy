@@ -106,6 +106,17 @@ lazy_static! {
     /// tell whether the failure was setting/deleting a connection record,
     /// counting connections, etc. A non-zero rate here means connection
     /// limits and approval logic may be silently incorrect.
+    /// Number of IP rate-limiter entries evicted due to the tracked-IP cap.
+    /// A non-zero rate here means the proxy is under IP-spray pressure and
+    /// the bound is doing its job — but evicted IPs get a fresh burst on
+    /// reinsert, so sustained high values warrant raising `max_tracked_ips`.
+    pub static ref IP_RATE_LIMIT_EVICTIONS: prometheus::IntCounter =
+        prometheus::register_int_counter!(
+            "proxy_ip_rate_limit_evictions_total",
+            "Total IP rate-limiter entries evicted due to tracked-IP cap"
+        )
+        .unwrap();
+
     pub static ref STATE_BACKEND_ERRORS: IntCounterVec = register_int_counter_vec!(
         "proxy_state_backend_errors_total",
         "Errors returned by the state backend (memory or Redis)",
