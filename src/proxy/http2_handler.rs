@@ -223,7 +223,15 @@ async fn handle_h2_connect_validated(
         bytes_received: 0,
         created_at: chrono::Utc::now().timestamp(),
     };
-    let _ = state.state.set_connection(conn_id, conn_info).await;
+    if let Err(e) = state.state.set_connection(conn_id, conn_info).await {
+        tracing::warn!(
+            "[HTTP2] state backend: set_connection({}) failed: {} — connection limit checks may be inaccurate",
+            conn_id, e
+        );
+        crate::metrics::STATE_BACKEND_ERRORS
+            .with_label_values(&["set_connection"])
+            .inc();
+    }
     crate::metrics::ACTIVE_CONNECTIONS
         .with_label_values(&["HTTP2"])
         .inc();
@@ -279,7 +287,15 @@ async fn handle_h2_connect_validated(
     crate::metrics::ACTIVE_CONNECTIONS
         .with_label_values(&["HTTP2"])
         .dec();
-    let _ = state.state.delete_connection(conn_id).await;
+    if let Err(e) = state.state.delete_connection(conn_id).await {
+        tracing::warn!(
+            "[HTTP2] state backend: delete_connection({}) failed: {}",
+            conn_id, e
+        );
+        crate::metrics::STATE_BACKEND_ERRORS
+            .with_label_values(&["delete_connection"])
+            .inc();
+    }
 
     let ended_at = chrono::Utc::now().timestamp();
     match result {
