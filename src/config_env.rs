@@ -1,3 +1,4 @@
+use crate::auth::jwt::MIN_JWT_SECRET_LEN;
 use crate::config::Config;
 
 /// Extension trait for Config to apply environment variable overrides
@@ -7,7 +8,10 @@ pub trait ConfigEnvExt {
 
 impl ConfigEnvExt for Config {
     /// Apply environment variable overrides for sensitive configuration
-    /// Prioritizes env vars over config file values and warns if using defaults
+    /// Prioritizes env vars over config file values and warns if using defaults.
+    ///
+    /// Panics if the resulting JWT secret is shorter than `MIN_JWT_SECRET_LEN`
+    /// — better to fail boot than to run with a forgeable signing key.
     fn apply_env_overrides(&mut self) {
         use std::env;
 
@@ -15,7 +19,9 @@ impl ConfigEnvExt for Config {
         if let Ok(env_secret) = env::var("CRABBY_JWT_SECRET") {
             tracing::info!("Using JWT secret from CRABBY_JWT_SECRET environment variable");
             self.authentication.jwt_secret = env_secret;
-        } else if self.authentication.jwt_secret == "change_me_to_a_secure_random_string" {
+        } else if self.authentication.jwt_secret == "change_me_to_a_secure_random_string"
+            || self.authentication.jwt_secret.is_empty()
+        {
             // INFO: Auto-generate a random secret instead of running with default
             use rand::Rng;
             let secret: String = rand::thread_rng()
@@ -25,7 +31,16 @@ impl ConfigEnvExt for Config {
                 .collect();
             self.authentication.jwt_secret = secret;
             tracing::warn!(
-                "⚠️  JWT secret was default — auto-generated a random one. Set CRABBY_JWT_SECRET for persistent sessions across restarts."
+                "⚠️  JWT secret was default/empty — auto-generated a random one. Set CRABBY_JWT_SECRET for persistent sessions across restarts."
+            );
+        }
+
+        // Hard fail if the resulting secret is too short to be safe.
+        if self.authentication.jwt_secret.len() < MIN_JWT_SECRET_LEN {
+            panic!(
+                "JWT secret is {} bytes; minimum required is {}. Refusing to start with a weak signing key. Set CRABBY_JWT_SECRET to a strong random value.",
+                self.authentication.jwt_secret.len(),
+                MIN_JWT_SECRET_LEN
             );
         }
 
@@ -58,13 +73,29 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
+    /// Helper: a 32+ byte secret so config validation passes.
+    fn strong_secret() -> &'static str {
+        "my_test_secret_at_least_32_bytes_long"
+    }
+
     #[test]
     #[serial]
     fn test_apply_env_jwt_secret_override() {
-        std::env::set_var("CRABBY_JWT_SECRET", "my_test_secret");
+        std::env::set_var("CRABBY_JWT_SECRET", strong_secret());
         let mut config = Config::default();
         config.apply_env_overrides();
-        assert_eq!(config.authentication.jwt_secret, "my_test_secret");
+        assert_eq!(config.authentication.jwt_secret, strong_secret());
+        std::env::remove_var("CRABBY_JWT_SECRET");
+    }
+
+    #[test]
+    #[serial]
+    #[should_panic(expected = "JWT secret is")]
+    fn test_apply_env_panics_on_weak_jwt_secret() {
+        std::env::set_var("CRABBY_JWT_SECRET", "too_short");
+        let mut config = Config::default();
+        // This should panic — defense against forgeable signing keys.
+        config.apply_env_overrides();
         std::env::remove_var("CRABBY_JWT_SECRET");
     }
 
@@ -97,14 +128,17 @@ mod tests {
 
         let mut config = Config::default();
         // Change to non-default so the warning branches don't trigger
-        config.authentication.jwt_secret = "custom_secret".to_string();
+        config.authentication.jwt_secret = "custom_secret_at_least_32_bytes_long_xx".to_string();
         config.admin.admin_password = "custom_admin_pw".to_string();
         config.authentication.password = "custom_basic_pw".to_string();
 
         config.apply_env_overrides();
 
         // Without env vars, non-default values should be preserved
-        assert_eq!(config.authentication.jwt_secret, "custom_secret");
+        assert_eq!(
+            config.authentication.jwt_secret,
+            "custom_secret_at_least_32_bytes_long_xx"
+        );
         assert_eq!(config.admin.admin_password, "custom_admin_pw");
         assert_eq!(config.authentication.password, "custom_basic_pw");
     }
@@ -112,14 +146,17 @@ mod tests {
     #[test]
     #[serial]
     fn test_apply_env_all_overrides_at_once() {
-        std::env::set_var("CRABBY_JWT_SECRET", "jwt_env");
+        std::env::set_var("CRABBY_JWT_SECRET", "jwt_env_at_least_32_bytes_long_xxxxxx");
         std::env::set_var("CRABBY_ADMIN_PASSWORD", "admin_env");
         std::env::set_var("CRABBY_BASIC_AUTH_PASSWORD", "basic_env");
 
         let mut config = Config::default();
         config.apply_env_overrides();
 
-        assert_eq!(config.authentication.jwt_secret, "jwt_env");
+        assert_eq!(
+            config.authentication.jwt_secret,
+            "jwt_env_at_least_32_bytes_long_xxxxxx"
+        );
         assert_eq!(config.admin.admin_password, "admin_env");
         assert_eq!(config.authentication.password, "basic_env");
 
