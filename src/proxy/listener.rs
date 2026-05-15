@@ -86,7 +86,15 @@ pub async fn run_proxy_server(state: Arc<AppState>, addr: SocketAddr) {
                     // Handle the client connection (using real_addr from PROXY protocol or socket addr)
                     handle_client(client_stream, real_addr, state.clone(), conn_id).await;
                     // Directly clean up connection state (belt-and-suspenders with event system)
-                    let _ = state.state.delete_connection(conn_id).await;
+                    if let Err(e) = state.state.delete_connection(conn_id).await {
+                        tracing::warn!(
+                            "state backend: delete_connection({}) failed: {}",
+                            conn_id, e
+                        );
+                        crate::metrics::STATE_BACKEND_ERRORS
+                            .with_label_values(&["delete_connection"])
+                            .inc();
+                    }
                     // Notify: Connection closed
                     let _ = state.notify_tx.send(crate::app_state::ConnectionEvent::ConnectionClosed(conn_id)).await;
                 });
@@ -311,7 +319,15 @@ async fn handle_client(
         bytes_received: 0,
         created_at: chrono::Utc::now().timestamp(),
     };
-    let _ = state.state.set_connection(conn_id, conn_info).await;
+    if let Err(e) = state.state.set_connection(conn_id, conn_info).await {
+        tracing::warn!(
+            "state backend: set_connection({}) failed: {} — connection limit checks may be inaccurate for this conn",
+            conn_id, e
+        );
+        crate::metrics::STATE_BACKEND_ERRORS
+            .with_label_values(&["set_connection"])
+            .inc();
+    }
     crate::metrics::CONNECTION_SETUP_DURATION
         .with_label_values(&[proto_label])
         .observe(ctx.conn_start.elapsed().as_secs_f64());
