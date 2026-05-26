@@ -288,31 +288,57 @@ where
     let tunnel1 = TunnelStream::new(stream1.0, stream2.1);
     let tunnel2 = TunnelStream::new(stream2.0, stream1.1);
 
+    // Shared abort flag — when one direction trips the quota limit it sets
+    // this and the other side breaks on the next loop iteration. Both halves
+    // still return Ok(bytes_so_far) so the caller can record the partial
+    // transfer in the `usage` table (otherwise the DB SUM and the dashboard
+    // would never see those bytes).
+    let aborted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     let t1 = throttler.clone();
     let t2 = throttler;
     let q1 = quota.clone();
     let q2 = quota;
-    let relay1 = relay_with_throttle(tunnel1, label1, t1, q1);
-    let relay2 = relay_with_throttle(tunnel2, label2, t2, q2);
+    let a1 = aborted.clone();
+    let a2 = aborted;
+    let relay1 = relay_with_throttle(tunnel1, label1, t1, q1, a1);
+    let relay2 = relay_with_throttle(tunnel2, label2, t2, q2, a2);
 
-    tokio::try_join!(relay1, relay2)
+    // join! (not try_join!) so a partial count from one side is preserved
+    // even if the other side errors.
+    let (r1, r2) = tokio::join!(relay1, relay2);
+    let bytes1 = r1.unwrap_or(0);
+    let bytes2 = r2.unwrap_or(0);
+    Ok((bytes1, bytes2))
 }
 
 /// Relay data with optional bandwidth throttling and optional quota enforcement.
+///
+/// Never returns `Err` for the quota-exceeded case — instead it sets the
+/// shared `aborted` flag and returns `Ok(bytes_transferred_so_far)` so the
+/// caller can persist the partial transfer.
 async fn relay_with_throttle<R, W>(
     mut tunnel: TunnelStream<R, W>,
     label: &str,
     throttler: Option<crate::bandwidth::BandwidthThrottler>,
     quota: Option<std::sync::Arc<crate::quota_tracker::UserQuotaTracker>>,
+    aborted: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> tokio::io::Result<u64>
 where
     R: AsyncReadExt + Unpin,
     W: AsyncWriteExt + Unpin,
 {
+    use std::sync::atomic::Ordering;
+
     let mut buf = [0u8; 65536];
     let mut total = 0u64;
 
     loop {
+        // Check sibling-initiated abort before blocking on read.
+        if aborted.load(Ordering::Relaxed) {
+            break;
+        }
+
         let n = tunnel.read.read(&mut buf).await?;
         if n == 0 {
             break;
@@ -333,22 +359,20 @@ where
         if let Some(ref q) = quota {
             if q.add_and_over(n as i64) {
                 tracing::warn!(
-                    "{} - quota exceeded mid-stream after {} bytes (used={}, limit={})",
+                    "{} - quota exceeded mid-stream after {} bytes (used={}, limit={}) — aborting tunnel",
                     label,
                     total,
                     q.used(),
                     q.limit()
                 );
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "bandwidth quota exceeded",
-                ));
+                aborted.store(true, Ordering::Relaxed);
+                break;
             }
         }
     }
 
     tracing::debug!("{} - {} bytes transferred", label, total);
-    tunnel.write.shutdown().await?;
+    let _ = tunnel.write.shutdown().await;
     Ok(total)
 }
 

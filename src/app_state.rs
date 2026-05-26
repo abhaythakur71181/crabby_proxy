@@ -427,7 +427,20 @@ impl AppState {
             cache.invalidate_quota(user_id).await;
         }
         self.quota_cache.remove(&user_id);
-        self.quota_trackers.invalidate(user_id);
+        // Re-read the new limit from the DB and patch the existing tracker
+        // in place. This preserves the live `used` counter (which holds
+        // bytes from in-flight tunnels that haven't been written to the
+        // `usage` table yet) — dropping the tracker would reset that to
+        // zero on next access and silently widen the user's effective quota.
+        // Re-derive the effective limit using the same merged logic the
+        // tracker seed uses (`monthly_bandwidth_quota` if set, else
+        // `bandwidth_limit_mb` × 1 MiB; 0 means unlimited).
+        match crate::db::quota::get_quota_stats(&self.db_pool, user_id).await {
+            Ok(stats) => self
+                .quota_trackers
+                .update_limit(user_id, stats.quota_bytes),
+            Err(_) => self.quota_trackers.invalidate(user_id),
+        }
     }
 
     /// Check if IP is approved for user, with in-memory + Redis cache-aside.
