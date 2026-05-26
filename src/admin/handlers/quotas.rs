@@ -45,13 +45,46 @@ pub async fn get_user_quota(
             tracing::error!("Failed to get quota stats: {}", e);
             ApiError::internal("Failed to retrieve quota stats")
         })?;
-    Ok(Json(QuotaResponse {
+    Ok(Json(overlay_with_tracker(&state, user_id, stats).await))
+}
+
+/// Build a `QuotaResponse` that prefers the live in-process tracker over the
+/// stale `usage` table SUM. The tracker is incremented per-chunk by the relay
+/// loop, so it reflects bytes that are still in flight (long-lived CONNECT
+/// tunnels never write to `usage` until they close). When no tracker exists
+/// yet for this user we fall back to the DB stats.
+async fn overlay_with_tracker(
+    state: &AppState,
+    user_id: i64,
+    stats: crate::db::quota::QuotaStats,
+) -> QuotaResponse {
+    // Seed the tracker if needed so future relays share the same counter.
+    let live_used = match state
+        .quota_trackers
+        .get_or_seed(&state.db_pool, user_id)
+        .await
+    {
+        Ok(t) => Some(t.used()),
+        Err(_) => None,
+    };
+    let used_bytes = live_used
+        .map(|live| live.max(stats.used_bytes))
+        .unwrap_or(stats.used_bytes);
+    let remaining_bytes = stats.quota_bytes.map(|q| (q - used_bytes).max(0));
+    let percentage_used = stats.quota_bytes.map(|q| {
+        if q > 0 {
+            (used_bytes as f64 / q as f64) * 100.0
+        } else {
+            0.0
+        }
+    });
+    QuotaResponse {
         user_id,
         quota_bytes: stats.quota_bytes,
-        used_bytes: stats.used_bytes,
-        remaining_bytes: stats.remaining_bytes,
-        percentage_used: stats.percentage_used,
-    }))
+        used_bytes,
+        remaining_bytes,
+        percentage_used,
+    }
 }
 
 /// PUT /api/users/:id/quota - Update user's quota
@@ -89,11 +122,5 @@ pub async fn update_user_quota(
             tracing::error!("Failed to get quota stats: {}", e);
             ApiError::internal("Failed to retrieve quota stats")
         })?;
-    Ok(Json(QuotaResponse {
-        user_id,
-        quota_bytes: stats.quota_bytes,
-        used_bytes: stats.used_bytes,
-        remaining_bytes: stats.remaining_bytes,
-        percentage_used: stats.percentage_used,
-    }))
+    Ok(Json(overlay_with_tracker(&state, user_id, stats).await))
 }
