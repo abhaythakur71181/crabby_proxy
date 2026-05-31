@@ -227,9 +227,7 @@ Comprehensive audit of the codebase as of 2026-03-25.
 ## MEDIUM
 
 - [x] **R2-5** `IpRateLimiter` unbounded — fixed (commit 2511151): bounded DashMap (default 100k) with opportunistic random eviction batches of 8; new `proxy_ip_rate_limit_evictions_total` metric; configurable via `rate_limiting.max_tracked_ips`.
-- [ ] **R2-6** Cache invalidation scattered across admin handlers
-  `src/admin/handlers/users.rs:214`, `quotas.rs:84`, `groups.rs`, …
-  Add `AppState::invalidate_all_for_user(uid)`; replace every site.
+- [x] **R2-6** Added `AppState::invalidate_all_for_user(uid, username)`; replaces the per-cache fan-out in `users.rs::update_user`/`delete_user` and the duplicated branches in `event_bus::UserInvalidated`/`UserDeleted` (now a single match arm).
 - [ ] **R2-7** Admin protocol bypass is unaudited — `src/proxy/validators.rs:78-90`
   Info-level audit log + dedicated metric on every admin bypass.
 - [x] **R2-8** `parse_authority` silently defaulted to 443 — fixed: returns Option, malformed/empty/port-0 rejected with 400; IPv6 brackets parsed correctly (host without brackets).
