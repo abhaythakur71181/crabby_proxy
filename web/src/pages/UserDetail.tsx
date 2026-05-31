@@ -218,7 +218,7 @@ export default function UserDetail() {
           {quota && (
             <div className="glass-card p-6 flex flex-col items-center gap-4">
               <div className="relative">
-                <CircularGauge percentage={quota.percentage_used} size={160} strokeWidth={12} />
+                <CircularGauge percentage={quota.percentage_used > 100 ? 100 : Math.ceil(quota.percentage_used)} size={160} strokeWidth={12} />
               </div>
               <div className="text-center space-y-1">
                 <p className="text-lg font-bold">{quota.quota_bytes ? formatBytes(quota.used_bytes) + ' / ' + formatBytes(quota.quota_bytes) : 'Unlimited'}</p>
