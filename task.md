@@ -217,28 +217,22 @@ Comprehensive audit of the codebase as of 2026-03-25.
 
 ## CRITICAL / HIGH (security & correctness)
 
-- [ ] **R2-1** JWT accepts empty secret — `src/auth/jwt.rs:25-48`
-  Reject empty + enforce ≥32 bytes; fail boot if `JWT_SECRET` is weak.
-- [ ] **R2-2** Sentinel `user_id = -1` on root admin DB miss — `src/admin/auth.rs:84-92`
-  Return `Err`, do not silently degrade.
-- [ ] **R2-3** State-backend errors silently dropped on connection-tracking path
-  `src/proxy/http2_handler.rs:226,260,282`, `src/proxy/listener.rs:314`
-  Log + bump `state_backend_errors_total`; consider fail-closed for `set_connection`.
+- [x] **R2-1** JWT accepts empty secret — fixed (commit 13e8...): MIN_JWT_SECRET_LEN=32, enforced at create/validate + boot panic.
+- [x] **R2-2** Sentinel `user_id = -1` on root admin DB miss — fixed: returns 500 + tracing::error on miss/lookup-failure.
+- [x] **R2-3** State-backend errors silently dropped — fixed: log + STATE_BACKEND_ERRORS metric on set/delete_connection.
 - [ ] **R2-4** HTTP/2 basic-auth: malformed UTF-8 → generic "auth failed"
   `src/proxy/http2_handler.rs:344-347`
   Distinct branch + warn-log + `auth_failures{reason="malformed_b64"}`.
 
 ## MEDIUM
 
-- [ ] **R2-5** `IpRateLimiter` is unbounded — `src/rate_limit.rs:54-58`
-  Wrap in LRU with configurable cap (~100k) + periodic GC of idle entries.
+- [x] **R2-5** `IpRateLimiter` unbounded — fixed (commit 2511151): bounded DashMap (default 100k) with opportunistic random eviction batches of 8; new `proxy_ip_rate_limit_evictions_total` metric; configurable via `rate_limiting.max_tracked_ips`.
 - [ ] **R2-6** Cache invalidation scattered across admin handlers
   `src/admin/handlers/users.rs:214`, `quotas.rs:84`, `groups.rs`, …
   Add `AppState::invalidate_all_for_user(uid)`; replace every site.
 - [ ] **R2-7** Admin protocol bypass is unaudited — `src/proxy/validators.rs:78-90`
   Info-level audit log + dedicated metric on every admin bypass.
-- [ ] **R2-8** `parse_authority` silently defaults to 443 — `src/proxy/http2_handler.rs:356-366`
-  Return `Err(BadRequest)` on parse failure.
+- [x] **R2-8** `parse_authority` silently defaulted to 443 — fixed: returns Option, malformed/empty/port-0 rejected with 400; IPv6 brackets parsed correctly (host without brackets).
 - [ ] **R2-9** No negative auth caching — `src/app_state.rs:75`
   Cache failed `(username, attempted_pw)` for a few seconds, gated by login rate limiter.
 - [ ] **R2-10** Approval cache uses `String` IP keys — `src/app_state.rs:93,427`
@@ -279,8 +273,7 @@ Comprehensive audit of the codebase as of 2026-03-25.
 - [ ] **R2-24** `MiddlewareChain` constructed but never invoked
   `src/middleware.rs:93-120`, `src/app_state.rs:259`
   Wire into the validator pipeline as a final stage, or delete.
-- [ ] **R2-25** `src/proxy/relay.rs::hand_shake` is `#[allow(dead_code)]` — `src/proxy/relay.rs:15`
-  Delete; superseded by the protocol module.
+- [x] **R2-25** Dead `src/proxy/relay.rs::hand_shake` deleted; module removed from `proxy/mod.rs`.
 - [ ] **R2-26** Tests use `panic!("Expected …")` instead of `assert!(matches!())`
   `src/tunnel/error.rs:165,175,188,201,215`, `src/tunnel/port_allocator.rs:220,258,273,285,331`
   Mechanical replacement.
