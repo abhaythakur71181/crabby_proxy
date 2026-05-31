@@ -277,7 +277,7 @@ impl ProxyProtocol {
             let user = state
                 .cached_user_by_username(actual_username)
                 .await
-                .map(|cu| (cu.id, cu.username));
+                .map(|cu| (cu.id, cu.username.clone()));
 
             if let Some((user_id, _)) = user {
                 // Try API key verification cache

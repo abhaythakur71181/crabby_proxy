@@ -132,6 +132,7 @@ pub async fn start_subscriber(
                 }
                 // Clear rate limit cache too
                 state.user_rate_limiter.invalidate_user(user_id).await;
+                state.invalidate_user_arc_cache(user_id);
                 // Quota limit may have changed — drop the live tracker so the
                 // next access reseeds from the database.
                 state.quota_trackers.invalidate(user_id);
@@ -147,6 +148,7 @@ pub async fn start_subscriber(
                     }
                 }
                 state.user_rate_limiter.invalidate_user(user_id).await;
+                state.invalidate_user_arc_cache(user_id);
                 state.quota_cache.remove(&user_id);
                 state.quota_trackers.invalidate(user_id);
             }

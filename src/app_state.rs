@@ -100,6 +100,13 @@ pub struct AppState {
     // Redis cache layer for users, API keys, quotas, approvals
     pub cache: Option<CacheLayer>,
 
+    /// Process-local Arc cache for `CachedUser` lookups, in front of Redis.
+    /// Avoids deserializing JSON and full struct clones on every validator
+    /// call (the hot path runs `cached_user_by_id` 4-6× per connection).
+    /// 5-second TTL keeps it close enough to Redis without complex
+    /// invalidation; explicit invalidations clear the entry.
+    pub user_arc_cache: Arc<dashmap::DashMap<i64, (Arc<crate::cache::CachedUser>, Instant)>>,
+
     // Event bus for cross-instance coordination (optional — requires Redis)
     pub event_bus: Option<crate::event_bus::EventBus>,
 }
@@ -265,6 +272,7 @@ impl AppState {
             bandwidth_throttlers: Arc::new(crate::bandwidth::ThrottlerRegistry::new()),
             middleware: Arc::new(crate::middleware::MiddlewareChain::new()),
             cache,
+            user_arc_cache: Arc::new(dashmap::DashMap::new()),
             event_bus: match crate::event_bus::EventBus::new(
                 &config.state.redis_url,
                 &config.state.redis_key_prefix,
@@ -327,10 +335,25 @@ impl AppState {
     // single-call APIs. If Redis is absent, they go straight to DB.
     // On cache miss they populate Redis automatically.
 
-    /// Fetch a CachedUser by id: Redis -> DB -> populate Redis.
-    pub async fn cached_user_by_id(&self, user_id: i64) -> Option<crate::cache::CachedUser> {
+    /// Fetch a CachedUser by id: process-local Arc cache -> Redis -> DB.
+    /// Returns `Arc<CachedUser>` so the hot path doesn't clone the full
+    /// struct; the in-process layer also lets us short-circuit Redis +
+    /// JSON deserialization for the 5s TTL window.
+    pub async fn cached_user_by_id(
+        &self,
+        user_id: i64,
+    ) -> Option<Arc<crate::cache::CachedUser>> {
+        const ARC_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+        if let Some(entry) = self.user_arc_cache.get(&user_id) {
+            let (arc, cached_at) = entry.value();
+            if cached_at.elapsed() < ARC_TTL {
+                return Some(arc.clone());
+            }
+        }
+
         let pool = self.db_pool.clone();
-        if let Some(ref cache) = self.cache {
+        let fetched = if let Some(ref cache) = self.cache {
             let key = format!("{}cache:user:id:{}", cache.prefix(), user_id);
             cache
                 .get_or_set(&key, crate::cache::USER_TTL, || async {
@@ -349,16 +372,27 @@ impl AppState {
                 .flatten()
                 .filter(|u| u.is_active)
                 .map(crate::cache::CachedUser::from)
-        }
+        };
+
+        let arc = Arc::new(fetched?);
+        self.user_arc_cache
+            .insert(user_id, (arc.clone(), Instant::now()));
+        Some(arc)
+    }
+
+    /// Drop a user from the process-local Arc cache. Call alongside any
+    /// Redis-level invalidation so the next read reseeds.
+    pub fn invalidate_user_arc_cache(&self, user_id: i64) {
+        self.user_arc_cache.remove(&user_id);
     }
 
     /// Fetch a CachedUser by username: Redis -> DB -> populate Redis.
     pub async fn cached_user_by_username(
         &self,
         username: &str,
-    ) -> Option<crate::cache::CachedUser> {
+    ) -> Option<Arc<crate::cache::CachedUser>> {
         let pool = self.db_pool.clone();
-        if let Some(ref cache) = self.cache {
+        let fetched = if let Some(ref cache) = self.cache {
             let key = format!("{}cache:user:name:{}", cache.prefix(), username);
             // Defer username.to_owned() to cache-miss path only
             let uname = username.to_owned();
@@ -379,7 +413,15 @@ impl AppState {
                 .flatten()
                 .filter(|u| u.is_active)
                 .map(crate::cache::CachedUser::from)
-        }
+        };
+        let cu = fetched?;
+        let id = cu.id;
+        let arc = Arc::new(cu);
+        // Populate the id-keyed Arc cache too — most lookups after auth
+        // happen by id, so this saves the next round-trip.
+        self.user_arc_cache
+            .insert(id, (arc.clone(), Instant::now()));
+        Some(arc)
     }
 
     /// Fetch a CachedUserRole by id: Redis -> DB -> populate Redis.
@@ -432,6 +474,9 @@ impl AppState {
         // bytes from in-flight tunnels that haven't been written to the
         // `usage` table yet) — dropping the tracker would reset that to
         // zero on next access and silently widen the user's effective quota.
+        // Drop the process-local Arc cache too so the next validator call
+        // sees the new limit immediately.
+        self.invalidate_user_arc_cache(user_id);
         // Re-derive the effective limit using the same merged logic the
         // tracker seed uses (`monthly_bandwidth_quota` if set, else
         // `bandwidth_limit_mb` × 1 MiB; 0 means unlimited).
