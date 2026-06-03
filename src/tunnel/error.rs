@@ -156,50 +156,38 @@ mod tests {
     fn test_from_port_out_of_range() {
         let alloc_err = PortAllocError::PortOutOfRange(5000, 10000, 10999);
         let tunnel_err: TunnelError = alloc_err.into();
-        match tunnel_err {
-            TunnelError::PortOutOfRange(port, min, max) => {
-                assert_eq!(port, 5000);
-                assert_eq!(min, 10000);
-                assert_eq!(max, 10999);
-            }
-            e => panic!("Expected PortOutOfRange, got {:?}", e),
-        }
+        assert!(matches!(
+            tunnel_err,
+            TunnelError::PortOutOfRange(5000, 10000, 10999)
+        ));
     }
 
     #[test]
     fn test_from_port_unavailable() {
         let alloc_err = PortAllocError::PortUnavailable(10005);
         let tunnel_err: TunnelError = alloc_err.into();
-        match tunnel_err {
-            TunnelError::PortInUse(port) => assert_eq!(port, 10005),
-            e => panic!("Expected PortInUse, got {:?}", e),
-        }
+        assert!(matches!(tunnel_err, TunnelError::PortInUse(10005)));
     }
 
     #[test]
     fn test_from_no_ports_available() {
         let alloc_err = PortAllocError::NoPortsAvailable(10000, 10999);
         let tunnel_err: TunnelError = alloc_err.into();
-        match tunnel_err {
-            TunnelError::NoPortsAvailable(min, max) => {
-                assert_eq!(min, 10000);
-                assert_eq!(max, 10999);
-            }
-            e => panic!("Expected NoPortsAvailable, got {:?}", e),
-        }
+        assert!(matches!(
+            tunnel_err,
+            TunnelError::NoPortsAvailable(10000, 10999)
+        ));
     }
 
     #[test]
     fn test_from_port_not_allocated() {
         let alloc_err = PortAllocError::PortNotAllocated(10005);
         let tunnel_err: TunnelError = alloc_err.into();
-        match tunnel_err {
-            TunnelError::AllocationError(msg) => {
-                assert!(msg.contains("10005"));
-                assert!(msg.contains("not currently allocated"));
-            }
-            e => panic!("Expected AllocationError, got {:?}", e),
-        }
+        let TunnelError::AllocationError(msg) = tunnel_err else {
+            unreachable!("Expected AllocationError");
+        };
+        assert!(msg.contains("10005"));
+        assert!(msg.contains("not currently allocated"));
     }
 
     // === From<io::Error> conversion test ===
@@ -208,12 +196,10 @@ mod tests {
     fn test_from_io_error() {
         let io_err = io::Error::new(io::ErrorKind::AddrInUse, "address in use");
         let tunnel_err: TunnelError = io_err.into();
-        match tunnel_err {
-            TunnelError::IoError(e) => {
-                assert_eq!(e.kind(), io::ErrorKind::AddrInUse);
-            }
-            e => panic!("Expected IoError, got {:?}", e),
-        }
+        let TunnelError::IoError(e) = tunnel_err else {
+            unreachable!("Expected IoError");
+        };
+        assert_eq!(e.kind(), io::ErrorKind::AddrInUse);
     }
 
     // === std::error::Error trait test ===

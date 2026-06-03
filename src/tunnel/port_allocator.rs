@@ -212,13 +212,10 @@ mod tests {
         alloc.allocate_next().unwrap();
         let result = alloc.allocate_next();
         assert!(result.is_err());
-        match result.unwrap_err() {
-            PortAllocError::NoPortsAvailable(min, max) => {
-                assert_eq!(min, 10000);
-                assert_eq!(max, 10002);
-            }
-            e => panic!("Expected NoPortsAvailable, got {:?}", e),
-        }
+        assert!(matches!(
+            result.unwrap_err(),
+            PortAllocError::NoPortsAvailable(10000, 10002)
+        ));
     }
 
     // === allocate_specific Tests ===
@@ -249,14 +246,10 @@ mod tests {
         let mut alloc = PortAllocator::new(10000, 10010);
         let result = alloc.allocate_specific(9999);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            PortAllocError::PortOutOfRange(port, min, max) => {
-                assert_eq!(port, 9999);
-                assert_eq!(min, 10000);
-                assert_eq!(max, 10010);
-            }
-            e => panic!("Expected PortOutOfRange, got {:?}", e),
-        }
+        assert!(matches!(
+            result.unwrap_err(),
+            PortAllocError::PortOutOfRange(9999, 10000, 10010)
+        ));
     }
 
     #[test]
@@ -264,14 +257,10 @@ mod tests {
         let mut alloc = PortAllocator::new(10000, 10010);
         let result = alloc.allocate_specific(10011);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            PortAllocError::PortOutOfRange(port, min, max) => {
-                assert_eq!(port, 10011);
-                assert_eq!(min, 10000);
-                assert_eq!(max, 10010);
-            }
-            e => panic!("Expected PortOutOfRange, got {:?}", e),
-        }
+        assert!(matches!(
+            result.unwrap_err(),
+            PortAllocError::PortOutOfRange(10011, 10000, 10010)
+        ));
     }
 
     #[test]
@@ -280,10 +269,10 @@ mod tests {
         alloc.allocate_specific(10005).unwrap();
         let result = alloc.allocate_specific(10005);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            PortAllocError::PortUnavailable(port) => assert_eq!(port, 10005),
-            e => panic!("Expected PortUnavailable, got {:?}", e),
-        }
+        assert!(matches!(
+            result.unwrap_err(),
+            PortAllocError::PortUnavailable(10005)
+        ));
     }
 
     // === allocate_port Tests (preferred port dispatch) ===
@@ -326,10 +315,10 @@ mod tests {
         let mut alloc = PortAllocator::new(10000, 10010);
         let result = alloc.release_port(10005);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            PortAllocError::PortNotAllocated(port) => assert_eq!(port, 10005),
-            e => panic!("Expected PortNotAllocated, got {:?}", e),
-        }
+        assert!(matches!(
+            result.unwrap_err(),
+            PortAllocError::PortNotAllocated(10005)
+        ));
     }
 
     #[test]
