@@ -517,13 +517,37 @@ async fn async_handle_client_with_target(
     })?
     .map_err(|e| (e, ErrorType::Connection))?;
 
+    // Try the connection pool first so pool hits aren't counted in the
+    // "new connect" histogram (R2-20). On a fresh connect failure we also
+    // drop any other pooled idle sockets for this addr — the host is most
+    // likely down (R2-15).
+    let mut from_pool = false;
     let target_stream = if let Some(ref pool) = state.connection_pool {
-        pool.get_or_connect(&target_addr, resolved_addr, Duration::from_secs(10))
-            .await
-            .map_err(|e| {
-                state.dns_cache.invalidate(&target.host, target.port);
-                (e, ErrorType::Connection)
-            })?
+        if let Some(s) = pool.try_get_pub(&target_addr).await {
+            from_pool = true;
+            s
+        } else {
+            pool.record_miss();
+            match timeout(Duration::from_secs(10), TcpStream::connect(resolved_addr)).await {
+                Ok(Ok(s)) => {
+                    let _ = s.set_nodelay(true);
+                    s
+                }
+                Ok(Err(e)) => {
+                    state.dns_cache.invalidate(&target.host, target.port);
+                    pool.invalidate_addr(&target_addr);
+                    return Err((e, ErrorType::Connection));
+                }
+                Err(_) => {
+                    state.dns_cache.invalidate(&target.host, target.port);
+                    pool.invalidate_addr(&target_addr);
+                    return Err((
+                        io::Error::new(io::ErrorKind::TimedOut, "Connection timeout"),
+                        ErrorType::Timeout,
+                    ));
+                }
+            }
+        }
     } else {
         // No connection pooling — direct connect
         timeout(Duration::from_secs(10), TcpStream::connect(resolved_addr))
@@ -540,9 +564,11 @@ async fn async_handle_client_with_target(
                 (e, ErrorType::Connection)
             })?
     };
-    crate::metrics::UPSTREAM_CONNECT_DURATION
-        .with_label_values(&[protocol.as_str()])
-        .observe(upstream_start.elapsed().as_secs_f64());
+    if !from_pool {
+        crate::metrics::UPSTREAM_CONNECT_DURATION
+            .with_label_values(&[protocol.as_str()])
+            .observe(upstream_start.elapsed().as_secs_f64());
+    }
     let _ = target_stream.set_nodelay(true);
     tracing::info!(
         "[{}]: Connection established to {} by {}",
