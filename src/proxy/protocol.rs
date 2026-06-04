@@ -270,6 +270,17 @@ impl ProxyProtocol {
                 return Some(*uid);
             }
         }
+        // Negative cache: short-circuit known-bad credentials for 5s so a
+        // burst of bad attempts hits argon2 only once.
+        const NEG_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+        const NEG_CAP: usize = 10_000;
+        if let Some(entry) = state.auth_negative_cache.get(&cache_key) {
+            if entry.value().elapsed() < NEG_TTL {
+                return None;
+            }
+            drop(entry);
+            state.auth_negative_cache.remove(&cache_key);
+        }
 
         // Check for API Key format: user@apikey
         if let Some(actual_username) = username.strip_suffix("@apikey") {
@@ -338,7 +349,13 @@ impl ProxyProtocol {
             return Some(-1);
         }
 
-        None // Authentication failed
+        // Authentication failed — record in negative cache (bounded).
+        if state.auth_negative_cache.len() < NEG_CAP {
+            state
+                .auth_negative_cache
+                .insert(cache_key, std::time::Instant::now());
+        }
+        None
     }
 
     /// Public wrapper around `validate_credentials` for use by the HTTP/2 handler.
