@@ -220,9 +220,7 @@ Comprehensive audit of the codebase as of 2026-03-25.
 - [x] **R2-1** JWT accepts empty secret — fixed (commit 13e8...): MIN_JWT_SECRET_LEN=32, enforced at create/validate + boot panic.
 - [x] **R2-2** Sentinel `user_id = -1` on root admin DB miss — fixed: returns 500 + tracing::error on miss/lookup-failure.
 - [x] **R2-3** State-backend errors silently dropped — fixed: log + STATE_BACKEND_ERRORS metric on set/delete_connection.
-- [ ] **R2-4** HTTP/2 basic-auth: malformed UTF-8 → generic "auth failed"
-  `src/proxy/http2_handler.rs:344-347`
-  Distinct branch + warn-log + `auth_failures{reason="malformed_b64"}`.
+- [x] **R2-4** HTTP/2 basic-auth — `authenticate_h2` now distinguishes scheme_unsupported / malformed_b64 / malformed_utf8 / malformed_credentials / invalid_credentials, each with warn-log + `proxy_auth_failures_total{reason=...}`.
 
 ## MEDIUM
 
@@ -233,8 +231,7 @@ Comprehensive audit of the codebase as of 2026-03-25.
 - [x] **R2-8** `parse_authority` silently defaulted to 443 — fixed: returns Option, malformed/empty/port-0 rejected with 400; IPv6 brackets parsed correctly (host without brackets).
 - [ ] **R2-9** No negative auth caching — `src/app_state.rs:75`
   Cache failed `(username, attempted_pw)` for a few seconds, gated by login rate limiter.
-- [ ] **R2-10** Approval cache uses `String` IP keys — `src/app_state.rs:93,427`
-  Key on `IpAddr` directly to remove per-connection allocation.
+- [x] **R2-10** Approval cache now keyed on `(i64, IpAddr)`; `cached_ip_approved` takes `IpAddr` so the hot-path lookup avoids the per-connection `to_string()`. String formatting deferred until Redis/DB miss.
 - [ ] **R2-11** `DEFAULT_QUOTA_PERIOD` hardcoded Monthly — `src/db/quota.rs:14-18`
   Thread `period` from user record into seeding & validators, or remove from schema/UI.
 - [ ] **R2-12** `access_schedule` parsed per-connection — `src/proxy/validators.rs:233-247`
@@ -246,8 +243,7 @@ Comprehensive audit of the codebase as of 2026-03-25.
   Replace with `SCAN` cursor or maintain a per-user index set.
 - [ ] **R2-15** Connection-pool not invalidated on connect error — `src/proxy/listener.rs:489-511`
   Invalidate pool entry alongside DNS cache on failure.
-- [ ] **R2-16** Event-bus subscriber blocks graceful shutdown — `src/event_bus.rs:58-89`
-  Subscribe to `state.shutdown_tx` and break.
+- [x] **R2-16** Event-bus subscriber loop now `tokio::select!`s on `state.shutdown_tx.subscribe()` and breaks cleanly on shutdown.
 - [ ] **R2-17** Login rate limit by username only — `src/rate_limit.rs` `LoginRateLimiter`
   Rate-limit on `(client_ip, username)` and `client_ip` independently.
 - [ ] **R2-18** CORS likely too permissive on admin server — `src/admin/server.rs`
@@ -271,6 +267,4 @@ Comprehensive audit of the codebase as of 2026-03-25.
   `src/middleware.rs:93-120`, `src/app_state.rs:259`
   Wire into the validator pipeline as a final stage, or delete.
 - [x] **R2-25** Dead `src/proxy/relay.rs::hand_shake` deleted; module removed from `proxy/mod.rs`.
-- [ ] **R2-26** Tests use `panic!("Expected …")` instead of `assert!(matches!())`
-  `src/tunnel/error.rs:165,175,188,201,215`, `src/tunnel/port_allocator.rs:220,258,273,285,331`
-  Mechanical replacement.
+- [x] **R2-26** Tests in `tunnel/error.rs` and `tunnel/port_allocator.rs` migrated to `assert!(matches!(...))` (or `let-else` where inner-value substring assertions are needed).
