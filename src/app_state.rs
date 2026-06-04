@@ -99,6 +99,12 @@ pub struct AppState {
     // the limit mid-stream are torn down within one buffer iteration.
     pub quota_trackers: Arc<crate::quota_tracker::QuotaTrackerRegistry>,
 
+    // Parsed access-schedule cache: user_id -> parsed schedule (or None if
+    // user has no schedule / JSON was unparseable). Avoids JSON-parsing the
+    // schedule on every connection. Invalidated alongside other user caches.
+    pub parsed_schedule_cache:
+        Arc<dashmap::DashMap<i64, Option<Arc<crate::target_filter::AccessSchedule>>>>,
+
     // Approval check cache: (user_id, client_ip) -> (approved, cached_at)
     // Avoids hitting DB on every proxy connection; 2-minute TTL
     pub approval_cache: Arc<dashmap::DashMap<(i64, std::net::IpAddr), (bool, std::time::Instant)>>,
@@ -274,6 +280,7 @@ impl AppState {
             quota_cache: Arc::new(dashmap::DashMap::new()),
             quota_trackers: Arc::new(crate::quota_tracker::QuotaTrackerRegistry::new()),
             approval_cache: Arc::new(dashmap::DashMap::new()),
+            parsed_schedule_cache: Arc::new(dashmap::DashMap::new()),
             auth_cache: Arc::new(dashmap::DashMap::new()),
             auth_negative_cache: Arc::new(dashmap::DashMap::new()),
             bandwidth_throttlers: Arc::new(crate::bandwidth::ThrottlerRegistry::new()),
@@ -487,6 +494,7 @@ impl AppState {
         }
         self.user_rate_limiter.invalidate_user(user_id).await;
         self.invalidate_user_arc_cache(user_id);
+        self.parsed_schedule_cache.remove(&user_id);
         self.quota_cache.remove(&user_id);
         // Refresh the live quota tracker's limit in place (preserve `used`).
         if let Ok(stats) = crate::db::quota::get_quota_stats(&self.db_pool, user_id).await {
@@ -559,6 +567,26 @@ impl AppState {
         self.approval_cache.insert(cache_key, (approved, std::time::Instant::now()));
 
         Ok(approved)
+    }
+
+    /// Get the parsed access schedule for a user, populating the cache on
+    /// first access. Returns `None` if the user has no schedule (or has an
+    /// unparseable one — which we still cache as `None` to avoid retrying).
+    pub async fn parsed_schedule_for_user(
+        &self,
+        user_id: i64,
+    ) -> Option<Arc<crate::target_filter::AccessSchedule>> {
+        if let Some(entry) = self.parsed_schedule_cache.get(&user_id) {
+            return entry.value().clone();
+        }
+        // Miss: load from cached user, parse, store.
+        let parsed = self
+            .cached_user_by_id(user_id)
+            .await
+            .and_then(|cu| cu.access_schedule.as_deref().and_then(crate::target_filter::parse_schedule))
+            .map(Arc::new);
+        self.parsed_schedule_cache.insert(user_id, parsed.clone());
+        parsed
     }
 
     pub async fn invalidate_approval_cache(&self, user_id: i64) {
