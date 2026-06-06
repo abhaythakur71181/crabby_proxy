@@ -240,13 +240,28 @@ impl Default for UserRateLimiter {
 }
 
 /// Rate limiter for login attempts (prevents brute force)
-/// Uses RwLock<LruCache> since LRU eviction needs global ordering
+/// Uses RwLock<LruCache> since LRU eviction needs global ordering.
+///
+/// Two independent dimensions:
+///   1. per-IP — caps total attempts from a single client IP
+///   2. per-(IP, username) — caps targeted enumeration of a specific user
+///      from a specific IP. Stops a single attacker from burning the per-IP
+///      budget while still trying many users.
 #[derive(Clone)]
 pub struct LoginRateLimiter {
     limiters: Arc<
         RwLock<lru::LruCache<IpAddr, GovernorRateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
     >,
+    user_limiters: Arc<
+        RwLock<
+            lru::LruCache<
+                (IpAddr, String),
+                GovernorRateLimiter<NotKeyed, InMemoryState, DefaultClock>,
+            >,
+        >,
+    >,
     quota: Quota,
+    user_quota: Quota,
 }
 
 impl LoginRateLimiter {
@@ -262,11 +277,18 @@ impl LoginRateLimiter {
             std::num::NonZeroU32::new(attempts_per_minute).unwrap_or(nonzero!(5u32)),
         )
         .allow_burst(std::num::NonZeroU32::new(burst).unwrap_or(nonzero!(10u32)));
+        // Per-(ip, username) is tighter — repeated targeted attempts for a
+        // single user from one IP are almost always brute force.
+        let user_quota = Quota::per_minute(nonzero!(3u32)).allow_burst(nonzero!(5u32));
         Self {
             limiters: Arc::new(RwLock::new(lru::LruCache::new(
                 std::num::NonZeroUsize::new(max_ips).unwrap(),
             ))),
+            user_limiters: Arc::new(RwLock::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(max_ips).unwrap(),
+            ))),
             quota,
+            user_quota,
         }
     }
 
@@ -279,6 +301,24 @@ impl LoginRateLimiter {
         };
         let mut limiters = self.limiters.write().await;
         let limiter = limiters.get_or_insert(ip_addr, || GovernorRateLimiter::direct(self.quota));
+        limiter.check().is_ok()
+    }
+
+    /// Check both the per-IP and per-(IP, username) buckets. Both must
+    /// allow the attempt. Use this on the login path so a single client
+    /// can't enumerate users without burning its overall budget.
+    pub async fn check_user(&self, ip: &str, username: &str) -> bool {
+        if !self.check(ip).await {
+            return false;
+        }
+        let ip_addr: IpAddr = match ip.parse() {
+            Ok(addr) => normalize_ip(addr),
+            Err(_) => return true,
+        };
+        let key = (ip_addr, username.to_string());
+        let mut limiters = self.user_limiters.write().await;
+        let limiter =
+            limiters.get_or_insert(key, || GovernorRateLimiter::direct(self.user_quota));
         limiter.check().is_ok()
     }
 
