@@ -226,34 +226,27 @@ Comprehensive audit of the codebase as of 2026-03-25.
 
 - [x] **R2-5** `IpRateLimiter` unbounded — fixed (commit 2511151): bounded DashMap (default 100k) with opportunistic random eviction batches of 8; new `proxy_ip_rate_limit_evictions_total` metric; configurable via `rate_limiting.max_tracked_ips`.
 - [x] **R2-6** Added `AppState::invalidate_all_for_user(uid, username)`; replaces the per-cache fan-out in `users.rs::update_user`/`delete_user` and the duplicated branches in `event_bus::UserInvalidated`/`UserDeleted` (now a single match arm).
-- [ ] **R2-7** Admin protocol bypass is unaudited — `src/proxy/validators.rs:78-90`
-  Info-level audit log + dedicated metric on every admin bypass.
+- [x] **R2-7** Admin SOCKS4 bypass now logs to `target: "audit"` with user_id/client_addr/rule and increments `proxy_admin_bypass_total{rule="socks4_disabled"}`.
 - [x] **R2-8** `parse_authority` silently defaulted to 443 — fixed: returns Option, malformed/empty/port-0 rejected with 400; IPv6 brackets parsed correctly (host without brackets).
-- [ ] **R2-9** No negative auth caching — `src/app_state.rs:75`
-  Cache failed `(username, attempted_pw)` for a few seconds, gated by login rate limiter.
+- [x] **R2-9** Negative auth cache: failed (username, password) tuples cached 5s in a bounded (10k) DashMap. Bursts of bad attempts hit argon2 once.
 - [x] **R2-10** Approval cache now keyed on `(i64, IpAddr)`; `cached_ip_approved` takes `IpAddr` so the hot-path lookup avoids the per-connection `to_string()`. String formatting deferred until Redis/DB miss.
 - [ ] **R2-11** `DEFAULT_QUOTA_PERIOD` hardcoded Monthly — `src/db/quota.rs:14-18`
   Thread `period` from user record into seeding & validators, or remove from schema/UI.
-- [ ] **R2-12** `access_schedule` parsed per-connection — `src/proxy/validators.rs:233-247`
-  Parse once, cache compiled schedule on `CachedUser`.
+- [x] **R2-12** Parsed `AccessSchedule` cached per-user via `parsed_schedule_cache` (DashMap), populated lazily and invalidated alongside other user caches. `validate_access_schedule` no longer calls serde_json on the hot path.
 - [ ] **R2-13** `record_usage` is fire-and-forget without back-pressure
   `src/proxy/listener.rs:382-391`, `http2_handler.rs:278-287`
   Bounded MPSC + writer task; drop with `usage_records_dropped_total`.
-- [ ] **R2-14** `KEYS` used in Redis cache invalidation — `src/cache.rs:130-142`
-  Replace with `SCAN` cursor or maintain a per-user index set.
-- [ ] **R2-15** Connection-pool not invalidated on connect error — `src/proxy/listener.rs:489-511`
-  Invalidate pool entry alongside DNS cache on failure.
+- [x] **R2-14** `invalidate_api_keys_for_user` and `invalidate_approvals_for_user` now use a shared `scan_and_delete` helper (cursor-based SCAN, COUNT 256). KEYS gone from the codebase.
+- [x] **R2-15** On a fresh upstream connect failure the listener now calls `ConnectionPool::invalidate_addr` alongside `dns_cache.invalidate`, dropping any other idle pooled sockets to the same addr.
 - [x] **R2-16** Event-bus subscriber loop now `tokio::select!`s on `state.shutdown_tx.subscribe()` and breaks cleanly on shutdown.
-- [ ] **R2-17** Login rate limit by username only — `src/rate_limit.rs` `LoginRateLimiter`
-  Rate-limit on `(client_ip, username)` and `client_ip` independently.
+- [x] **R2-17** `LoginRateLimiter` now exposes `check_user(ip, username)` which gates on both per-IP and per-(IP, username) buckets. Login handler updated.
 - [ ] **R2-18** CORS likely too permissive on admin server — `src/admin/server.rs`
   Restrict to configured origins; reject `*` when credentials are sent.
 
 ## PERFORMANCE
 
 - [x] **R2-19** `cached_user_by_id` now returns `Arc<CachedUser>` + 5s process-local Arc cache layer in front of Redis. Saves a JSON deserialize and full struct clone on every validator call (4-6× per connection). Wired into `invalidate_quota_cache`, `event_bus::UserInvalidated`/`UserDeleted`.
-- [ ] **R2-20** `UPSTREAM_CONNECT_DURATION` observed even on pool hit — `src/proxy/listener.rs:512-514`
-  Label `{result="pool_hit"|"new"}` or only observe on new connects.
+- [x] **R2-20** `UPSTREAM_CONNECT_DURATION` is now only observed on actual new TCP connects (pool hits skipped), so the histogram reflects real upstream latency.
 - [ ] **R2-21** `ThrottlerRegistry::get_or_create` lookup per relay — `src/proxy/listener.rs:539-553`
   Stash `Arc<Throttler>` alongside the live quota tracker entry.
 - [ ] **R2-22** Per-connection `format!` for tunnel labels — `src/proxy/listener.rs:535-536`
@@ -263,8 +256,6 @@ Comprehensive audit of the codebase as of 2026-03-25.
 
 ## UNFINISHED / DEAD CODE
 
-- [ ] **R2-24** `MiddlewareChain` constructed but never invoked
-  `src/middleware.rs:93-120`, `src/app_state.rs:259`
-  Wire into the validator pipeline as a final stage, or delete.
+- [x] **R2-24** Audit note was stale — `MiddlewareChain` is already wired into `listener.rs` for `Phase::PreAuth`, `PostAuth`, and `PostTarget`.
 - [x] **R2-25** Dead `src/proxy/relay.rs::hand_shake` deleted; module removed from `proxy/mod.rs`.
 - [x] **R2-26** Tests in `tunnel/error.rs` and `tunnel/port_allocator.rs` migrated to `assert!(matches!(...))` (or `let-else` where inner-value substring assertions are needed).
