@@ -664,6 +664,27 @@ lazy_static::lazy_static! {
         .user_agent("crabby-proxy/1.0")
         .build()
         .expect("Failed to create H2 forward proxy client");
+
+    /// Per-host concurrency limit for the HTTP/2 forward path. Without this,
+    /// a single misbehaving upstream can soak up the entire reqwest worker
+    /// pool and starve unrelated hosts. 32 in-flight per host is generous
+    /// for typical web workloads while still bounding worst-case fan-out.
+    static ref H2_FORWARD_HOST_LIMITERS: dashmap::DashMap<String, std::sync::Arc<tokio::sync::Semaphore>> =
+        dashmap::DashMap::new();
+}
+
+const H2_FORWARD_PER_HOST_INFLIGHT: usize = 32;
+
+fn h2_forward_host_permit(host: &str) -> std::sync::Arc<tokio::sync::Semaphore> {
+    if let Some(s) = H2_FORWARD_HOST_LIMITERS.get(host) {
+        return s.clone();
+    }
+    H2_FORWARD_HOST_LIMITERS
+        .entry(host.to_string())
+        .or_insert_with(|| {
+            std::sync::Arc::new(tokio::sync::Semaphore::new(H2_FORWARD_PER_HOST_INFLIGHT))
+        })
+        .clone()
 }
 
 /// Forward a non-CONNECT HTTP/2 request with full validation pipeline.
@@ -806,7 +827,26 @@ async fn handle_h2_forward_validated(
         }
     }
 
-    // Forward via dedicated HTTP client
+    // Forward via dedicated HTTP client. Bound concurrency per upstream
+    // host so a slow/broken target can't soak up the entire worker pool.
+    let host_for_limit = uri
+        .authority()
+        .map(|a| a.host().to_string())
+        .unwrap_or_else(|| "_unknown".to_string());
+    let permit_sem = h2_forward_host_permit(&host_for_limit);
+    let _permit = match permit_sem.acquire_owned().await {
+        Ok(p) => p,
+        Err(_) => {
+            tracing::error!("[HTTP2-FWD] host semaphore closed");
+            let resp = http::Response::builder()
+                .status(http::StatusCode::SERVICE_UNAVAILABLE)
+                .body(())
+                .unwrap_or_else(|_| http::Response::new(()));
+            let _ = respond.send_response(resp, true);
+            return;
+        }
+    };
+
     let upstream_req = H2_FORWARD_CLIENT
         .request(
             reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET),
