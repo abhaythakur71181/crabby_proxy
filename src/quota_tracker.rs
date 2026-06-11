@@ -24,10 +24,16 @@ use std::sync::Arc;
 pub const NO_LIMIT: i64 = i64::MAX;
 
 /// Per-user live bandwidth counter for the current quota window.
+///
+/// Also stashes the resolved bandwidth throttler (if any) the first time
+/// the relay path needs it, so subsequent connections in the same window
+/// skip a `bandwidth_throttlers.get_or_create` lookup. The cell stores
+/// `Option<Arc<...>>` so "user has no throttle" is a hit too, not a re-check.
 pub struct UserQuotaTracker {
     used: AtomicI64,
     limit: AtomicI64,
     window_start: AtomicI64,
+    throttler: std::sync::OnceLock<Option<crate::bandwidth::BandwidthThrottler>>,
 }
 
 impl UserQuotaTracker {
@@ -36,7 +42,26 @@ impl UserQuotaTracker {
             used: AtomicI64::new(used),
             limit: AtomicI64::new(limit.unwrap_or(NO_LIMIT)),
             window_start: AtomicI64::new(window_start),
+            throttler: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Resolve the per-user throttler, populating the once-cell on first
+    /// call. `init` is invoked at most once per tracker (i.e. at most once
+    /// per quota window per user). `BandwidthThrottler` is internally
+    /// `Arc`-shared so this clone is cheap.
+    pub fn throttler_or_init<F>(&self, init: F) -> Option<crate::bandwidth::BandwidthThrottler>
+    where
+        F: FnOnce() -> Option<crate::bandwidth::BandwidthThrottler>,
+    {
+        self.throttler.get_or_init(init).clone()
+    }
+
+    /// Non-blocking peek at the cached throttler. Returns `Some(value)` only
+    /// when the cell has already been initialized (so the caller can avoid
+    /// running their async resolution work on the hot path).
+    pub fn throttler_cached(&self) -> Option<Option<crate::bandwidth::BandwidthThrottler>> {
+        self.throttler.get().cloned()
     }
 
     /// True if the user is currently at or above the configured limit.
