@@ -166,11 +166,32 @@ pub async fn run_admin_server(
 
     // S3: Use configured CORS origins instead of allow_origin(Any)
     let cors_origins = state.config.load().admin.cors_origins.clone();
+    // R2-18: never combine `allow_origin(Any)` with `allow_credentials(true)`.
+    // The admin API uses bearer-token auth, so credentialed requests are the
+    // norm — wide-open CORS is a CSRF/exfiltration risk. Empty config now
+    // means "no cross-origin access", not "everyone allowed".
     let cors = if cors_origins.is_empty() {
-        tracing::warn!("⚠️  No CORS origins configured, allowing all origins");
+        tracing::warn!(
+            "No CORS origins configured — admin API will only accept same-origin requests. \
+             Set [admin] cors_origins = [\"https://your.dashboard\"] to allow a UI."
+        );
         CorsLayer::new()
             .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
-            .allow_headers(Any)
+            .allow_headers([
+                axum::http::header::AUTHORIZATION,
+                axum::http::header::CONTENT_TYPE,
+            ])
+    } else if cors_origins.iter().any(|o| o == "*") {
+        // Explicit "*" still works but only without credentials, and we
+        // refuse to also allow Authorization headers since they wouldn't
+        // be honored cross-origin anyway.
+        tracing::warn!(
+            "CORS configured with '*' — credentialed requests will not be honored. \
+             Configure explicit origins to allow the admin UI to call the API."
+        );
+        CorsLayer::new()
+            .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+            .allow_headers([axum::http::header::CONTENT_TYPE])
             .allow_origin(Any)
     } else {
         let origins: Vec<_> = cors_origins
@@ -180,7 +201,11 @@ pub async fn run_admin_server(
         tracing::info!("CORS allowed origins: {:?}", cors_origins);
         CorsLayer::new()
             .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
-            .allow_headers(Any)
+            .allow_headers([
+                axum::http::header::AUTHORIZATION,
+                axum::http::header::CONTENT_TYPE,
+            ])
+            .allow_credentials(true)
             .allow_origin(origins)
     };
     let app = Router::new()
