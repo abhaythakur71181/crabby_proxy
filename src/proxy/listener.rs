@@ -589,8 +589,16 @@ async fn async_handle_client_with_target(
     let client_halves = io::split(client_stream);
     let target_halves = io::split(target_stream);
 
-    let label_c2t = format!("[{}]: C[{}]->T[{}]", protocol, client_addr, target_addr);
-    let label_t2c = format!("[{}]: T[{}]->C[{}]", protocol, target_addr, client_addr);
+    // Tracing span carries the per-connection identity instead of two
+    // per-connection format!() allocations. Direction labels are now static
+    // string literals.
+    let tunnel_span = tracing::debug_span!(
+        "tunnel",
+        protocol = protocol.as_str(),
+        client = %client_addr,
+        target = %target_addr,
+    );
+    let _tunnel_guard = tunnel_span.enter();
 
     // Resolve the live quota tracker for this user. The relay loop will
     // increment its atomic counter on every chunk and abort the tunnel
@@ -634,8 +642,8 @@ async fn async_handle_client_with_target(
     match crate::stream::create_throttled_tunnel(
         client_halves,
         target_halves,
-        &label_c2t,
-        &label_t2c,
+        "c2t",
+        "t2c",
         throttler,
         quota_tracker,
     )
