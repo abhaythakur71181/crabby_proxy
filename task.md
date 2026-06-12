@@ -233,7 +233,7 @@ Comprehensive audit of the codebase as of 2026-03-25.
 - [ ] **R2-11** `DEFAULT_QUOTA_PERIOD` hardcoded Monthly — `src/db/quota.rs:14-18`
   Thread `period` from user record into seeding & validators, or remove from schema/UI.
 - [x] **R2-12** Parsed `AccessSchedule` cached per-user via `parsed_schedule_cache` (DashMap), populated lazily and invalidated alongside other user caches. `validate_access_schedule` no longer calls serde_json on the hot path.
-- [ ] **R2-13** `record_usage` is fire-and-forget without back-pressure
+- [x] **R2-13** `record_usage` now routed through bounded MPSC `UsageWriter` (capacity 4096, single consumer); Full/Closed drops increment `proxy_usage_records_dropped_total`. Replaces per-connection `tokio::spawn` fan-out in listener.rs and http2_handler.rs.
   `src/proxy/listener.rs:382-391`, `http2_handler.rs:278-287`
   Bounded MPSC + writer task; drop with `usage_records_dropped_total`.
 - [x] **R2-14** `invalidate_api_keys_for_user` and `invalidate_approvals_for_user` now use a shared `scan_and_delete` helper (cursor-based SCAN, COUNT 256). KEYS gone from the codebase.

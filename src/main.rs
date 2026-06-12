@@ -30,6 +30,7 @@ mod stream;
 mod target_filter;
 #[allow(dead_code)]
 mod tunnel;
+mod usage_writer;
 #[allow(dead_code)]
 mod utils;
 #[allow(dead_code)]
