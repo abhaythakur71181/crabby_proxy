@@ -230,7 +230,7 @@ Comprehensive audit of the codebase as of 2026-03-25.
 - [x] **R2-8** `parse_authority` silently defaulted to 443 — fixed: returns Option, malformed/empty/port-0 rejected with 400; IPv6 brackets parsed correctly (host without brackets).
 - [x] **R2-9** Negative auth cache: failed (username, password) tuples cached 5s in a bounded (10k) DashMap. Bursts of bad attempts hit argon2 once.
 - [x] **R2-10** Approval cache now keyed on `(i64, IpAddr)`; `cached_ip_approved` takes `IpAddr` so the hot-path lookup avoids the per-connection `to_string()`. String formatting deferred until Redis/DB miss.
-- [ ] **R2-11** `DEFAULT_QUOTA_PERIOD` hardcoded Monthly — `src/db/quota.rs:14-18`
+- [x] **R2-11** Removed misleading per-period plumbing: `QuotaPeriod` is now `Monthly`-only (matches schema/UI reality), dead `Default` impl + `_with_period` indirection deleted. JSON shape unchanged so dashboard keeps working; adding daily/weekly later is now a deliberate schema+UI change.
   Thread `period` from user record into seeding & validators, or remove from schema/UI.
 - [x] **R2-12** Parsed `AccessSchedule` cached per-user via `parsed_schedule_cache` (DashMap), populated lazily and invalidated alongside other user caches. `validate_access_schedule` no longer calls serde_json on the hot path.
 - [x] **R2-13** `record_usage` now routed through bounded MPSC `UsageWriter` (capacity 4096, single consumer); Full/Closed drops increment `proxy_usage_records_dropped_total`. Replaces per-connection `tokio::spawn` fan-out in listener.rs and http2_handler.rs.

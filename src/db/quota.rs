@@ -3,36 +3,24 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
 /// Quota window period for bandwidth tracking.
+///
+/// Only `Monthly` is supported: the schema has no per-user period column,
+/// the admin UI exposes no period selector, and `bandwidth_limit_mb` /
+/// `monthly_bandwidth_quota` are both monthly by definition. Kept as an
+/// enum (single variant) so the JSON shape of `QuotaStats.period` stays
+/// stable for the dashboard, and so adding daily/weekly later is a
+/// schema-and-UI change rather than a type change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum QuotaPeriod {
-    Daily,
-    Weekly,
     Monthly,
 }
 
-impl Default for QuotaPeriod {
-    fn default() -> Self {
-        Self::Monthly
-    }
-}
-
 impl QuotaPeriod {
-    /// Get the Unix timestamp for the start of the current period.
+    /// Unix timestamp for the start of the current period.
     pub fn window_start(&self) -> i64 {
         let now = chrono::Utc::now();
         match self {
-            QuotaPeriod::Daily => now
-                .date_naive()
-                .and_hms_opt(0, 0, 0)
-                .unwrap()
-                .and_utc()
-                .timestamp(),
-            QuotaPeriod::Weekly => {
-                let days_since_monday = now.weekday().num_days_from_monday();
-                let monday = now.date_naive() - chrono::Duration::days(days_since_monday as i64);
-                monday.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp()
-            }
             QuotaPeriod::Monthly => {
                 let month_start = now.date_naive().with_day(1).unwrap_or(now.date_naive());
                 month_start
@@ -55,17 +43,9 @@ pub struct QuotaStats {
     pub period: QuotaPeriod,
 }
 
-/// Get user's quota usage stats for a given period.
+/// Get user's monthly quota usage stats.
 pub async fn get_quota_stats(pool: &SqlitePool, user_id: i64) -> Result<QuotaStats, sqlx::Error> {
-    get_quota_stats_with_period(pool, user_id, QuotaPeriod::Monthly).await
-}
-
-/// Get user's quota usage stats for a specific period.
-pub async fn get_quota_stats_with_period(
-    pool: &SqlitePool,
-    user_id: i64,
-    period: QuotaPeriod,
-) -> Result<QuotaStats, sqlx::Error> {
+    let period = QuotaPeriod::Monthly;
     let window_start = period.window_start();
     // The limit lives in two places historically:
     //   * `monthly_bandwidth_quota` (bytes, optional) — added by migration 006
