@@ -240,19 +240,15 @@ Comprehensive audit of the codebase as of 2026-03-25.
 - [x] **R2-15** On a fresh upstream connect failure the listener now calls `ConnectionPool::invalidate_addr` alongside `dns_cache.invalidate`, dropping any other idle pooled sockets to the same addr.
 - [x] **R2-16** Event-bus subscriber loop now `tokio::select!`s on `state.shutdown_tx.subscribe()` and breaks cleanly on shutdown.
 - [x] **R2-17** `LoginRateLimiter` now exposes `check_user(ip, username)` which gates on both per-IP and per-(IP, username) buckets. Login handler updated.
-- [ ] **R2-18** CORS likely too permissive on admin server — `src/admin/server.rs`
-  Restrict to configured origins; reject `*` when credentials are sent.
+- [x] **R2-18** CORS hardened: empty `cors_origins` = no cross-origin (was `Any`); explicit `"*"` downgraded to no-credentials + CONTENT_TYPE only; configured origin lists set `allow_credentials(true)` with `[AUTHORIZATION, CONTENT_TYPE]`. Never combines `Any` with credentials.
 
 ## PERFORMANCE
 
 - [x] **R2-19** `cached_user_by_id` now returns `Arc<CachedUser>` + 5s process-local Arc cache layer in front of Redis. Saves a JSON deserialize and full struct clone on every validator call (4-6× per connection). Wired into `invalidate_quota_cache`, `event_bus::UserInvalidated`/`UserDeleted`.
 - [x] **R2-20** `UPSTREAM_CONNECT_DURATION` is now only observed on actual new TCP connects (pool hits skipped), so the histogram reflects real upstream latency.
-- [ ] **R2-21** `ThrottlerRegistry::get_or_create` lookup per relay — `src/proxy/listener.rs:539-553`
-  Stash `Arc<Throttler>` alongside the live quota tracker entry.
-- [ ] **R2-22** Per-connection `format!` for tunnel labels — `src/proxy/listener.rs:535-536`
-  Replace with `tracing::Span` fields.
-- [ ] **R2-23** `H2_FORWARD_CLIENT` has no per-host limits — `src/proxy/http2_handler.rs:506`
-  `pool_max_idle_per_host` + per-host semaphore.
+- [x] **R2-21** `UserQuotaTracker` now caches the resolved throttler in a `OnceLock<Option<BandwidthThrottler>>`; relay path uses `throttler_cached()` fast path and only falls back to `bandwidth_throttlers.get_or_create` on the first connection per user.
+- [x] **R2-22** Replaced per-connection `format!()` tunnel labels with a `tracing::debug_span!("tunnel", protocol, client, target)` enclosing the relay; throttled tunnel now takes static `"c2t"` / `"t2c"` literals instead of allocated strings.
+- [x] **R2-23** `H2_FORWARD_CLIENT` now has `pool_max_idle_per_host` set, plus a per-host `Semaphore` (cap 32 in-flight) via `H2_FORWARD_HOST_LIMITERS: DashMap<String, Arc<Semaphore>>`. Forward path acquires a permit before `send`; closed semaphore returns 503.
 
 ## UNFINISHED / DEAD CODE
 
