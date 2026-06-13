@@ -305,6 +305,7 @@ async fn handle_h2_connect_validated(
         respond,
         state,
         quota_tracker,
+        ctx.is_admin,
     )
     .await;
 
@@ -485,6 +486,7 @@ async fn handle_h2_tunnel(
     mut respond: h2::server::SendResponse<bytes::Bytes>,
     state: &AppState,
     quota_tracker: Option<std::sync::Arc<crate::quota_tracker::UserQuotaTracker>>,
+    is_admin: bool,
 ) -> Result<(u64, u64), Box<dyn std::error::Error + Send + Sync>> {
     // Resolve via DNS cache
     let resolved_addr = timeout(
@@ -584,7 +586,8 @@ async fn handle_h2_tunnel(
                         break;
                     }
                     if let Some(ref q) = q_send {
-                        if q.add_and_over(n as i64) {
+                        let is_over = q.add_and_over(n as i64);
+                        if !is_admin && is_over {
                             tracing::warn!(
                                 "[HTTP2] quota exceeded mid-tunnel (used={}, limit={})",
                                 q.used(),
@@ -618,7 +621,8 @@ async fn handle_h2_tunnel(
                         break;
                     }
                     if let Some(ref q) = q_recv {
-                        if q.add_and_over(n as i64) {
+                        let is_over = q.add_and_over(n as i64);
+                        if !is_admin && is_over {
                             tracing::warn!(
                                 "[HTTP2] quota exceeded mid-tunnel (used={}, limit={})",
                                 q.used(),
