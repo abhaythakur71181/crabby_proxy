@@ -278,6 +278,7 @@ pub async fn create_throttled_tunnel<R1, W1, R2, W2>(
     label2: &str,
     throttler: Option<crate::bandwidth::BandwidthThrottler>,
     quota: Option<std::sync::Arc<crate::quota_tracker::UserQuotaTracker>>,
+    enforce_quota: bool,
 ) -> tokio::io::Result<(u64, u64)>
 where
     R1: AsyncRead + AsyncReadExt + Unpin,
@@ -301,8 +302,8 @@ where
     let q2 = quota;
     let a1 = aborted.clone();
     let a2 = aborted;
-    let relay1 = relay_with_throttle(tunnel1, label1, t1, q1, a1);
-    let relay2 = relay_with_throttle(tunnel2, label2, t2, q2, a2);
+    let relay1 = relay_with_throttle(tunnel1, label1, t1, q1, enforce_quota, a1);
+    let relay2 = relay_with_throttle(tunnel2, label2, t2, q2, enforce_quota, a2);
 
     // join! (not try_join!) so a partial count from one side is preserved
     // even if the other side errors.
@@ -322,6 +323,7 @@ async fn relay_with_throttle<R, W>(
     label: &str,
     throttler: Option<crate::bandwidth::BandwidthThrottler>,
     quota: Option<std::sync::Arc<crate::quota_tracker::UserQuotaTracker>>,
+    enforce_quota: bool,
     aborted: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> tokio::io::Result<u64>
 where
@@ -357,7 +359,8 @@ where
         // that can stop a long-lived CONNECT tunnel — admission checks alone
         // are insufficient because usage rows are written at close.
         if let Some(ref q) = quota {
-            if q.add_and_over(n as i64) {
+            let is_over = q.add_and_over(n as i64);
+            if enforce_quota && is_over {
                 tracing::warn!(
                     "{} - quota exceeded mid-stream after {} bytes (used={}, limit={}) — aborting tunnel",
                     label,

@@ -372,6 +372,7 @@ async fn handle_client(
         target,
         state,
         ctx.user_id,
+        ctx.is_admin,
     )
     .await;
 
@@ -483,6 +484,7 @@ async fn async_handle_client_with_target(
     target: ProxyTarget,
     state: &AppState,
     user_id: Option<i64>,
+    is_admin: bool,
 ) -> Result<(u64, u64), (io::Error, ErrorType)> {
     let target_addr = format!("{}:{}", target.host, target.port);
     let upstream_start = std::time::Instant::now();
@@ -630,6 +632,7 @@ async fn async_handle_client_with_target(
         "t2c",
         throttler,
         quota_tracker,
+        !is_admin,
     )
     .await
     {
