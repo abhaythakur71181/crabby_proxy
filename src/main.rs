@@ -71,6 +71,13 @@ struct Args {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
+    // Install the process-level rustls crypto provider before any TLS use
+    // (Redis rediss://, etc.). rustls 0.23 requires this when multiple or no
+    // provider features are auto-selected.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls ring crypto provider");
+
     match args.log_format.as_str() {
         "json" => {
             tracing_subscriber::fmt()
