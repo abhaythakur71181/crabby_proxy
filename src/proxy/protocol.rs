@@ -191,7 +191,7 @@ impl ProxyProtocol {
         for line in request_data.lines() {
             let lower_line = line.to_lowercase();
             if lower_line.starts_with("proxy-authorization:") {
-                return line.splitn(2, ':').nth(1).map(|v| v.trim());
+                return line.split_once(':').map(|x| x.1).map(|v| v.trim());
             }
         }
         None
@@ -215,8 +215,8 @@ impl ProxyProtocol {
         auth_header: &str,
         state: &AppState,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if auth_header.starts_with("Basic ") {
-            let encoded = &auth_header[6..]; // Skip "Basic " bytes
+        if let Some(encoded) = auth_header.strip_prefix("Basic ") {
+            // Skip "Basic " bytes
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(encoded)
                 .map_err(|_| "Invalid base64 encoding")?;
@@ -243,8 +243,7 @@ impl ProxyProtocol {
 
     /// Helper to extract user_id from HTTP auth header
     async fn extract_user_id_from_header(auth_header: &str, state: &AppState) -> Option<i64> {
-        if auth_header.starts_with("Basic ") {
-            let encoded = &auth_header[6..];
+        if let Some(encoded) = auth_header.strip_prefix("Basic ") {
             if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded) {
                 if let Ok(credentials) = String::from_utf8(decoded) {
                     let mut parts = credentials.splitn(2, ':');
@@ -370,7 +369,12 @@ impl ProxyProtocol {
     /// Detect the protocol from a client stream
     pub async fn detect_from_stream(client_stream: &mut TcpStream) -> Result<Self, io::Error> {
         let mut peek_buf = [0u8; 4];
-        match timeout(crate::constants::PEEK_TIMEOUT, client_stream.peek(&mut peek_buf)).await {
+        match timeout(
+            crate::constants::PEEK_TIMEOUT,
+            client_stream.peek(&mut peek_buf),
+        )
+        .await
+        {
             Ok(Ok(_)) => Ok(Self::detect_from_peek(&peek_buf).unwrap_or(ProxyProtocol::TCP)),
             Ok(Err(e)) => Err(e),
             Err(_) => Ok(ProxyProtocol::TCP),
@@ -829,8 +833,7 @@ impl ProxyProtocol {
     }
 
     fn parse_http_target(url: &str) -> io::Result<ProxyTarget> {
-        if url.starts_with("http://") {
-            let url_without_scheme = &url[7..];
+        if let Some(url_without_scheme) = url.strip_prefix("http://") {
             let host_and_port = url_without_scheme
                 .split('/')
                 .next()

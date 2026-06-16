@@ -30,11 +30,8 @@ pub async fn parse_proxy_protocol_v1(
         if buf.len() >= MAX_PROXY_HEADER_LEN {
             return Err(ProxyProtocolError::HeaderTooLong);
         }
-        match tokio::time::timeout(
-            crate::constants::PEEK_TIMEOUT,
-            stream.read_exact(&mut byte),
-        )
-        .await
+        match tokio::time::timeout(crate::constants::PEEK_TIMEOUT, stream.read_exact(&mut byte))
+            .await
         {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => return Err(ProxyProtocolError::Io(e)),

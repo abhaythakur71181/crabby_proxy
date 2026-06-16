@@ -69,7 +69,10 @@ pub async fn create_approval(
         "approval_created",
         Some("approval"),
         Some(&id.to_string()),
-        Some(&format!("User {}, IP: {}, duration: {}h", payload.user_id, payload.client_ip, payload.duration_hours)),
+        Some(&format!(
+            "User {}, IP: {}, duration: {}h",
+            payload.user_id, payload.client_ip, payload.duration_hours
+        )),
         None,
     )
     .await;
@@ -196,6 +199,9 @@ pub async fn terminate_approval(
         .await;
         Ok(StatusCode::OK)
     } else {
-        Err(ApiError::not_found(format!("Approval {} not found", approval_id)))
+        Err(ApiError::not_found(format!(
+            "Approval {} not found",
+            approval_id
+        )))
     }
 }

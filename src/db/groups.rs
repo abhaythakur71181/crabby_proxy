@@ -137,12 +137,14 @@ pub async fn add_user_to_group(
     group_id: i64,
 ) -> Result<(), sqlx::Error> {
     let now = chrono::Utc::now().timestamp();
-    sqlx::query("INSERT OR IGNORE INTO user_group_members (user_id, group_id, added_at) VALUES (?, ?, ?)")
-        .bind(user_id)
-        .bind(group_id)
-        .bind(now)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO user_group_members (user_id, group_id, added_at) VALUES (?, ?, ?)",
+    )
+    .bind(user_id)
+    .bind(group_id)
+    .bind(now)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 

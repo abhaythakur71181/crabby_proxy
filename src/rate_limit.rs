@@ -45,11 +45,7 @@ impl IpRateLimiter {
     }
 
     /// Create new IP rate limiter with an explicit cap on tracked IPs.
-    pub fn with_max_entries(
-        requests_per_second: u32,
-        burst_size: u32,
-        max_entries: usize,
-    ) -> Self {
+    pub fn with_max_entries(requests_per_second: u32, burst_size: u32, max_entries: usize) -> Self {
         let quota = Quota::per_second(
             std::num::NonZeroU32::new(requests_per_second).unwrap_or(nonzero!(10u32)),
         )
@@ -317,8 +313,7 @@ impl LoginRateLimiter {
         };
         let key = (ip_addr, username.to_string());
         let mut limiters = self.user_limiters.write().await;
-        let limiter =
-            limiters.get_or_insert(key, || GovernorRateLimiter::direct(self.user_quota));
+        let limiter = limiters.get_or_insert(key, || GovernorRateLimiter::direct(self.user_quota));
         limiter.check().is_ok()
     }
 

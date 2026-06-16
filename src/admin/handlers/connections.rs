@@ -70,7 +70,7 @@ async fn handle_live_connections(mut socket: WebSocket, state: Arc<AppState>) {
                         "timestamp": chrono::Utc::now().timestamp(),
                     });
 
-                    if let Err(e) = socket.send(Message::Text(payload.to_string().into())).await {
+                    if let Err(e) = socket.send(Message::Text(payload.to_string())).await {
                         tracing::debug!("WebSocket send error (client disconnected?): {}", e);
                         break;
                     }
