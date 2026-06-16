@@ -103,7 +103,10 @@ pub async fn create_request(
         "approval_request_created",
         Some("approval_request"),
         Some(&id.to_string()),
-        Some(&format!("IP: {}, duration: {}h", payload.client_ip, payload.duration_hours)),
+        Some(&format!(
+            "IP: {}, duration: {}h",
+            payload.client_ip, payload.duration_hours
+        )),
         None,
     )
     .await;
@@ -186,9 +189,7 @@ pub async fn approve_request(
                 "user_id": r.user_id,
             })))
         }
-        None => Err(ApiError::not_found(
-            "Request not found or already decided",
-        )),
+        None => Err(ApiError::not_found("Request not found or already decided")),
     }
 }
 
@@ -232,8 +233,6 @@ pub async fn reject_request(
             "status": "rejected",
         })))
     } else {
-        Err(ApiError::not_found(
-            "Request not found or already decided",
-        ))
+        Err(ApiError::not_found("Request not found or already decided"))
     }
 }

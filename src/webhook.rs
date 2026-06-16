@@ -52,9 +52,8 @@ pub fn send_webhook(config: Arc<ArcSwap<Config>>, event: &str, data: serde_json:
 
         for attempt in 0..=MAX_RETRIES {
             if attempt > 0 {
-                let delay = std::time::Duration::from_secs(
-                    BASE_RETRY_DELAY_SECS * 2u64.pow(attempt - 1),
-                );
+                let delay =
+                    std::time::Duration::from_secs(BASE_RETRY_DELAY_SECS * 2u64.pow(attempt - 1));
                 tracing::debug!(
                     "Webhook retry {}/{} for {} -> {} (delay: {:?})",
                     attempt,

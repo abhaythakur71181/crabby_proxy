@@ -90,12 +90,7 @@ impl MiddlewareChain {
 
     /// Run all middleware for a given phase. Returns `Verdict::Deny` on
     /// the first denial, or `Verdict::Allow` if all pass.
-    pub async fn run(
-        &self,
-        phase: Phase,
-        ctx: &ConnectionContext,
-        state: &AppState,
-    ) -> Verdict {
+    pub async fn run(&self, phase: Phase, ctx: &ConnectionContext, state: &AppState) -> Verdict {
         let chain = match phase {
             Phase::PreAuth => &self.pre_auth,
             Phase::PostAuth => &self.post_auth,
@@ -194,8 +189,12 @@ mod tests {
         struct PostAuthMw;
         #[async_trait::async_trait]
         impl Middleware for PostAuthMw {
-            fn name(&self) -> &str { "post-auth" }
-            fn phase(&self) -> Phase { Phase::PostAuth }
+            fn name(&self) -> &str {
+                "post-auth"
+            }
+            fn phase(&self) -> Phase {
+                Phase::PostAuth
+            }
             async fn check(&self, _: &ConnectionContext, _: &AppState) -> Verdict {
                 Verdict::Allow
             }
@@ -204,16 +203,20 @@ mod tests {
         struct PostTargetMw;
         #[async_trait::async_trait]
         impl Middleware for PostTargetMw {
-            fn name(&self) -> &str { "post-target" }
-            fn phase(&self) -> Phase { Phase::PostTarget }
+            fn name(&self) -> &str {
+                "post-target"
+            }
+            fn phase(&self) -> Phase {
+                Phase::PostTarget
+            }
             async fn check(&self, _: &ConnectionContext, _: &AppState) -> Verdict {
                 Verdict::Allow
             }
         }
 
-        chain.add(Arc::new(AlwaysAllow));   // PreAuth
-        chain.add(Arc::new(PostAuthMw));     // PostAuth
-        chain.add(Arc::new(PostTargetMw));   // PostTarget
+        chain.add(Arc::new(AlwaysAllow)); // PreAuth
+        chain.add(Arc::new(PostAuthMw)); // PostAuth
+        chain.add(Arc::new(PostTargetMw)); // PostTarget
 
         assert_eq!(chain.pre_auth.len(), 1);
         assert_eq!(chain.post_auth.len(), 1);

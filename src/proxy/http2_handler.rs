@@ -27,7 +27,11 @@ use tokio::time::timeout;
 /// 3. Runs the full validation pipeline (auth, rate limit, quota, etc.)
 /// 4. Opens an upstream TCP connection
 /// 5. Bridges data between the h2 stream and the upstream connection
-pub async fn handle_h2_connection(stream: TcpStream, client_addr: SocketAddr, state_arc: Arc<AppState>) {
+pub async fn handle_h2_connection(
+    stream: TcpStream,
+    client_addr: SocketAddr,
+    state_arc: Arc<AppState>,
+) {
     let state = &*state_arc;
     let mut h2 = match h2::server::handshake(stream).await {
         Ok(conn) => conn,
@@ -75,7 +79,8 @@ pub async fn handle_h2_connection(stream: TcpStream, client_addr: SocketAddr, st
                 .map(|s| s.to_string());
             let state_ref = state_arc.clone();
             tokio::spawn(async move {
-                handle_h2_forward_validated(request, respond, client_addr, auth_header, &state_ref).await;
+                handle_h2_forward_validated(request, respond, client_addr, auth_header, &state_ref)
+                    .await;
             });
             continue;
         }
@@ -107,15 +112,8 @@ pub async fn handle_h2_connection(stream: TcpStream, client_addr: SocketAddr, st
         // Each stream gets its own validation pipeline
         let state_ref = state_arc.clone();
         tokio::spawn(async move {
-            handle_h2_connect_validated(
-                authority,
-                addr,
-                auth_header,
-                request,
-                respond,
-                &state_ref,
-            )
-            .await;
+            handle_h2_connect_validated(authority, addr, auth_header, request, respond, &state_ref)
+                .await;
         });
     }
 
@@ -315,7 +313,8 @@ async fn handle_h2_connect_validated(
     if let Err(e) = state.state.delete_connection(conn_id).await {
         tracing::warn!(
             "[HTTP2] state backend: delete_connection({}) failed: {}",
-            conn_id, e
+            conn_id,
+            e
         );
         crate::metrics::STATE_BACKEND_ERRORS
             .with_label_values(&["delete_connection"])
@@ -353,7 +352,12 @@ async fn handle_h2_connect_validated(
             }
         }
         Err(e) => {
-            tracing::error!("[HTTP2] Tunnel error for {} -> {}: {}", client_addr, authority, e);
+            tracing::error!(
+                "[HTTP2] Tunnel error for {} -> {}: {}",
+                client_addr,
+                authority,
+                e
+            );
             crate::metrics::REQUESTS_TOTAL
                 .with_label_values(&["HTTP2", "failed"])
                 .inc();
@@ -496,9 +500,34 @@ async fn handle_h2_tunnel(
     .await
     .map_err(|_| "DNS resolution timeout")??;
 
+    // Self-loop protection: refuse to connect back to our own listener.
+    if let Some(ref guard) = state.self_loop_guard {
+        if guard.is_self_loop(resolved_addr) {
+            tracing::warn!(
+                target: "audit",
+                client_addr = %client_addr,
+                authority = %authority,
+                resolved = %resolved_addr,
+                rule = "self_loop",
+                "[HTTP2] blocked self-loop: target resolves to the proxy's own listener"
+            );
+            let response = http::Response::builder()
+                .status(http::StatusCode::FORBIDDEN)
+                .body(())
+                .unwrap_or_else(|_| http::Response::new(()));
+            let _ = respond.send_response(response, true);
+            return Err("self-loop blocked: target is the proxy's own listener".into());
+        }
+    }
+
     // Connect to upstream
     let connect_start = std::time::Instant::now();
-    let upstream = match timeout(crate::constants::UPSTREAM_CONNECT_TIMEOUT, TcpStream::connect(resolved_addr)).await {
+    let upstream = match timeout(
+        crate::constants::UPSTREAM_CONNECT_TIMEOUT,
+        TcpStream::connect(resolved_addr),
+    )
+    .await
+    {
         Ok(Ok(stream)) => stream,
         Ok(Err(e)) => {
             tracing::error!(
@@ -557,9 +586,6 @@ async fn handle_h2_tunnel(
         client_addr,
         authority
     );
-
-    let bytes_sent: u64;
-    let bytes_received: u64;
 
     // Use Arc+AtomicU64 to share byte counts between the two tasks
     let sent_counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -645,8 +671,8 @@ async fn handle_h2_tunnel(
     // Run both directions concurrently
     tokio::join!(h2_to_upstream, upstream_to_h2);
 
-    bytes_sent = sent_counter.load(std::sync::atomic::Ordering::Relaxed);
-    bytes_received = recv_counter.load(std::sync::atomic::Ordering::Relaxed);
+    let bytes_sent: u64 = sent_counter.load(std::sync::atomic::Ordering::Relaxed);
+    let bytes_received: u64 = recv_counter.load(std::sync::atomic::Ordering::Relaxed);
 
     tracing::info!(
         "[HTTP2] Tunnel closed: {} <-> {} (sent: {}, received: {})",
@@ -761,7 +787,9 @@ async fn handle_h2_forward_validated(
     if !target_url.starts_with("http://") && !target_url.starts_with("https://") {
         tracing::warn!(
             "[HTTP2-FWD] Non-absolute URI from {}: {} {}",
-            client_addr, method, uri
+            client_addr,
+            method,
+            uri
         );
         let resp = http::Response::builder()
             .status(http::StatusCode::BAD_REQUEST)
@@ -807,7 +835,9 @@ async fn handle_h2_forward_validated(
 
     tracing::debug!(
         "[HTTP2-FWD] Forwarding {} {} for {}",
-        method, target_url, client_addr
+        method,
+        target_url,
+        client_addr
     );
 
     // Read request body
@@ -878,7 +908,7 @@ async fn handle_h2_forward_validated(
             match respond.send_response(response, resp_body.is_empty()) {
                 Ok(mut send) => {
                     if !resp_body.is_empty() {
-                        let _ = send.send_data(bytes::Bytes::from(resp_body), true);
+                        let _ = send.send_data(resp_body, true);
                     }
                 }
                 Err(e) => {
@@ -895,9 +925,7 @@ async fn handle_h2_forward_validated(
 
             // Track bandwidth for quota
             if let Some(uid) = ctx.effective_uid() {
-                state
-                    .track_bandwidth(uid, bytes_transferred as i64)
-                    .await;
+                state.track_bandwidth(uid, bytes_transferred as i64).await;
             }
 
             tracing::info!(
@@ -916,7 +944,9 @@ async fn handle_h2_forward_validated(
         Err(e) => {
             tracing::error!(
                 "[HTTP2-FWD] Forward failed for {} {}: {}",
-                method, target_url, e
+                method,
+                target_url,
+                e
             );
             let resp = http::Response::builder()
                 .status(http::StatusCode::BAD_GATEWAY)
