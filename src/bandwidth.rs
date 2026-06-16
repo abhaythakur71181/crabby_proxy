@@ -102,6 +102,12 @@ pub struct ThrottlerRegistry {
     throttlers: dashmap::DashMap<i64, BandwidthThrottler>,
 }
 
+impl Default for ThrottlerRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ThrottlerRegistry {
     pub fn new() -> Self {
         Self {

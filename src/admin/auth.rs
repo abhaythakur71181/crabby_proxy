@@ -51,71 +51,64 @@ pub async fn auth_middleware(
         }
         Some(auth) if auth.starts_with("Basic ") => {
             let encoded = auth.trim_start_matches("Basic ");
-            match general_purpose::STANDARD.decode(encoded) {
-                Ok(decoded) => {
-                    let credentials = String::from_utf8_lossy(&decoded);
-                    let parts: Vec<&str> = credentials.splitn(2, ':').collect();
+            if let Ok(decoded) = general_purpose::STANDARD.decode(encoded) {
+                let credentials = String::from_utf8_lossy(&decoded);
+                let parts: Vec<&str> = credentials.splitn(2, ':').collect();
 
-                    if parts.len() == 2 {
-                        let (username, password) = (parts[0], parts[1]);
-                        match users::verify_password(&state.db_pool, username, password).await {
-                            Ok(Some(user)) => {
-                                // Attach user_id to request extensions
-                                let user_id = user.id;
-                                request.extensions_mut().insert(user_id);
-                                if let Err(e) = check_user_rate_limit(&state, user_id).await {
-                                    tracing::warn!(
-                                        "Rate limit exceeded for user {}: {}",
-                                        user_id,
-                                        e
-                                    );
-                                    return Err(StatusCode::TOO_MANY_REQUESTS);
-                                }
-
-                                return Ok(next.run(request).await);
+                if parts.len() == 2 {
+                    let (username, password) = (parts[0], parts[1]);
+                    match users::verify_password(&state.db_pool, username, password).await {
+                        Ok(Some(user)) => {
+                            // Attach user_id to request extensions
+                            let user_id = user.id;
+                            request.extensions_mut().insert(user_id);
+                            if let Err(e) = check_user_rate_limit(&state, user_id).await {
+                                tracing::warn!("Rate limit exceeded for user {}: {}", user_id, e);
+                                return Err(StatusCode::TOO_MANY_REQUESTS);
                             }
-                            _ => {
-                                // Fallback to Config credentials
-                                let config = state.config.load();
-                                if username == config.admin.admin_username
-                                    && password == config.admin.admin_password
+
+                            return Ok(next.run(request).await);
+                        }
+                        _ => {
+                            // Fallback to Config credentials
+                            let config = state.config.load();
+                            if username == config.admin.admin_username
+                                && password == config.admin.admin_password
+                            {
+                                // Look up root admin user from DB for an accurate
+                                // user_id. We refuse to fall back to a sentinel — a
+                                // negative id can confuse downstream code that does
+                                // `user_id > 0` checks and may quietly bypass per-user
+                                // accounting (quotas, audit logs, rate limits).
+                                match crate::db::users::get_user_by_username(
+                                    &state.db_pool,
+                                    "root_admin",
+                                )
+                                .await
                                 {
-                                    // Look up root admin user from DB for an accurate
-                                    // user_id. We refuse to fall back to a sentinel — a
-                                    // negative id can confuse downstream code that does
-                                    // `user_id > 0` checks and may quietly bypass per-user
-                                    // accounting (quotas, audit logs, rate limits).
-                                    match crate::db::users::get_user_by_username(
-                                        &state.db_pool,
-                                        "root_admin",
-                                    )
-                                    .await
-                                    {
-                                        Ok(Some(user)) => {
-                                            request.extensions_mut().insert(user.id);
-                                            // Root admin bypasses rate limiting.
-                                            return Ok(next.run(request).await);
-                                        }
-                                        Ok(None) => {
-                                            tracing::error!(
-                                                "Config admin login succeeded but root_admin user is missing from database; rejecting to avoid sentinel user_id"
-                                            );
-                                            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                                        }
-                                        Err(e) => {
-                                            tracing::error!(
-                                                "Config admin login: failed to look up root_admin: {}",
-                                                e
-                                            );
-                                            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                                        }
+                                    Ok(Some(user)) => {
+                                        request.extensions_mut().insert(user.id);
+                                        // Root admin bypasses rate limiting.
+                                        return Ok(next.run(request).await);
+                                    }
+                                    Ok(None) => {
+                                        tracing::error!(
+                                            "Config admin login succeeded but root_admin user is missing from database; rejecting to avoid sentinel user_id"
+                                        );
+                                        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "Config admin login: failed to look up root_admin: {}",
+                                            e
+                                        );
+                                        return Err(StatusCode::INTERNAL_SERVER_ERROR);
                                     }
                                 }
                             }
                         }
                     }
                 }
-                Err(_) => {}
             }
         }
         _ => {}
@@ -202,7 +195,9 @@ impl CurrentUser {
         if self.role == "root_admin" || self.role == "admin" {
             Ok(())
         } else {
-            Err(super::handlers::models::ApiError::forbidden("Admin access required"))
+            Err(super::handlers::models::ApiError::forbidden(
+                "Admin access required",
+            ))
         }
     }
 
@@ -218,7 +213,9 @@ impl CurrentUser {
             .ok_or_else(|| super::handlers::models::ApiError::unauthorized("Invalid session"))?;
 
         if !cached.is_active {
-            return Err(super::handlers::models::ApiError::unauthorized("Account is disabled"));
+            return Err(super::handlers::models::ApiError::unauthorized(
+                "Account is disabled",
+            ));
         }
 
         Ok(CurrentUser {

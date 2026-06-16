@@ -1,6 +1,6 @@
+use crate::db::models::{ApiKey, Role, User};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use crate::db::models::{ApiKey, Role, User};
 use serde::{Deserialize, Serialize};
 
 /// Structured error response for admin API endpoints.
@@ -16,23 +16,47 @@ pub struct ApiError {
 
 impl ApiError {
     pub fn bad_request(msg: impl Into<String>) -> Self {
-        Self { status: StatusCode::BAD_REQUEST, error: msg.into(), detail: None }
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            error: msg.into(),
+            detail: None,
+        }
     }
     pub fn unauthorized(msg: impl Into<String>) -> Self {
-        Self { status: StatusCode::UNAUTHORIZED, error: msg.into(), detail: None }
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            error: msg.into(),
+            detail: None,
+        }
     }
     pub fn forbidden(msg: impl Into<String>) -> Self {
-        Self { status: StatusCode::FORBIDDEN, error: msg.into(), detail: None }
+        Self {
+            status: StatusCode::FORBIDDEN,
+            error: msg.into(),
+            detail: None,
+        }
     }
     pub fn not_found(msg: impl Into<String>) -> Self {
-        Self { status: StatusCode::NOT_FOUND, error: msg.into(), detail: None }
+        Self {
+            status: StatusCode::NOT_FOUND,
+            error: msg.into(),
+            detail: None,
+        }
     }
     #[allow(dead_code)]
     pub fn conflict(msg: impl Into<String>) -> Self {
-        Self { status: StatusCode::CONFLICT, error: msg.into(), detail: None }
+        Self {
+            status: StatusCode::CONFLICT,
+            error: msg.into(),
+            detail: None,
+        }
     }
     pub fn internal(msg: impl Into<String>) -> Self {
-        Self { status: StatusCode::INTERNAL_SERVER_ERROR, error: msg.into(), detail: None }
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            error: msg.into(),
+            detail: None,
+        }
     }
     #[allow(dead_code)]
     pub fn with_detail(mut self, detail: impl Into<String>) -> Self {

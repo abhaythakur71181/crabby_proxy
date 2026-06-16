@@ -37,8 +37,9 @@ impl EventBus {
         let client = redis::Client::open(redis_url)?;
         let conn = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            ConnectionManager::new(client)
-        ).await??;
+            ConnectionManager::new(client),
+        )
+        .await??;
         let channel = format!("{}events", prefix);
         tracing::info!("Event bus publisher connected (channel: {})", channel);
         Ok(Self { conn, channel })

@@ -5,17 +5,13 @@ use std::str::FromStr;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum FilterMode {
     /// Block mode: Allow all except those in block_list
+    #[default]
     BlockList,
     /// Allow mode: Block all except those in allow_list
     AllowList,
-}
-
-impl Default for FilterMode {
-    fn default() -> Self {
-        FilterMode::BlockList
-    }
 }
 
 #[derive(Debug, Clone)]

@@ -56,10 +56,7 @@ pub struct ComponentHealth {
 /// GET /api/health/deep — Verify connectivity to all backing services.
 pub async fn deep_health_check(State(state): State<Arc<AppState>>) -> Json<DeepHealthResponse> {
     // Check SQLite
-    let db_health = match sqlx::query("SELECT 1")
-        .fetch_one(&state.db_pool)
-        .await
-    {
+    let db_health = match sqlx::query("SELECT 1").fetch_one(&state.db_pool).await {
         Ok(_) => ComponentHealth {
             status: "ok".to_string(),
             detail: None,
@@ -86,7 +83,10 @@ pub async fn deep_health_check(State(state): State<Arc<AppState>>) -> Json<DeepH
     let (dns_entries, dns_addrs) = state.dns_cache.stats();
     let dns_health = ComponentHealth {
         status: "ok".to_string(),
-        detail: Some(format!("{} entries, {} addresses cached", dns_entries, dns_addrs)),
+        detail: Some(format!(
+            "{} entries, {} addresses cached",
+            dns_entries, dns_addrs
+        )),
     };
 
     let all_ok = db_health.status == "ok" && state_health.status == "ok";
@@ -119,10 +119,10 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> Json<StatsResponse> {
     // Read bandwidth from Prometheus counters
     let bytes_sent = crate::metrics::BYTES_TRANSFERRED
         .with_label_values(&["sent"])
-        .get() as u64;
+        .get();
     let bytes_received = crate::metrics::BYTES_TRANSFERRED
         .with_label_values(&["received"])
-        .get() as u64;
+        .get();
 
     Json(StatsResponse {
         uptime_seconds: state.uptime().as_secs(),
@@ -175,10 +175,10 @@ pub async fn dashboard(State(state): State<Arc<AppState>>) -> Json<DashboardResp
         .unwrap_or(0);
     let bytes_sent = crate::metrics::BYTES_TRANSFERRED
         .with_label_values(&["sent"])
-        .get() as u64;
+        .get();
     let bytes_received = crate::metrics::BYTES_TRANSFERRED
         .with_label_values(&["received"])
-        .get() as u64;
+        .get();
     // 24h usage stats
     let (bandwidth_24h, connections_24h) =
         match crate::db::usage::get_system_usage_stats(&state.db_pool, 1).await {
@@ -272,7 +272,9 @@ pub async fn json_metrics(State(_state): State<Arc<AppState>>) -> Json<JsonMetri
     for fam in &families {
         if fam.get_name() == "proxy_active_connections" {
             for m in fam.get_metric() {
-                let protocol = m.get_label().iter()
+                let protocol = m
+                    .get_label()
+                    .iter()
                     .find(|l| l.get_name() == "protocol")
                     .map(|l| l.get_value().to_string())
                     .unwrap_or_else(|| "unknown".to_string());
@@ -287,10 +289,10 @@ pub async fn json_metrics(State(_state): State<Arc<AppState>>) -> Json<JsonMetri
     // Bytes transferred
     let bytes_sent = crate::metrics::BYTES_TRANSFERRED
         .with_label_values(&["sent"])
-        .get() as u64;
+        .get();
     let bytes_received = crate::metrics::BYTES_TRANSFERRED
         .with_label_values(&["received"])
-        .get() as u64;
+        .get();
 
     // Requests total
     let mut success: u64 = 0;
@@ -298,7 +300,9 @@ pub async fn json_metrics(State(_state): State<Arc<AppState>>) -> Json<JsonMetri
     for fam in &families {
         if fam.get_name() == "proxy_requests_total" {
             for m in fam.get_metric() {
-                let status = m.get_label().iter()
+                let status = m
+                    .get_label()
+                    .iter()
                     .find(|l| l.get_name() == "status")
                     .map(|l| l.get_value())
                     .unwrap_or("unknown");
@@ -317,7 +321,9 @@ pub async fn json_metrics(State(_state): State<Arc<AppState>>) -> Json<JsonMetri
     for fam in &families {
         if fam.get_name() == "proxy_auth_failures_total" {
             for m in fam.get_metric() {
-                let reason = m.get_label().iter()
+                let reason = m
+                    .get_label()
+                    .iter()
                     .find(|l| l.get_name() == "reason")
                     .map(|l| l.get_value().to_string())
                     .unwrap_or_else(|| "unknown".to_string());
@@ -332,18 +338,18 @@ pub async fn json_metrics(State(_state): State<Arc<AppState>>) -> Json<JsonMetri
     // IP filter stats
     let ip_allowed = crate::metrics::IP_FILTER_ACTIONS
         .with_label_values(&["allowed"])
-        .get() as u64;
+        .get();
     let ip_blocked = crate::metrics::IP_FILTER_ACTIONS
         .with_label_values(&["blocked"])
-        .get() as u64;
+        .get();
 
     // Rate limit stats
     let rl_ip = crate::metrics::RATE_LIMIT_EXCEEDED
         .with_label_values(&["ip"])
-        .get() as u64;
+        .get();
     let rl_user = crate::metrics::RATE_LIMIT_EXCEEDED
         .with_label_values(&["user"])
-        .get() as u64;
+        .get();
 
     // Connection duration percentiles from histogram
     let (p50, p95, p99) = {
@@ -351,7 +357,9 @@ pub async fn json_metrics(State(_state): State<Arc<AppState>>) -> Json<JsonMetri
         let mut p95 = 0.0_f64;
         let mut p99 = 0.0_f64;
         for fam in &families {
-            if fam.get_name() == "proxy_connection_duration_seconds" && fam.get_field_type() == MetricType::HISTOGRAM {
+            if fam.get_name() == "proxy_connection_duration_seconds"
+                && fam.get_field_type() == MetricType::HISTOGRAM
+            {
                 // Aggregate across all protocols
                 let mut total_count: u64 = 0;
                 let mut buckets: Vec<(f64, u64)> = Vec::new();
@@ -369,9 +377,15 @@ pub async fn json_metrics(State(_state): State<Arc<AppState>>) -> Json<JsonMetri
                 if total_count > 0 {
                     for (upper, cum) in &buckets {
                         let pct = *cum as f64 / total_count as f64;
-                        if pct >= 0.5 && p50 == 0.0 { p50 = *upper; }
-                        if pct >= 0.95 && p95 == 0.0 { p95 = *upper; }
-                        if pct >= 0.99 && p99 == 0.0 { p99 = *upper; }
+                        if pct >= 0.5 && p50 == 0.0 {
+                            p50 = *upper;
+                        }
+                        if pct >= 0.95 && p95 == 0.0 {
+                            p95 = *upper;
+                        }
+                        if pct >= 0.99 && p99 == 0.0 {
+                            p99 = *upper;
+                        }
                     }
                 }
             }
@@ -384,11 +398,20 @@ pub async fn json_metrics(State(_state): State<Arc<AppState>>) -> Json<JsonMetri
 
     Json(JsonMetricsResponse {
         active_by_protocol,
-        bytes_transferred: BytesTransferred { sent: bytes_sent, received: bytes_received },
+        bytes_transferred: BytesTransferred {
+            sent: bytes_sent,
+            received: bytes_received,
+        },
         requests_total: RequestsTotal { success, failed },
         auth_failures_by_reason,
-        ip_filter: IpFilterStats { allowed: ip_allowed, blocked: ip_blocked },
-        rate_limit_exceeded: RateLimitStats { ip: rl_ip, user: rl_user },
+        ip_filter: IpFilterStats {
+            allowed: ip_allowed,
+            blocked: ip_blocked,
+        },
+        rate_limit_exceeded: RateLimitStats {
+            ip: rl_ip,
+            user: rl_user,
+        },
         connection_duration_p50: p50,
         connection_duration_p95: p95,
         connection_duration_p99: p99,
