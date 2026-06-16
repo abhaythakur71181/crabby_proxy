@@ -34,7 +34,7 @@ governor = "0.6"
 nonzero_ext = "0.3"
 ipnet = "2.9"
 prometheus = "0.13"
-redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager", "tls-rustls", "tokio-rustls-comp", "tls-rustls-webpki-roots"] }
 lru = "0.12"
 dashmap = "6"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
