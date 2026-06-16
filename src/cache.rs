@@ -24,8 +24,9 @@ impl CacheLayer {
         let client = redis::Client::open(redis_url)?;
         let conn = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            ConnectionManager::new(client)
-        ).await??;
+            ConnectionManager::new(client),
+        )
+        .await??;
         tracing::info!("Cache layer connected to Redis at {}", redis_url);
         Ok(Self { conn, prefix })
     }

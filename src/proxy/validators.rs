@@ -125,10 +125,7 @@ pub async fn validate_approval(ctx: &ConnectionContext, state: &AppState) -> Ver
         Some(uid) => uid,
         None => return Verdict::Allow,
     };
-    match state
-        .cached_ip_approved(uid, ctx.client_addr.ip())
-        .await
-    {
+    match state.cached_ip_approved(uid, ctx.client_addr.ip()).await {
         Ok(true) => Verdict::Allow,
         Ok(false) => Verdict::Deny(format!(
             "IP {} not approved for user {}",

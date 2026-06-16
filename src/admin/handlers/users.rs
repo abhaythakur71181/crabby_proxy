@@ -31,10 +31,8 @@ pub async fn create_user(
     if current_user.get_role() != Role::RootAdmin {
         return Err(ApiError::forbidden("Only root_admin can create users"));
     }
-    crate::validation::validate_username(&request.username)
-        .map_err(|e| ApiError::bad_request(e))?;
-    crate::validation::validate_password(&request.password)
-        .map_err(|e| ApiError::bad_request(e))?;
+    crate::validation::validate_username(&request.username).map_err(ApiError::bad_request)?;
+    crate::validation::validate_password(&request.password).map_err(ApiError::bad_request)?;
     if let Ok(Some(_)) = users::get_user_by_username(&state.db_pool, &request.username).await {
         return Err(ApiError::conflict(format!(
             "Username '{}' already exists",
@@ -52,8 +50,7 @@ pub async fn create_user(
         allowed_protocols: None,
         notes: None,
     };
-    let user_id = users::create_user(&state.db_pool, &db_request, Some(current_user_id))
-        .await?;
+    let user_id = users::create_user(&state.db_pool, &db_request, Some(current_user_id)).await?;
     let user = users::get_user_by_id(&state.db_pool, user_id)
         .await?
         .ok_or_else(|| ApiError::internal("Failed to retrieve created user"))?;
@@ -150,13 +147,17 @@ pub async fn update_user(
             || request.bandwidth_limit_mb.is_some()
             || request.is_active.is_some())
     {
-        return Err(ApiError::forbidden("Only root_admin can change role, quotas, or active status"));
+        return Err(ApiError::forbidden(
+            "Only root_admin can change role, quotas, or active status",
+        ));
     }
 
     // Validate password length if provided
     if let Some(ref pwd) = request.password {
         if pwd.len() < 8 {
-            return Err(ApiError::bad_request("Password must be at least 8 characters"));
+            return Err(ApiError::bad_request(
+                "Password must be at least 8 characters",
+            ));
         }
     }
 
@@ -232,7 +233,9 @@ pub async fn create_api_key(
         current_user.get_role() == Role::RootAdmin || current_user.get_role() == Role::Admin;
 
     if !is_self && !is_admin_plus {
-        return Err(ApiError::forbidden("Cannot create API keys for other users"));
+        return Err(ApiError::forbidden(
+            "Cannot create API keys for other users",
+        ));
     }
 
     let name = if req_name.is_empty() {

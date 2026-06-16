@@ -1,5 +1,5 @@
 use super::models::ApiError;
-use axum::{extract::Path, Json, extract::State};
+use axum::{extract::Path, extract::State, Json};
 use serde::{Deserialize, Serialize};
 
 use crate::app_state::AppState;

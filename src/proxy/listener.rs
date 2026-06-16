@@ -234,7 +234,7 @@ async fn handle_client(
     };
     // Update context with auth results
     ctx.user_id = user_id;
-    ctx.protocol = Some(protocol.clone());
+    ctx.protocol = Some(protocol);
     if let Some(uid) = ctx.effective_uid() {
         ctx.is_admin = state
             .cached_user_by_id(uid)
@@ -502,6 +502,27 @@ async fn async_handle_client_with_target(
         )
     })?
     .map_err(|e| (e, ErrorType::Connection))?;
+
+    // Self-loop protection: refuse to connect back to our own listener.
+    if let Some(ref guard) = state.self_loop_guard {
+        if guard.is_self_loop(resolved_addr) {
+            tracing::warn!(
+                target: "audit",
+                client_addr = %client_addr,
+                target = %target_addr,
+                resolved = %resolved_addr,
+                rule = "self_loop",
+                "blocked self-loop: target resolves to the proxy's own listener"
+            );
+            return Err((
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "self-loop blocked: target is the proxy's own listener",
+                ),
+                ErrorType::Connection,
+            ));
+        }
+    }
 
     // Try the connection pool first so pool hits aren't counted in the
     // "new connect" histogram (R2-20). On a fresh connect failure we also

@@ -1,8 +1,8 @@
-use arc_swap::ArcSwap;
 use crate::cache::CacheLayer;
 use crate::config::Config;
 use crate::state::{MemoryBackend, RedisBackend, StateBackend};
 use crate::tunnel::manager::TunnelManager;
+use arc_swap::ArcSwap;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{mpsc, RwLock};
@@ -124,6 +124,10 @@ pub struct AppState {
 
     // Event bus for cross-instance coordination (optional — requires Redis)
     pub event_bus: Option<crate::event_bus::EventBus>,
+
+    // Self-loop protection: blocks the proxy from connecting back to its own
+    // listener. `None` if the bind address couldn't be parsed.
+    pub self_loop_guard: Option<crate::self_loop::SelfLoopGuard>,
 }
 
 impl AppState {
@@ -226,6 +230,15 @@ impl AppState {
         let geo_filter =
             crate::geo_filter::init_geo_filter(config.filtering.geoip_database_path.as_deref());
 
+        // Build self-loop guard from the proxy bind address.
+        let self_loop_guard = crate::self_loop::SelfLoopGuard::from_bind(&config.server.proxy_bind);
+        if self_loop_guard.is_none() {
+            tracing::warn!(
+                "Could not parse proxy_bind '{}' — self-loop protection disabled",
+                config.server.proxy_bind
+            );
+        }
+
         // Create graceful shutdown channel
         let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
 
@@ -303,6 +316,7 @@ impl AppState {
                     None
                 }
             },
+            self_loop_guard,
         })
     }
 
@@ -357,10 +371,7 @@ impl AppState {
     /// Returns `Arc<CachedUser>` so the hot path doesn't clone the full
     /// struct; the in-process layer also lets us short-circuit Redis +
     /// JSON deserialization for the 5s TTL window.
-    pub async fn cached_user_by_id(
-        &self,
-        user_id: i64,
-    ) -> Option<Arc<crate::cache::CachedUser>> {
+    pub async fn cached_user_by_id(&self, user_id: i64) -> Option<Arc<crate::cache::CachedUser>> {
         const ARC_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
         if let Some(entry) = self.user_arc_cache.get(&user_id) {
@@ -502,8 +513,7 @@ impl AppState {
         self.quota_cache.remove(&user_id);
         // Refresh the live quota tracker's limit in place (preserve `used`).
         if let Ok(stats) = crate::db::quota::get_quota_stats(&self.db_pool, user_id).await {
-            self.quota_trackers
-                .update_limit(user_id, stats.quota_bytes);
+            self.quota_trackers.update_limit(user_id, stats.quota_bytes);
         } else {
             self.quota_trackers.invalidate(user_id);
         }
@@ -526,16 +536,18 @@ impl AppState {
         // tracker seed uses (`monthly_bandwidth_quota` if set, else
         // `bandwidth_limit_mb` × 1 MiB; 0 means unlimited).
         match crate::db::quota::get_quota_stats(&self.db_pool, user_id).await {
-            Ok(stats) => self
-                .quota_trackers
-                .update_limit(user_id, stats.quota_bytes),
+            Ok(stats) => self.quota_trackers.update_limit(user_id, stats.quota_bytes),
             Err(_) => self.quota_trackers.invalidate(user_id),
         }
     }
 
     /// Check if IP is approved for user, with in-memory + Redis cache-aside.
     /// Returns true/false. DB is only hit on cache miss.
-    pub async fn cached_ip_approved(&self, user_id: i64, client_ip: std::net::IpAddr) -> Result<bool, sqlx::Error> {
+    pub async fn cached_ip_approved(
+        &self,
+        user_id: i64,
+        client_ip: std::net::IpAddr,
+    ) -> Result<bool, sqlx::Error> {
         let cache_key = (user_id, client_ip);
         let ttl = std::time::Duration::from_secs(crate::constants::APPROVAL_CACHE_TTL_SECS);
 
@@ -555,20 +567,23 @@ impl AppState {
         // 2. Check Redis cache
         if let Some(ref cache) = self.cache {
             if let Some(approved) = cache.get_ip_approved(user_id, &ip_str).await {
-                self.approval_cache.insert(cache_key, (approved, std::time::Instant::now()));
+                self.approval_cache
+                    .insert(cache_key, (approved, std::time::Instant::now()));
                 return Ok(approved);
             }
         }
 
         // 3. DB lookup
-        let approved = crate::db::approvals::is_ip_approved(&self.db_pool, user_id, &ip_str).await?;
+        let approved =
+            crate::db::approvals::is_ip_approved(&self.db_pool, user_id, &ip_str).await?;
 
         // Store in Redis
         if let Some(ref cache) = self.cache {
             cache.set_ip_approved(user_id, &ip_str, approved).await;
         }
         // Store in memory
-        self.approval_cache.insert(cache_key, (approved, std::time::Instant::now()));
+        self.approval_cache
+            .insert(cache_key, (approved, std::time::Instant::now()));
 
         Ok(approved)
     }
@@ -587,7 +602,11 @@ impl AppState {
         let parsed = self
             .cached_user_by_id(user_id)
             .await
-            .and_then(|cu| cu.access_schedule.as_deref().and_then(crate::target_filter::parse_schedule))
+            .and_then(|cu| {
+                cu.access_schedule
+                    .as_deref()
+                    .and_then(crate::target_filter::parse_schedule)
+            })
             .map(Arc::new);
         self.parsed_schedule_cache.insert(user_id, parsed.clone());
         parsed

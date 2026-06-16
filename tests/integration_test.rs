@@ -185,8 +185,7 @@ fn test_health_endpoint() {
 #[test]
 fn test_deep_health_endpoint() {
     let proxy = TestProxy::start_no_auth();
-    let resp =
-        reqwest::blocking::get(format!("http://{}/health/deep", proxy.admin_addr)).unwrap();
+    let resp = reqwest::blocking::get(format!("http://{}/health/deep", proxy.admin_addr)).unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().unwrap();
     assert_eq!(body["status"], "healthy");
@@ -197,8 +196,7 @@ fn test_deep_health_endpoint() {
 #[test]
 fn test_metrics_endpoint_returns_prometheus_format() {
     let proxy = TestProxy::start_no_auth();
-    let resp =
-        reqwest::blocking::get(format!("http://{}/metrics", proxy.admin_addr)).unwrap();
+    let resp = reqwest::blocking::get(format!("http://{}/metrics", proxy.admin_addr)).unwrap();
     assert_eq!(resp.status(), 200);
     let body = resp.text().unwrap();
     // Prometheus output always contains HELP/TYPE lines or is empty (lazy init).
@@ -224,8 +222,7 @@ fn test_proxy_accepts_tcp_connections() {
 #[test]
 fn test_http_connect_gets_response() {
     let proxy = TestProxy::start_no_auth();
-    let mut stream =
-        TcpStream::connect_timeout(&proxy.proxy_addr, Duration::from_secs(5)).unwrap();
+    let mut stream = TcpStream::connect_timeout(&proxy.proxy_addr, Duration::from_secs(5)).unwrap();
     stream.set_nodelay(true).unwrap();
 
     // CONNECT to a non-routable address — proxy should respond with an HTTP status
@@ -254,8 +251,7 @@ fn test_http_connect_gets_response() {
 #[test]
 fn test_socks5_greeting_accepted() {
     let proxy = TestProxy::start_no_auth();
-    let mut stream =
-        TcpStream::connect_timeout(&proxy.proxy_addr, Duration::from_secs(5)).unwrap();
+    let mut stream = TcpStream::connect_timeout(&proxy.proxy_addr, Duration::from_secs(5)).unwrap();
     stream.set_nodelay(true).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
@@ -287,8 +283,7 @@ fn test_socks5_greeting_accepted() {
 #[test]
 fn test_invalid_protocol_closes_connection() {
     let proxy = TestProxy::start_no_auth();
-    let mut stream =
-        TcpStream::connect_timeout(&proxy.proxy_addr, Duration::from_secs(5)).unwrap();
+    let mut stream = TcpStream::connect_timeout(&proxy.proxy_addr, Duration::from_secs(5)).unwrap();
     stream.set_nodelay(true).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))

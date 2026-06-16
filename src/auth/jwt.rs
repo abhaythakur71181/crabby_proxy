@@ -89,14 +89,28 @@ mod tests {
 
     #[test]
     fn test_create_jwt() {
-        let token = create_jwt(1, "testuser", "admin", "supersecret_key_at_least_32_bytes_long", 3600).unwrap();
+        let token = create_jwt(
+            1,
+            "testuser",
+            "admin",
+            "supersecret_key_at_least_32_bytes_long",
+            3600,
+        )
+        .unwrap();
         assert!(!token.is_empty());
         assert!(token.contains('.')); // JWT format has dots
     }
 
     #[test]
     fn test_validate_jwt_valid() {
-        let token = create_jwt(1, "testuser", "admin", "supersecret_key_at_least_32_bytes_long", 3600).unwrap();
+        let token = create_jwt(
+            1,
+            "testuser",
+            "admin",
+            "supersecret_key_at_least_32_bytes_long",
+            3600,
+        )
+        .unwrap();
         let claims = validate_jwt(&token, "supersecret_key_at_least_32_bytes_long").unwrap();
 
         assert_eq!(claims.sub, "testuser");
@@ -106,7 +120,14 @@ mod tests {
 
     #[test]
     fn test_validate_jwt_wrong_secret() {
-        let token = create_jwt(1, "testuser", "admin", "supersecret_key_at_least_32_bytes_long", 3600).unwrap();
+        let token = create_jwt(
+            1,
+            "testuser",
+            "admin",
+            "supersecret_key_at_least_32_bytes_long",
+            3600,
+        )
+        .unwrap();
         let result = validate_jwt(&token, "wrongsecret_key_at_least_32_bytes_long_xx");
 
         assert!(result.is_err());
@@ -114,7 +135,10 @@ mod tests {
 
     #[test]
     fn test_validate_jwt_invalid_token() {
-        let result = validate_jwt("invalid.token.here", "supersecret_key_at_least_32_bytes_long");
+        let result = validate_jwt(
+            "invalid.token.here",
+            "supersecret_key_at_least_32_bytes_long",
+        );
         assert!(result.is_err());
     }
 
@@ -145,7 +169,14 @@ mod tests {
 
     #[test]
     fn test_jwt_claims_extraction() {
-        let token = create_jwt(42, "alice", "user", "mysecret_key_at_least_32_bytes_long_xxxx", 7200).unwrap();
+        let token = create_jwt(
+            42,
+            "alice",
+            "user",
+            "mysecret_key_at_least_32_bytes_long_xxxx",
+            7200,
+        )
+        .unwrap();
         let claims = validate_jwt(&token, "mysecret_key_at_least_32_bytes_long_xxxx").unwrap();
 
         assert_eq!(claims.sub, "alice");
@@ -158,22 +189,50 @@ mod tests {
 
     #[test]
     fn test_jwt_has_three_segments() {
-        let token = create_jwt(1, "user", "admin", "secret_key_at_least_32_bytes_long_xxxxxx", 3600).unwrap();
+        let token = create_jwt(
+            1,
+            "user",
+            "admin",
+            "secret_key_at_least_32_bytes_long_xxxxxx",
+            3600,
+        )
+        .unwrap();
         let segments: Vec<&str> = token.split('.').collect();
         assert_eq!(segments.len(), 3);
     }
 
     #[test]
     fn test_jwt_different_users_produce_different_tokens() {
-        let token1 = create_jwt(1, "user1", "admin", "secret_key_at_least_32_bytes_long_xxxxxx", 3600).unwrap();
-        let token2 = create_jwt(2, "user2", "user", "secret_key_at_least_32_bytes_long_xxxxxx", 3600).unwrap();
+        let token1 = create_jwt(
+            1,
+            "user1",
+            "admin",
+            "secret_key_at_least_32_bytes_long_xxxxxx",
+            3600,
+        )
+        .unwrap();
+        let token2 = create_jwt(
+            2,
+            "user2",
+            "user",
+            "secret_key_at_least_32_bytes_long_xxxxxx",
+            3600,
+        )
+        .unwrap();
         assert_ne!(token1, token2);
     }
 
     #[test]
     fn test_jwt_expiration_is_correct() {
         let before = Utc::now().timestamp() as usize;
-        let token = create_jwt(1, "user", "admin", "secret_key_at_least_32_bytes_long_xxxxxx", 3600).unwrap();
+        let token = create_jwt(
+            1,
+            "user",
+            "admin",
+            "secret_key_at_least_32_bytes_long_xxxxxx",
+            3600,
+        )
+        .unwrap();
         let after = Utc::now().timestamp() as usize;
 
         let claims = validate_jwt(&token, "secret_key_at_least_32_bytes_long_xxxxxx").unwrap();
@@ -186,7 +245,14 @@ mod tests {
     #[test]
     fn test_jwt_iat_is_reasonable() {
         let before = Utc::now().timestamp() as usize;
-        let token = create_jwt(1, "user", "admin", "secret_key_at_least_32_bytes_long_xxxxxx", 3600).unwrap();
+        let token = create_jwt(
+            1,
+            "user",
+            "admin",
+            "secret_key_at_least_32_bytes_long_xxxxxx",
+            3600,
+        )
+        .unwrap();
         let after = Utc::now().timestamp() as usize;
 
         let claims = validate_jwt(&token, "secret_key_at_least_32_bytes_long_xxxxxx").unwrap();
@@ -197,7 +263,14 @@ mod tests {
     #[test]
     fn test_jwt_all_roles() {
         for role in &["root_admin", "admin", "user"] {
-            let token = create_jwt(1, "test", role, "secret_key_at_least_32_bytes_long_xxxxxx", 3600).unwrap();
+            let token = create_jwt(
+                1,
+                "test",
+                role,
+                "secret_key_at_least_32_bytes_long_xxxxxx",
+                3600,
+            )
+            .unwrap();
             let claims = validate_jwt(&token, "secret_key_at_least_32_bytes_long_xxxxxx").unwrap();
             assert_eq!(claims.role, *role);
         }
@@ -206,7 +279,14 @@ mod tests {
     #[test]
     fn test_jwt_long_expiration() {
         // 30 days
-        let token = create_jwt(1, "user", "admin", "secret_key_at_least_32_bytes_long_xxxxxx", 86400 * 30).unwrap();
+        let token = create_jwt(
+            1,
+            "user",
+            "admin",
+            "secret_key_at_least_32_bytes_long_xxxxxx",
+            86400 * 30,
+        )
+        .unwrap();
         let claims = validate_jwt(&token, "secret_key_at_least_32_bytes_long_xxxxxx").unwrap();
         assert!(claims.exp > claims.iat + 86400 * 29);
     }
@@ -214,7 +294,14 @@ mod tests {
     #[test]
     fn test_jwt_short_expiration() {
         // 1 second
-        let token = create_jwt(1, "user", "admin", "secret_key_at_least_32_bytes_long_xxxxxx", 1).unwrap();
+        let token = create_jwt(
+            1,
+            "user",
+            "admin",
+            "secret_key_at_least_32_bytes_long_xxxxxx",
+            1,
+        )
+        .unwrap();
         let claims = validate_jwt(&token, "secret_key_at_least_32_bytes_long_xxxxxx").unwrap();
         assert!(claims.exp - claims.iat <= 2); // 1 second + tolerance
     }
@@ -237,7 +324,14 @@ mod tests {
 
     #[test]
     fn test_jwt_special_characters_in_username() {
-        let token = create_jwt(1, "user@example.com", "admin", "secret_key_at_least_32_bytes_long_xxxxxx", 3600).unwrap();
+        let token = create_jwt(
+            1,
+            "user@example.com",
+            "admin",
+            "secret_key_at_least_32_bytes_long_xxxxxx",
+            3600,
+        )
+        .unwrap();
         let claims = validate_jwt(&token, "secret_key_at_least_32_bytes_long_xxxxxx").unwrap();
         assert_eq!(claims.sub, "user@example.com");
     }
@@ -245,14 +339,28 @@ mod tests {
     #[test]
     fn test_jwt_negative_user_id() {
         // Config-based auth uses -1 as sentinel
-        let token = create_jwt(-1, "config_user", "admin", "secret_key_at_least_32_bytes_long_xxxxxx", 3600).unwrap();
+        let token = create_jwt(
+            -1,
+            "config_user",
+            "admin",
+            "secret_key_at_least_32_bytes_long_xxxxxx",
+            3600,
+        )
+        .unwrap();
         let claims = validate_jwt(&token, "secret_key_at_least_32_bytes_long_xxxxxx").unwrap();
         assert_eq!(claims.user_id, -1);
     }
 
     #[test]
     fn test_jwt_zero_user_id() {
-        let token = create_jwt(0, "zero", "user", "secret_key_at_least_32_bytes_long_xxxxxx", 3600).unwrap();
+        let token = create_jwt(
+            0,
+            "zero",
+            "user",
+            "secret_key_at_least_32_bytes_long_xxxxxx",
+            3600,
+        )
+        .unwrap();
         let claims = validate_jwt(&token, "secret_key_at_least_32_bytes_long_xxxxxx").unwrap();
         assert_eq!(claims.user_id, 0);
     }
@@ -265,13 +373,23 @@ mod tests {
 
     #[test]
     fn test_jwt_malformed_base64() {
-        let result = validate_jwt("not.valid.base64!!!", "secret_key_at_least_32_bytes_long_xxxxxx");
+        let result = validate_jwt(
+            "not.valid.base64!!!",
+            "secret_key_at_least_32_bytes_long_xxxxxx",
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn test_jwt_tampered_payload() {
-        let token = create_jwt(1, "user", "admin", "secret_key_at_least_32_bytes_long_xxxxxx", 3600).unwrap();
+        let token = create_jwt(
+            1,
+            "user",
+            "admin",
+            "secret_key_at_least_32_bytes_long_xxxxxx",
+            3600,
+        )
+        .unwrap();
 
         // Split and modify the payload
         let parts: Vec<&str> = token.split('.').collect();

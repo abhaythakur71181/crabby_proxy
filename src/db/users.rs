@@ -303,13 +303,12 @@ pub async fn list_users_paginated(
     limit: i32,
     offset: i32,
 ) -> Result<Vec<User>, sqlx::Error> {
-    let users = sqlx::query_as::<_, User>(
-        "SELECT * FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?",
-    )
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await?;
+    let users =
+        sqlx::query_as::<_, User>("SELECT * FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?")
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(pool)
+            .await?;
     Ok(users)
 }
 
