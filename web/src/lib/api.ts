@@ -18,7 +18,19 @@ function getToken(): string | null {
   }
 }
 
+const BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+
+function getFullPath(path: string): string {
+  if (!BASE_URL) return path;
+  let prefix = BASE_URL;
+  if (!prefix.startsWith('http://') && !prefix.startsWith('https://')) {
+    prefix = `http://${prefix}`;
+  }
+  return `${prefix.replace(/\/$/, '')}${path}`;
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const fullPath = getFullPath(path);
   const token = getToken();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -28,7 +40,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  const res = await fetch(path, { ...options, headers });
+  const res = await fetch(fullPath, { ...options, headers });
 
   if (res.status === 401) {
     // Token expired/invalid – force logout
