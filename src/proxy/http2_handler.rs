@@ -500,6 +500,27 @@ async fn handle_h2_tunnel(
     .await
     .map_err(|_| "DNS resolution timeout")??;
 
+    // SSRF egress guard: refuse internal/non-routable resolved targets unless
+    // the operator has explicitly opted out (defends against DNS rebinding too).
+    if state.config.load().filtering.block_private_targets
+        && crate::self_loop::is_blocked_egress(resolved_addr.ip())
+    {
+        tracing::warn!(
+            target: "audit",
+            client_addr = %client_addr,
+            authority = %authority,
+            resolved = %resolved_addr,
+            rule = "ssrf_egress",
+            "[HTTP2] blocked connection to internal/non-routable target"
+        );
+        let response = http::Response::builder()
+            .status(http::StatusCode::FORBIDDEN)
+            .body(())
+            .unwrap_or_else(|_| http::Response::new(()));
+        let _ = respond.send_response(response, true);
+        return Err("target resolves to a blocked internal address".into());
+    }
+
     // Self-loop protection: refuse to connect back to our own listener.
     if let Some(ref guard) = state.self_loop_guard {
         if guard.is_self_loop(resolved_addr) {

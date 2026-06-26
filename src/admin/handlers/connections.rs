@@ -1,4 +1,5 @@
 use super::models::ApiError;
+use crate::admin::auth::AdminUser;
 use crate::app_state::AppState;
 use crate::state::backend::ConnectionInfo;
 use axum::{
@@ -13,6 +14,7 @@ use std::sync::Arc;
 
 /// GET /api/connections - List all active connections
 pub async fn list_connections(
+    _admin: AdminUser,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<ConnectionInfo>>, ApiError> {
     match state.state.list_connections().await {
@@ -26,6 +28,7 @@ pub async fn list_connections(
 
 /// GET /api/connections/count - Get count of active connections
 pub async fn count_connections(
+    _admin: AdminUser,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<usize>, ApiError> {
     match state.state.count_connections().await {
@@ -40,6 +43,7 @@ pub async fn count_connections(
 /// GET /api/connections/live - WebSocket for live connection events.
 /// Sends a JSON snapshot of active connections every 2 seconds.
 pub async fn live_connections(
+    _admin: AdminUser,
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {

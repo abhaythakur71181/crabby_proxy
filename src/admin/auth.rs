@@ -226,6 +226,45 @@ impl CurrentUser {
     }
 }
 
+/// Axum extractor: any authenticated user.
+///
+/// Resolves the `user_id` attached to request extensions by `auth_middleware`
+/// into a `CurrentUser` (which re-checks `is_active` via the role cache).
+#[axum::async_trait]
+impl axum::extract::FromRequestParts<Arc<AppState>> for CurrentUser {
+    type Rejection = super::handlers::models::ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let user_id = parts.extensions.get::<i64>().copied().ok_or_else(|| {
+            super::handlers::models::ApiError::unauthorized("Not authenticated")
+        })?;
+        CurrentUser::from_request_extensions(state, user_id).await
+    }
+}
+
+/// Axum extractor: authenticated user that must be an admin (`admin` or
+/// `root_admin`). Resolution + the role check happen in the extractor, so a
+/// handler that takes `AdminUser` cannot run for a non-admin caller — there is
+/// no way to forget the guard inside the handler body.
+pub struct AdminUser(#[allow(dead_code)] pub CurrentUser);
+
+#[axum::async_trait]
+impl axum::extract::FromRequestParts<Arc<AppState>> for AdminUser {
+    type Rejection = super::handlers::models::ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let user = CurrentUser::from_request_parts(parts, state).await?;
+        user.require_admin()?;
+        Ok(AdminUser(user))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
