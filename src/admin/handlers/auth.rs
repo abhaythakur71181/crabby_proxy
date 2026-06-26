@@ -1,5 +1,5 @@
 use axum::{
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -7,6 +7,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::{app_state::AppState, auth::jwt, db::users};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
@@ -24,11 +25,12 @@ pub struct LoginResponse {
 
 pub async fn login(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(payload): Json<LoginRequest>,
 ) -> Result<Response, (StatusCode, String)> {
     // Rate limiting: prevent brute force attacks
-    let client_ip = extract_client_ip(&headers);
+    let client_ip = extract_client_ip(peer, &headers);
 
     if !state
         .login_rate_limiter
@@ -71,31 +73,31 @@ pub async fn login(
     }
 }
 
-/// Extract client IP from request headers
-/// Checks X-Forwarded-For and X-Real-IP headers, falls back to localhost
-/// S5: Prefer socket peer address. X-Forwarded-For is untrusted by default.
-/// Only trust forwarded headers in production behind a known reverse proxy.
-fn extract_client_ip(headers: &HeaderMap) -> String {
-    // Try socket peer address first via X-Real-IP (set by reverse proxies)
-    // In production, this should be the only trusted source
-    if let Some(real_ip) = headers.get("x-real-ip") {
-        if let Ok(value) = real_ip.to_str() {
-            let ip = value.trim();
+/// Resolve the client IP used for login rate limiting.
+///
+/// The socket peer is the source of truth. `X-Real-IP` / `X-Forwarded-For` are
+/// client-controlled and were previously trusted unconditionally, so an
+/// attacker could rotate the header per request to mint a fresh rate-limit
+/// bucket and brute-force logins. We now honor forwarded headers ONLY when the
+/// immediate peer is loopback — i.e. a reverse proxy on the same host (the
+/// bundled nginx). A remote peer's forged header is ignored.
+fn extract_client_ip(peer: SocketAddr, headers: &HeaderMap) -> String {
+    let peer_ip = peer.ip();
+    if peer_ip.is_loopback() {
+        if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+            let ip = real_ip.trim();
             if !ip.is_empty() {
                 return ip.to_string();
             }
         }
-    }
-    // Fallback: X-Forwarded-For (less trusted, can be spoofed)
-    if let Some(forwarded_for) = headers.get("x-forwarded-for") {
-        if let Ok(value) = forwarded_for.to_str() {
-            if let Some(first_ip) = value.split(',').next() {
-                let ip = first_ip.trim();
+        if let Some(fwd) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+            if let Some(first) = fwd.split(',').next() {
+                let ip = first.trim();
                 if !ip.is_empty() {
                     return ip.to_string();
                 }
             }
         }
     }
-    "127.0.0.1".to_string()
+    peer_ip.to_string()
 }
