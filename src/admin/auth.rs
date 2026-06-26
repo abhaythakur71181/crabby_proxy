@@ -35,8 +35,22 @@ pub async fn auth_middleware(
             let token = auth.trim_start_matches("Bearer ");
             match jwt::validate_jwt(token, &jwt_secret) {
                 Ok(claims) => {
-                    // Use user_id directly from JWT claims (avoids DB lookup)
                     let user_id = claims.user_id;
+                    // Re-validate the account on every request (cache-aside, cheap).
+                    // A valid signature is not enough: a disabled or deleted user
+                    // must lose access immediately rather than keep a 24h token
+                    // working until natural expiry.
+                    match state.cached_user_role(user_id).await {
+                        Some(u) if u.is_active => {}
+                        Some(_) => {
+                            tracing::warn!("Rejecting token for disabled user {}", user_id);
+                            return Err(StatusCode::UNAUTHORIZED);
+                        }
+                        None => {
+                            tracing::warn!("Rejecting token for unknown user {}", user_id);
+                            return Err(StatusCode::UNAUTHORIZED);
+                        }
+                    }
                     request.extensions_mut().insert(user_id);
                     if let Err(e) = check_user_rate_limit(&state, user_id).await {
                         tracing::warn!("Rate limit exceeded for user {}: {}", user_id, e);
