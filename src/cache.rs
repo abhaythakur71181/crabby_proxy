@@ -204,23 +204,6 @@ impl CacheLayer {
             cursor = next_cursor;
         }
     }
-
-    // ─── Bandwidth usage counter ───────────────────────────────────────
-
-    pub async fn incr_bandwidth(&self, user_id: i64, bytes: i64) {
-        let month_key = current_month_key();
-        let key = format!("{}cache:bw:{}:{}", self.prefix, user_id, month_key);
-        let mut conn = self.conn.clone();
-        let _: Result<(), _> = conn.incr(&key, bytes).await;
-        let _: Result<(), _> = conn.expire(&key, 35 * 86400).await;
-    }
-
-    pub async fn get_bandwidth(&self, user_id: i64) -> Option<i64> {
-        let month_key = current_month_key();
-        let key = format!("{}cache:bw:{}:{}", self.prefix, user_id, month_key);
-        let mut conn = self.conn.clone();
-        conn.get(&key).await.ok()
-    }
 }
 
 // ─── Cached data structures ────────────────────────────────────────────
@@ -340,9 +323,4 @@ fn simple_hash(input: &str) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
-}
-
-/// Get current month key like "2026-02"
-fn current_month_key() -> String {
-    chrono::Utc::now().format("%Y-%m").to_string()
 }
