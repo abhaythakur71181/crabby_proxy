@@ -238,9 +238,10 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for CurrentUser {
         parts: &mut axum::http::request::Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        let user_id = parts.extensions.get::<i64>().copied().ok_or_else(|| {
-            super::handlers::models::ApiError::unauthorized("Not authenticated")
-        })?;
+        let user_id =
+            parts.extensions.get::<i64>().copied().ok_or_else(|| {
+                super::handlers::models::ApiError::unauthorized("Not authenticated")
+            })?;
         CurrentUser::from_request_extensions(state, user_id).await
     }
 }
