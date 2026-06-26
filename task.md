@@ -288,7 +288,7 @@ Four root patterns drive most findings:
 - [ ] **R3-H5** Usage writer: batch-drain (`recv_many`) into one transaction; on overflow block-with-timeout or reconcile dropped bytes; alert on drop counter.
 - [x] **R3-H3/H4** Fail-closed sweep: geo unknown-country now denies in allowlist mode (`geo_filter.rs`); `RedisRateLimiter::check` denies on Redis error (`rate_limit.rs`); `validate_connection_limit` denies on count error (`validators.rs`). Login limiter now keyed on socket peer via `ConnectInfo<SocketAddr>`; forwarded headers honored only from a loopback peer (`admin/handlers/auth.rs`, `admin/server.rs` serves with connect-info).
 - [x] **R3-H16** Transactions: `approve_request` (status+grant atomic), `update_user` (update+readback, existence via rows_affected), `delete_user` (users+api_keys deactivate **and** sessions revoked, atomic). Added sessions table to users test setup.
-- [ ] **R3-H8** h2 forward: stream bodies chunk-by-chunk with max-size cap; acquire permit per h2 stream; set `max_concurrent_streams`.
+- [x] **R3-H8** h2 DoS surface: set `max_concurrent_streams(256)` on the server handshake (caps per-connection stream/task fan-out); request body buffering now capped at 16 MiB (413 on exceed); upstream response read via capped `chunk()` loop instead of unbounded `.bytes()` (502 on exceed). Per-host forward semaphore (R2-23) already bounds forward concurrency. `http2_handler.rs`.
 
 ## PHASE 3 — Next quarter (operability & trust)
 
@@ -306,4 +306,5 @@ Four root patterns drive most findings:
 - [ ] **R3-M14** Argon2 explicit params + pepper; stronger password/username policy.
 - [ ] **R3-MISC** L3 relay error byte-accounting; L4 quota `saturating_add` + skip-when-unlimited; L6 DNS eviction off hot path; L7 EC key support + cert file-watch; L8 cargo-chef Docker layer; M9 quota-0 semantics; M10/M11 throttle staleness + bucket direction; M16 reload 500-on-fail; M18 block default passwords; M20 wire/remove middleware chain; M21 tunnel port TOCTOU + unwrap; M22 CORS strict origin parse.
 
-## STATUS: Round 3 — Phase 1 COMPLETE (C1-C4, H2, H11). 437 unit + 7 integration green; repo rustfmt-clean. Next: Phase 2 (H1 token revocation, H6/H5 bandwidth accounting, H3/H4 fail-closed, H16 transactions, H8 h2 streaming).
+## STATUS: Round 3 — Phase 1 COMPLETE (C1-C4, H2, H11). Phase 2 mostly done: H1(partial), H3, H4, H8, H16, M1/M2. 437 unit + 7 integration green; rustfmt-clean.
+REMAINING Phase 2: H5/H6 bandwidth accounting (single source of truth) — DESIGN-SENSITIVE, billing-regression risk; H12 HMAC-keyed auth cache; H1 token_version. Recommend a focused session for H5/H6.
