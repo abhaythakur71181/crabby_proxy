@@ -286,8 +286,8 @@ Four root patterns drive most findings:
 - [ ] **R3-M1/M2** Invalidate approval cache on `terminate_approval`; invalidate verified-key cache on API-key revoke.
 - [ ] **R3-H6** One source of truth for bandwidth: tracker=enforcement, usage_writer=persistence; never re-add live deltas on reseed; remove/​wire dead Redis `incr_bandwidth`; re-check window in `add_and_over`.
 - [ ] **R3-H5** Usage writer: batch-drain (`recv_many`) into one transaction; on overflow block-with-timeout or reconcile dropped bytes; alert on drop counter.
-- [ ] **R3-H3/H4** Fail-closed sweep: geo unknown-country in allowlist mode, Redis rate limiter on error, connection-limit on count error. Login limiter keyed on socket peer.
-- [ ] **R3-H16** Wrap multi-statement DB ops in transactions: `approve_request`, `update_user`, `delete_user` (also revoke sessions + api keys on delete).
+- [x] **R3-H3/H4** Fail-closed sweep: geo unknown-country now denies in allowlist mode (`geo_filter.rs`); `RedisRateLimiter::check` denies on Redis error (`rate_limit.rs`); `validate_connection_limit` denies on count error (`validators.rs`). Login limiter now keyed on socket peer via `ConnectInfo<SocketAddr>`; forwarded headers honored only from a loopback peer (`admin/handlers/auth.rs`, `admin/server.rs` serves with connect-info).
+- [x] **R3-H16** Transactions: `approve_request` (status+grant atomic), `update_user` (update+readback, existence via rows_affected), `delete_user` (users+api_keys deactivate **and** sessions revoked, atomic). Added sessions table to users test setup.
 - [ ] **R3-H8** h2 forward: stream bodies chunk-by-chunk with max-size cap; acquire permit per h2 stream; set `max_concurrent_streams`.
 
 ## PHASE 3 — Next quarter (operability & trust)
