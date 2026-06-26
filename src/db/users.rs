@@ -226,11 +226,8 @@ pub async fn update_user(
 ) -> Result<User, sqlx::Error> {
     let now = chrono::Utc::now().timestamp();
 
-    // Build update query dynamically based on what fields are provided
-    let _user = get_user_by_id(pool, user_id)
-        .await?
-        .ok_or(sqlx::Error::RowNotFound)?;
-
+    // Hash the password (if any) before opening the transaction — argon2 is slow
+    // and we don't want to hold a write lock across it.
     let password_hash = if let Some(pwd) = password {
         Some(
             hash_password(pwd)
@@ -247,7 +244,12 @@ pub async fn update_user(
         Role::User => "user",
     });
 
-    sqlx::query(
+    // Update and read-back in one transaction so the returned row reflects this
+    // update (no interleaving with a concurrent writer) and existence is checked
+    // via rows_affected rather than a separate pre-SELECT.
+    let mut tx = pool.begin().await?;
+
+    let res = sqlx::query(
         r#"
         UPDATE users SET
             password_hash = COALESCE(?, password_hash),
@@ -266,26 +268,46 @@ pub async fn update_user(
     .bind(is_active)
     .bind(now)
     .bind(user_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
-    get_user_by_id(pool, user_id)
-        .await?
-        .ok_or(sqlx::Error::RowNotFound)
+    if res.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Err(sqlx::Error::RowNotFound);
+    }
+
+    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = ?")
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(user)
 }
 
 /// Soft delete user (set is_active = false)
 pub async fn delete_user(pool: &SqlitePool, user_id: i64) -> Result<(), sqlx::Error> {
     let now = chrono::Utc::now().timestamp();
+    // One transaction: deactivating the account, its API keys, and revoking its
+    // sessions must all land together. Previously these were separate
+    // statements, so a failure after the first left a "deleted" user whose API
+    // keys still authenticated; sessions were never revoked at all, so an
+    // existing admin token kept working until natural expiry.
+    let mut tx = pool.begin().await?;
     sqlx::query("UPDATE users SET is_active = 0, updated_at = ? WHERE id = ?")
         .bind(now)
         .bind(user_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     sqlx::query("UPDATE api_keys SET is_active = 0 WHERE user_id = ?")
         .bind(user_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -379,6 +401,23 @@ mod tests {
                 expires_at INTEGER,
                 last_used_at INTEGER,
                 is_active BOOLEAN NOT NULL DEFAULT 1
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            r#"
+            CREATE TABLE sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                token_hash TEXT,
+                created_at INTEGER NOT NULL DEFAULT 0,
+                expires_at INTEGER NOT NULL DEFAULT 0,
+                ip_address TEXT,
+                user_agent TEXT
             )
             "#,
         )
