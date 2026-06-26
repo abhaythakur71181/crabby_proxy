@@ -282,7 +282,7 @@ Four root patterns drive most findings:
 ## PHASE 2 — Next sprint (correctness & revocation)
 
 - [~] **R3-H1** Per-request `is_active`/existence recheck added to the bearer middleware (`cached_user_role`): disabled/deleted users lose access immediately instead of riding a 24h token. TODO: `token_version` logout/rotate revocation (needs schema migration + create_jwt change).
-- [ ] **R3-H12** Key auth caches on salted HMAC (not plaintext); include `is_active`/epoch; clear in `invalidate_all_for_user`.
+- [x] **R3-H12** Auth caches now keyed on HMAC-SHA256 of (username, password) under a process-random key (`auth_cache_key`) — plaintext creds no longer resident as map keys; full 256-bit digest keeps collision safety. `invalidate_all_for_user` now clears both auth caches so a disabled/rotated account can't ride the 60s positive entry. Added sha2 + hmac deps + a unit test.
 - [x] **R3-M1/M2** `terminate_approval` now returns the affected `user_id` (UPDATE…RETURNING) and the handler calls `invalidate_approval_cache` → revoked client denied immediately. M2 (verified-key cache on API-key revoke) was already handled via `invalidate_api_key_cache`.
 - [ ] **R3-H6** One source of truth for bandwidth: tracker=enforcement, usage_writer=persistence; never re-add live deltas on reseed; remove/​wire dead Redis `incr_bandwidth`; re-check window in `add_and_over`.
 - [ ] **R3-H5** Usage writer: batch-drain (`recv_many`) into one transaction; on overflow block-with-timeout or reconcile dropped bytes; alert on drop counter.
