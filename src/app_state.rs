@@ -628,12 +628,6 @@ impl AppState {
         self.approval_cache.retain(|k, _| k.0 != user_id);
     }
 
-    pub async fn track_bandwidth(&self, user_id: i64, bytes: i64) {
-        if let Some(ref cache) = self.cache {
-            cache.incr_bandwidth(user_id, bytes).await;
-        }
-    }
-
     /// Populate user cache by both id and username after a successful DB lookup.
     /// Call this after verify_password or any DB user fetch you want to cache.
     /// Uses `From<&User>` to avoid cloning the entire User struct.
