@@ -1,4 +1,5 @@
 use super::models::ApiError;
+use crate::admin::auth::AdminUser;
 use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
 
@@ -38,7 +39,10 @@ pub struct ReloadResponse {
 }
 
 /// Get current configuration (sensitive fields redacted)
-pub async fn get_config(State(state): State<Arc<AppState>>) -> Json<ConfigResponse> {
+pub async fn get_config(
+    _admin: AdminUser,
+    State(state): State<Arc<AppState>>,
+) -> Json<ConfigResponse> {
     let config = state.config.load();
     Json(ConfigResponse {
         server: ServerConfigResponse {

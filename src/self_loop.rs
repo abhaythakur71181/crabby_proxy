@@ -85,12 +85,72 @@ fn primary_local_ip(remote: &str) -> Option<IpAddr> {
     sock.local_addr().ok().map(|a| a.ip())
 }
 
+/// SSRF egress guard: true if `ip` is one the proxy should refuse to connect to
+/// because it points at internal / non-routable space — private (RFC1918),
+/// loopback, link-local (incl. the `169.254.169.254` cloud-metadata address),
+/// unspecified, multicast/broadcast, IPv4-documentation, or IPv6 ULA.
+///
+/// Name-based target filtering happens before resolution, so this check runs on
+/// the *resolved* address and also defends against DNS rebinding.
+pub fn is_blocked_egress(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                // Carrier-grade NAT 100.64.0.0/10
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                // Unique local fc00::/7
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                // Link-local fe80::/10
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                // IPv4-mapped (::ffff:0:0/96) — re-check the embedded v4
+                || v6.to_ipv4_mapped().map(|m| is_blocked_egress(IpAddr::V4(m))).unwrap_or(false)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn sa(s: &str) -> SocketAddr {
         s.parse().unwrap()
+    }
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn egress_blocks_internal_ranges() {
+        for s in [
+            "127.0.0.1", "10.0.0.5", "192.168.1.1", "172.16.0.1",
+            "169.254.169.254", "0.0.0.0", "100.64.0.1", "::1", "fe80::1", "fc00::1",
+        ] {
+            assert!(is_blocked_egress(ip(s)), "{s} should be blocked");
+        }
+    }
+
+    #[test]
+    fn egress_allows_public() {
+        for s in ["8.8.8.8", "1.1.1.1", "93.184.216.34", "2606:4700:4700::1111"] {
+            assert!(!is_blocked_egress(ip(s)), "{s} should be allowed");
+        }
+    }
+
+    #[test]
+    fn egress_blocks_v4_mapped_loopback() {
+        assert!(is_blocked_egress(ip("::ffff:127.0.0.1")));
     }
 
     #[test]

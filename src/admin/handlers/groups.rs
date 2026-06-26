@@ -1,4 +1,5 @@
 use super::models::ApiError;
+use crate::admin::auth::AdminUser;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -24,6 +25,7 @@ pub struct AddMemberRequest {
 
 /// POST /api/groups — Create a new user group
 pub async fn create_group(
+    _admin: AdminUser,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateGroupRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -42,6 +44,7 @@ pub async fn create_group(
 
 /// GET /api/groups — List all groups (with member counts)
 pub async fn list_groups(
+    _admin: AdminUser,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<groups::UserGroupWithCount>>, ApiError> {
     groups::list_groups(&state.db_pool)
@@ -55,6 +58,7 @@ pub async fn list_groups(
 
 /// GET /api/groups/:id — Get a single group
 pub async fn get_group(
+    _admin: AdminUser,
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<Json<groups::UserGroup>, ApiError> {
@@ -70,6 +74,7 @@ pub async fn get_group(
 
 /// DELETE /api/groups/:id — Delete a group
 pub async fn delete_group(
+    _admin: AdminUser,
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -84,6 +89,7 @@ pub async fn delete_group(
 
 /// POST /api/groups/:id/members — Add a user to a group
 pub async fn add_member(
+    _admin: AdminUser,
     State(state): State<Arc<AppState>>,
     Path(group_id): Path<i64>,
     Json(req): Json<AddMemberRequest>,
@@ -99,6 +105,7 @@ pub async fn add_member(
 
 /// DELETE /api/groups/:id/members/:user_id — Remove a user from a group
 pub async fn remove_member(
+    _admin: AdminUser,
     State(state): State<Arc<AppState>>,
     Path((group_id, user_id)): Path<(i64, i64)>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -113,6 +120,7 @@ pub async fn remove_member(
 
 /// GET /api/groups/:id/members — List members of a group with user details
 pub async fn list_members(
+    _admin: AdminUser,
     State(state): State<Arc<AppState>>,
     Path(group_id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -133,6 +141,7 @@ pub async fn list_members(
 
 /// GET /api/users/:id/groups — List groups a user belongs to
 pub async fn list_user_groups(
+    _admin: AdminUser,
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
 ) -> Result<Json<Vec<groups::UserGroup>>, ApiError> {
