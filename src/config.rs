@@ -30,6 +30,14 @@ pub struct ServerConfig {
     /// When enabled, the real client IP is extracted from the PROXY header.
     #[serde(default)]
     pub proxy_protocol_enabled: bool,
+    /// Trusted upstream CIDRs (e.g. load balancers) allowed to send a PROXY
+    /// protocol header. The header is honored ONLY when the immediate socket
+    /// peer is in this list — otherwise the parsed source IP is ignored and the
+    /// real socket address is used, preventing source-IP spoofing that would
+    /// bypass IP/geo/rate filters. Empty + proxy_protocol_enabled = the header
+    /// is trusted from nobody (fail closed); set your LB ranges here.
+    #[serde(default)]
+    pub proxy_protocol_trusted_cidrs: Vec<String>,
     /// Path to CA certificate for mutual TLS (mTLS) client authentication.
     /// When set, clients must present a certificate signed by this CA.
     #[serde(default)]
@@ -211,6 +219,7 @@ impl Default for Config {
                 tls_cert_path: String::new(),
                 tls_key_path: String::new(),
                 proxy_protocol_enabled: false,
+                proxy_protocol_trusted_cidrs: vec![],
                 tls_client_ca_path: None,
             },
             database: DatabaseConfig {
