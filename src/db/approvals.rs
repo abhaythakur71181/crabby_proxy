@@ -78,24 +78,27 @@ pub async fn list_all_approvals(pool: &SqlitePool) -> Result<Vec<ApprovalRecord>
 }
 
 /// Terminate an approval (admin action)
+/// Terminate an active approval. Returns the affected approval's `user_id` when
+/// a row was terminated (so the caller can invalidate that user's approval
+/// cache), or `None` if the approval was missing / already terminated.
 pub async fn terminate_approval(
     pool: &SqlitePool,
     approval_id: i64,
     terminated_by: i64,
     reason: &str,
-) -> Result<bool, sqlx::Error> {
+) -> Result<Option<i64>, sqlx::Error> {
     let now = chrono::Utc::now().timestamp();
-    let result = sqlx::query(
-        "UPDATE approvals SET is_terminated = 1, terminated_by = ?, terminated_at = ?, termination_reason = ? WHERE id = ? AND is_terminated = 0",
+    let user_id = sqlx::query_scalar::<_, i64>(
+        "UPDATE approvals SET is_terminated = 1, terminated_by = ?, terminated_at = ?, termination_reason = ? WHERE id = ? AND is_terminated = 0 RETURNING user_id",
     )
     .bind(terminated_by)
     .bind(now)
     .bind(reason)
     .bind(approval_id)
-    .execute(pool)
+    .fetch_optional(pool)
     .await?;
 
-    Ok(result.rows_affected() > 0)
+    Ok(user_id)
 }
 
 /// Expire old approvals (background cleanup)

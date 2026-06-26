@@ -173,7 +173,7 @@ pub async fn terminate_approval(
         crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
     current_user.require_admin()?;
 
-    let terminated = approvals::terminate_approval(
+    let terminated_user = approvals::terminate_approval(
         &state.db_pool,
         approval_id,
         current_user_id,
@@ -185,7 +185,11 @@ pub async fn terminate_approval(
         ApiError::internal("Failed to terminate approval")
     })?;
 
-    if terminated {
+    if let Some(approved_user_id) = terminated_user {
+        // Invalidate the cached approval so the revoked client is denied
+        // immediately rather than staying authorized until the in-memory +
+        // Redis cache TTL expires.
+        state.invalidate_approval_cache(approved_user_id).await;
         // Audit log
         let _ = crate::db::audit_log::log_action(
             &state.db_pool,
