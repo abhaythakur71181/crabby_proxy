@@ -109,8 +109,14 @@ impl ProxyProtocol {
         _client_stream: &mut BufferedClientStream,
         _state: &AppState,
     ) -> AuthResult<(bool, Option<i64>)> {
-        // SOCKS4 doesn't have proper authentication mechanism.
-        Ok((true, None))
+        // SOCKS4 has no password mechanism, so it cannot satisfy an auth
+        // requirement. `authenticate` is only called when auth is required, and
+        // the caller treats `false` as "reject" — so returning `true` here was
+        // an unauthenticated bypass that also fell through to the per-user
+        // validators with uid=None (which fail open). Reject instead.
+        // When the operator runs with `--no-creds`, this path is never reached.
+        tracing::warn!("SOCKS4 cannot authenticate; rejecting (auth is required)");
+        Ok((false, None))
     }
 
     async fn authenticate_socks5(
@@ -257,7 +263,8 @@ impl ProxyProtocol {
     }
 
     /// Validate credentials and return user_id.
-    /// Returns Some(user_id) for DB users, Some(-1) for config-based auth, None on failure.
+    /// Returns Some(user_id) for DB users (config auth resolves to the real
+    /// root_admin id), None on failure. Never returns a sentinel id.
     async fn validate_credentials(username: &str, password: &str, state: &AppState) -> Option<i64> {
         // ── In-process auth cache (avoids DB + argon2 on repeat connections) ──
         // Key = (username, password) tuple — avoids hash collision risk.
@@ -340,12 +347,30 @@ impl ProxyProtocol {
             username == config.authentication.username && password == config.authentication.password
         };
         if config_match {
-            // Config-based auth: use sentinel -1 to distinguish from failure (None)
-            // Can be cached too
-            state
-                .auth_cache
-                .insert(cache_key, (-1, std::time::Instant::now()));
-            return Some(-1);
+            // Config-based auth resolves to the real `root_admin` DB user — never
+            // a sentinel. A negative/synthetic id is Some(_) to the validator
+            // pipeline but maps to no DB row, so several per-user validators
+            // fail OPEN (target filter, connection limit), silently disabling
+            // per-user controls. The admin HTTP path was already hardened the
+            // same way; reject if root_admin is missing rather than bypass.
+            match users::get_user_by_username(&state.db_pool, "root_admin").await {
+                Ok(Some(user)) => {
+                    state
+                        .auth_cache
+                        .insert(cache_key, (user.id, std::time::Instant::now()));
+                    return Some(user.id);
+                }
+                Ok(None) => {
+                    tracing::error!(
+                        "Config proxy auth succeeded but root_admin user is missing from database; rejecting to avoid sentinel user_id"
+                    );
+                    return None;
+                }
+                Err(e) => {
+                    tracing::error!("Config proxy auth: failed to look up root_admin: {}", e);
+                    return None;
+                }
+            }
         }
 
         // Authentication failed — record in negative cache (bounded).

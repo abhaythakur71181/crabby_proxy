@@ -503,6 +503,29 @@ async fn async_handle_client_with_target(
     })?
     .map_err(|e| (e, ErrorType::Connection))?;
 
+    // SSRF egress guard: refuse internal/non-routable resolved targets unless
+    // the operator has explicitly opted out. Runs on the resolved IP, so it
+    // also defends against DNS rebinding past the name-based target filter.
+    if state.config.load().filtering.block_private_targets
+        && crate::self_loop::is_blocked_egress(resolved_addr.ip())
+    {
+        tracing::warn!(
+            target: "audit",
+            client_addr = %client_addr,
+            target = %target_addr,
+            resolved = %resolved_addr,
+            rule = "ssrf_egress",
+            "blocked connection to internal/non-routable target"
+        );
+        return Err((
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "target resolves to a blocked internal address",
+            ),
+            ErrorType::Connection,
+        ));
+    }
+
     // Self-loop protection: refuse to connect back to our own listener.
     if let Some(ref guard) = state.self_loop_guard {
         if guard.is_self_loop(resolved_addr) {
