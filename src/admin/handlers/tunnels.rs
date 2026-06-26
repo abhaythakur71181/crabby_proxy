@@ -1,4 +1,5 @@
 use super::models::ApiError;
+use crate::admin::auth::AdminUser;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -25,7 +26,10 @@ pub struct CreateTunnelRequest {
 }
 
 /// List all active tunnels
-pub async fn list_tunnels(State(state): State<Arc<AppState>>) -> Json<TunnelsListResponse> {
+pub async fn list_tunnels(
+    _admin: AdminUser,
+    State(state): State<Arc<AppState>>,
+) -> Json<TunnelsListResponse> {
     let tunnels = state.tunnels.read().await;
     let active = tunnels.list_active();
     let total = active.len();
@@ -37,6 +41,7 @@ pub async fn list_tunnels(State(state): State<Arc<AppState>>) -> Json<TunnelsLis
 
 /// Create a new tunnel (if enabled in config)
 pub async fn create_tunnel(
+    _admin: AdminUser,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateTunnelRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -79,6 +84,7 @@ pub async fn create_tunnel(
 
 /// Close a tunnel
 pub async fn close_tunnel(
+    _admin: AdminUser,
     State(state): State<Arc<AppState>>,
     Path(port): Path<u16>,
 ) -> Result<impl IntoResponse, ApiError> {

@@ -255,3 +255,55 @@ Comprehensive audit of the codebase as of 2026-03-25.
 - [x] **R2-24** Audit note was stale — `MiddlewareChain` is already wired into `listener.rs` for `Phase::PreAuth`, `PostAuth`, and `PostTarget`.
 - [x] **R2-25** Dead `src/proxy/relay.rs::hand_shake` deleted; module removed from `proxy/mod.rs`.
 - [x] **R2-26** Tests in `tunnel/error.rs` and `tunnel/port_allocator.rs` migrated to `assert!(matches!(...))` (or `let-else` where inner-value substring assertions are needed).
+
+---
+
+# Audit Round 3 — 2026-06-27
+
+Full-repository due-diligence audit (8 parallel readers + source verification).
+55 findings: 4 critical, 17 high, 24 medium, 10 low. Report:
+`scratchpad/audit.html`. Sequenced by risk-reduction per unit effort.
+
+Four root patterns drive most findings:
+1. Per-handler authz with no shared guard (C1, H1, H15, H17).
+2. Fail-open default error posture (C3, C4, H3, H4).
+3. Multiple sources of truth for one number (H5, H6, M7).
+4. Unguarded egress — only name filter + self-loop (C2, H2, H9, M12).
+
+## PHASE 1 — Immediate (stop the bleeding)
+
+- [x] **R3-C1** Added `AdminUser` + `CurrentUser` Axum extractors (`FromRequestParts<Arc<AppState>>`) in `admin/auth.rs`. `AdminUser` resolves identity, re-checks `is_active`, enforces `require_admin()` in the extractor. Applied to all previously-unprotected handlers: connections (list/count/live-ws), tunnels (list/create/close), config get, all groups handlers, audit-log; sessions list/delete now use `CurrentUser` + `can_access_user` (self-or-admin). health stats/dashboard/json_metrics → admin. Closes C1 + H15; partial H1 (is_active rechecked on these paths). 434 tests green.
+- [x] **R3-C2** SSRF egress guard: `self_loop::is_blocked_egress(ip)` rejects private/loopback/link-local(+`169.254.169.254`)/ULA/CGNAT/unspecified/multicast/v4-mapped. Wired after DNS resolve in `listener.rs` + `http2_handler.rs`. Gated by new `filtering.block_private_targets` (default **false** to preserve same-machine/internal proxying; set `true` to harden public-only deployments). Tunnels (H9) + webhook (M17) egress still TODO.
+- [x] **R3-C3** Config-based proxy auth now resolves to the real `root_admin` DB id (mirrors `admin/auth.rs`); rejects if root_admin missing. Sentinel `-1` removed. `is_admin` now derives correctly from the resolved role. `proxy/protocol.rs`.
+- [x] **R3-C4** SOCKS4 `authenticate_socks4` now returns `Ok((false,None))` (reject) — it's only called under `auth_required`, and the gate treats false as reject. TCP fallback already rejected. `--no-creds` path unchanged.
+- [ ] **R3-H2** Trust PROXY-protocol header only from configured trusted upstream CIDRs; else use socket peer. `listener.rs:59`, `proxy_protocol.rs`.
+- [ ] **R3-H11** CI pipeline: build + `cargo test --test-threads=1` + `clippy -D warnings` + fmt + `cargo-deny`/audit + Docker build + Trivy + gitleaks.
+
+## PHASE 2 — Next sprint (correctness & revocation)
+
+- [ ] **R3-H1** JWT/token revocation: `token_version` claim bumped on disable/role-change/logout; per-request `is_active`/role recheck in middleware.
+- [ ] **R3-H12** Key auth caches on salted HMAC (not plaintext); include `is_active`/epoch; clear in `invalidate_all_for_user`.
+- [ ] **R3-M1/M2** Invalidate approval cache on `terminate_approval`; invalidate verified-key cache on API-key revoke.
+- [ ] **R3-H6** One source of truth for bandwidth: tracker=enforcement, usage_writer=persistence; never re-add live deltas on reseed; remove/​wire dead Redis `incr_bandwidth`; re-check window in `add_and_over`.
+- [ ] **R3-H5** Usage writer: batch-drain (`recv_many`) into one transaction; on overflow block-with-timeout or reconcile dropped bytes; alert on drop counter.
+- [ ] **R3-H3/H4** Fail-closed sweep: geo unknown-country in allowlist mode, Redis rate limiter on error, connection-limit on count error. Login limiter keyed on socket peer.
+- [ ] **R3-H16** Wrap multi-statement DB ops in transactions: `approve_request`, `update_user`, `delete_user` (also revoke sessions + api keys on delete).
+- [ ] **R3-H8** h2 forward: stream bodies chunk-by-chunk with max-size cap; acquire permit per h2 stream; set `max_concurrent_streams`.
+
+## PHASE 3 — Next quarter (operability & trust)
+
+- [ ] **R3-H14** Tests: relay (`stream.rs` via `tokio::io::duplex`), listener, event_bus, tunnel, webhook; e2e auth/quota rejection; parser fuzzing; web login+CRUD Playwright.
+- [ ] **R3-M3/M4/M19** Config-reload validation (reject security downgrades, run env overrides + secret check); wire `RUST_LOG`/`config.logging.level` (drop hardcoded TRACE); harden Docker/compose exposure (`/metrics`, admin bind).
+- [ ] **R3-M5/M6/M7** Event bus → Redis Streams w/ reconnect; memory backend parity for pending/approvals; TTL/prune the Redis connections set.
+- [ ] **R3-H7/H10** Decide connection-pool fate (implement return or remove); complete graceful shutdown (call `state.shutdown()`, drain tunnels, flush usage writer, cancel bg tasks).
+- [ ] **R3-H13/M23/M24** Frontend: https default + `HttpOnly` cookies + CSP/HSTS; error boundary + typed API + TS strict; code splitting + dedupe chart libs.
+
+## PHASE 4 — Long-term (hardening & scale)
+
+- [ ] **R3-L9** SQLite backups (litestream) + migration rollback; evaluate Postgres if multi-instance write load grows.
+- [ ] **R3-DOCS** `ARCHITECTURE.md` + ADRs (fail-closed schedule, JWT min-secret, egress policy) + incident runbooks. Fix README test count/license (L10).
+- [ ] **R3-PERF** Box `ClientStream` TLS variant (L1); pooled relay buffers honoring `DEFAULT_BUFFER_SIZE` (L2); `Arc` config lists (L5); OTel traces + alert on drop/error counters.
+- [ ] **R3-M14** Argon2 explicit params + pepper; stronger password/username policy.
+- [ ] **R3-MISC** L3 relay error byte-accounting; L4 quota `saturating_add` + skip-when-unlimited; L6 DNS eviction off hot path; L7 EC key support + cert file-watch; L8 cargo-chef Docker layer; M9 quota-0 semantics; M10/M11 throttle staleness + bucket direction; M16 reload 500-on-fail; M18 block default passwords; M20 wire/remove middleware chain; M21 tunnel port TOCTOU + unwrap; M22 CORS strict origin parse.
+
+## STATUS: Round 3 — 4/4 critical done (C1,C2,C3,C4). 434 unit + 7 integration green. Next: H2 (PROXY-protocol trust) + H11 (CI).

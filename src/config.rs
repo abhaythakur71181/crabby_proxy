@@ -126,6 +126,13 @@ pub struct FilterConfig {
     // Default access schedule (JSON: {"days":["mon","tue"...],"start_hour":9,"end_hour":18,"timezone":"UTC"})
     #[serde(default)]
     pub default_access_schedule: Option<String>,
+    // SSRF egress guard. When true, the proxy refuses to connect to a resolved
+    // target IP that is private / loopback / link-local / ULA / unspecified /
+    // multicast — blocking SSRF into internal services and cloud metadata.
+    // Defaults to false so same-machine / internal targets work out of the box;
+    // set true to harden a deployment that only proxies to the public internet.
+    #[serde(default)]
+    pub block_private_targets: bool,
 }
 
 fn default_ip_filter_mode() -> String {
@@ -260,6 +267,7 @@ impl Default for Config {
                 global_allowed_targets: vec![],
                 global_blocked_targets: vec![],
                 default_access_schedule: None,
+                block_private_targets: false,
             },
             logging: LoggingConfig {
                 level: "info".to_string(),

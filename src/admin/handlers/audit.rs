@@ -1,4 +1,5 @@
 use super::models::ApiError;
+use crate::admin::auth::{AdminUser, CurrentUser};
 use axum::{
     extract::{Query, State},
     Json,
@@ -27,6 +28,7 @@ pub struct AuditLogResponse {
 
 /// GET /api/audit-log — List audit log entries with pagination and filtering
 pub async fn list_audit_log(
+    _admin: AdminUser,
     State(state): State<Arc<AppState>>,
     Query(params): Query<AuditLogQuery>,
 ) -> Result<Json<AuditLogResponse>, ApiError> {
@@ -61,9 +63,13 @@ pub async fn list_audit_log(
 
 /// GET /api/users/:id/sessions — List active sessions for a user
 pub async fn list_user_sessions(
+    current_user: CurrentUser,
     State(state): State<Arc<AppState>>,
     axum::extract::Path(user_id): axum::extract::Path<i64>,
 ) -> Result<Json<Vec<SessionInfo>>, ApiError> {
+    if !current_user.can_access_user(user_id) {
+        return Err(ApiError::forbidden("Cannot access another user's sessions"));
+    }
     let sessions = crate::db::sessions::list_user_sessions(&state.db_pool, user_id)
         .await
         .map_err(|e| {
@@ -97,9 +103,13 @@ pub struct SessionInfo {
 
 /// DELETE /api/users/:id/sessions — Force logout all sessions for user
 pub async fn delete_user_sessions(
+    current_user: CurrentUser,
     State(state): State<Arc<AppState>>,
     axum::extract::Path(user_id): axum::extract::Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    if !current_user.can_access_user(user_id) {
+        return Err(ApiError::forbidden("Cannot modify another user's sessions"));
+    }
     let deleted = crate::db::sessions::delete_user_sessions(&state.db_pool, user_id)
         .await
         .map_err(|e| {
