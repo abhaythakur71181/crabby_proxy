@@ -69,16 +69,18 @@ pub struct AppState {
     // Upstream connection pool (reuses idle TCP connections)
     pub connection_pool: Option<Arc<crate::connection_pool::ConnectionPool>>,
 
-    // Auth result cache: (username, password_hash) -> (user_id, cached_at)
-    // Avoids DB + argon2 on every connection from the same user (60s TTL)
-    // Uses full string key instead of u64 hash to prevent collision-based auth bypass.
-    pub auth_cache: Arc<dashmap::DashMap<(String, String), (i64, std::time::Instant)>>,
+    // Auth result cache: HMAC(creds) -> (user_id, cached_at).
+    // Avoids DB + argon2 on every connection from the same user (60s TTL).
+    // The key is an HMAC-SHA256 of (username, password) under a process-random
+    // key, so plaintext credentials are never resident as map keys (heap dumps /
+    // swap / cores) while remaining collision-safe (full 256-bit digest).
+    pub auth_cache: Arc<dashmap::DashMap<[u8; 32], (i64, std::time::Instant)>>,
 
-    // Negative auth cache: failed (username, attempted_password) -> cached_at.
+    // Negative auth cache: HMAC(failed creds) -> cached_at.
     // Short TTL (5s) absorbs credential-stuffing bursts so a flood of bad
     // attempts hits argon2 once instead of once per try. Bounded to avoid
     // memory blow-up — capped insert silently drops on overflow.
-    pub auth_negative_cache: Arc<dashmap::DashMap<(String, String), std::time::Instant>>,
+    pub auth_negative_cache: Arc<dashmap::DashMap<[u8; 32], std::time::Instant>>,
 
     /// Per-user bandwidth throttler registry.
     pub bandwidth_throttlers: Arc<crate::bandwidth::ThrottlerRegistry>,
@@ -511,6 +513,12 @@ impl AppState {
         self.invalidate_user_arc_cache(user_id);
         self.parsed_schedule_cache.remove(&user_id);
         self.quota_cache.remove(&user_id);
+        // The auth-result cache is keyed by an HMAC of credentials, so it can't
+        // be invalidated per user_id. Clear it wholesale on any user change so a
+        // disabled account / rotated password can't keep authenticating via a
+        // cached positive entry for the 60s TTL. It repopulates cheaply.
+        self.auth_cache.clear();
+        self.auth_negative_cache.clear();
         // Refresh the live quota tracker's limit in place (preserve `used`).
         if let Ok(stats) = crate::db::quota::get_quota_stats(&self.db_pool, user_id).await {
             self.quota_trackers.update_limit(user_id, stats.quota_bytes);
