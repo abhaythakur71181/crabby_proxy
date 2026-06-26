@@ -396,8 +396,11 @@ impl RedisRateLimiter {
         {
             Ok(count) => count <= self.max_requests as i64,
             Err(e) => {
-                tracing::warn!("Redis rate limit check failed (allowing): {}", e);
-                true // Fail open on Redis errors
+                // Fail CLOSED: a distributed rate limiter that allows on error
+                // lets an attacker disable it by inducing Redis load/outage,
+                // enabling brute force / flooding. Deny instead.
+                tracing::warn!("Redis rate limit check failed (denying): {}", e);
+                false
             }
         }
     }

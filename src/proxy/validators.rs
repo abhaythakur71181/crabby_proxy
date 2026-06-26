@@ -308,8 +308,11 @@ pub async fn validate_connection_limit(ctx: &ConnectionContext, state: &AppState
     let active_count = match state.state.count_user_connections(uid).await {
         Ok(count) => count,
         Err(e) => {
+            // Fail CLOSED: allowing on a backend error lets a state-backend
+            // outage silently lift per-user connection caps, enabling resource
+            // exhaustion / quota evasion. Consistent with validate_quota.
             tracing::error!("Error counting user connections for {}: {}", uid, e);
-            return Verdict::Allow; // Non-fatal: allow if counting fails
+            return Verdict::Deny("Connection count check failed (fail-closed)".to_string());
         }
     };
     let max_connections = match state

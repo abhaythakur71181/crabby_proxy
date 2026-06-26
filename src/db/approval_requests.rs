@@ -45,6 +45,12 @@ pub async fn approve_request(
 ) -> Result<Option<ApprovalRequest>, sqlx::Error> {
     let now = chrono::Utc::now().timestamp();
 
+    // All three statements run in one transaction so the request can never be
+    // marked approved without its matching approval grant being created — a
+    // crash or SQLITE_BUSY between them would otherwise leave the user "approved"
+    // yet denied by the proxy, with no retry path.
+    let mut tx = pool.begin().await?;
+
     // Update the request status
     let rows = sqlx::query(
         "UPDATE approval_requests SET status = 'approved', decided_by = ?, decided_at = ?, decision_reason = ? WHERE id = ? AND status = 'pending'",
@@ -53,10 +59,11 @@ pub async fn approve_request(
     .bind(now)
     .bind(decision_reason)
     .bind(request_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
     if rows.rows_affected() == 0 {
+        tx.rollback().await?;
         return Ok(None);
     }
 
@@ -65,7 +72,7 @@ pub async fn approve_request(
         "SELECT id, user_id, client_ip, duration_hours, reason, status, requested_at, decided_by, decided_at, decision_reason FROM approval_requests WHERE id = ?",
     )
     .bind(request_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
 
     // Create the actual approval entry so the proxy allows connections
@@ -80,8 +87,10 @@ pub async fn approve_request(
     .bind(expires_at)
     .bind(req.duration_hours)
     .bind(&req.reason)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(Some(req))
 }

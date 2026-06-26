@@ -233,11 +233,14 @@ pub async fn run_admin_server(
 
     let mut shutdown_rx = state.shutdown_tx.subscribe();
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            let _ = shutdown_rx.recv().await;
-            tracing::info!("Admin API shutting down gracefully");
-        })
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        let _ = shutdown_rx.recv().await;
+        tracing::info!("Admin API shutting down gracefully");
+    })
+    .await?;
     Ok(())
 }
