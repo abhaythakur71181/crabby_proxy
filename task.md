@@ -276,8 +276,8 @@ Four root patterns drive most findings:
 - [x] **R3-C2** SSRF egress guard: `self_loop::is_blocked_egress(ip)` rejects private/loopback/link-local(+`169.254.169.254`)/ULA/CGNAT/unspecified/multicast/v4-mapped. Wired after DNS resolve in `listener.rs` + `http2_handler.rs`. Gated by new `filtering.block_private_targets` (default **false** to preserve same-machine/internal proxying; set `true` to harden public-only deployments). Tunnels (H9) + webhook (M17) egress still TODO.
 - [x] **R3-C3** Config-based proxy auth now resolves to the real `root_admin` DB id (mirrors `admin/auth.rs`); rejects if root_admin missing. Sentinel `-1` removed. `is_admin` now derives correctly from the resolved role. `proxy/protocol.rs`.
 - [x] **R3-C4** SOCKS4 `authenticate_socks4` now returns `Ok((false,None))` (reject) — it's only called under `auth_required`, and the gate treats false as reject. TCP fallback already rejected. `--no-creds` path unchanged.
-- [ ] **R3-H2** Trust PROXY-protocol header only from configured trusted upstream CIDRs; else use socket peer. `listener.rs:59`, `proxy_protocol.rs`.
-- [ ] **R3-H11** CI pipeline: build + `cargo test --test-threads=1` + `clippy -D warnings` + fmt + `cargo-deny`/audit + Docker build + Trivy + gitleaks.
+- [x] **R3-H2** PROXY-protocol header now honored only when the socket peer is in `server.proxy_protocol_trusted_cidrs` (new, default empty = trust nobody); otherwise the header is left unparsed and the real socket address is used. `peer_is_trusted_proxy` helper + 3 unit tests. `listener.rs`.
+- [x] **R3-H11** Added `.github/workflows/ci.yml`: rust (fmt --check [blocking], clippy [informational pending L10], build --locked, test --test-threads=1), cargo audit (rustsec/audit-check), gitleaks, web (npm ci/lint/test/build), docker build + Trivy. Ran `cargo fmt` to make the fmt gate green. NOTE: clippy gate is `|| true` until the 11 pre-existing warnings (L10) are cleared — then flip to `-D warnings`.
 
 ## PHASE 2 — Next sprint (correctness & revocation)
 
@@ -306,4 +306,4 @@ Four root patterns drive most findings:
 - [ ] **R3-M14** Argon2 explicit params + pepper; stronger password/username policy.
 - [ ] **R3-MISC** L3 relay error byte-accounting; L4 quota `saturating_add` + skip-when-unlimited; L6 DNS eviction off hot path; L7 EC key support + cert file-watch; L8 cargo-chef Docker layer; M9 quota-0 semantics; M10/M11 throttle staleness + bucket direction; M16 reload 500-on-fail; M18 block default passwords; M20 wire/remove middleware chain; M21 tunnel port TOCTOU + unwrap; M22 CORS strict origin parse.
 
-## STATUS: Round 3 — 4/4 critical done (C1,C2,C3,C4). 434 unit + 7 integration green. Next: H2 (PROXY-protocol trust) + H11 (CI).
+## STATUS: Round 3 — Phase 1 COMPLETE (C1-C4, H2, H11). 437 unit + 7 integration green; repo rustfmt-clean. Next: Phase 2 (H1 token revocation, H6/H5 bandwidth accounting, H3/H4 fail-closed, H16 transactions, H8 h2 streaming).
