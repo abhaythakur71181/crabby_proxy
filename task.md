@@ -281,9 +281,9 @@ Four root patterns drive most findings:
 
 ## PHASE 2 — Next sprint (correctness & revocation)
 
-- [ ] **R3-H1** JWT/token revocation: `token_version` claim bumped on disable/role-change/logout; per-request `is_active`/role recheck in middleware.
+- [~] **R3-H1** Per-request `is_active`/existence recheck added to the bearer middleware (`cached_user_role`): disabled/deleted users lose access immediately instead of riding a 24h token. TODO: `token_version` logout/rotate revocation (needs schema migration + create_jwt change).
 - [ ] **R3-H12** Key auth caches on salted HMAC (not plaintext); include `is_active`/epoch; clear in `invalidate_all_for_user`.
-- [ ] **R3-M1/M2** Invalidate approval cache on `terminate_approval`; invalidate verified-key cache on API-key revoke.
+- [x] **R3-M1/M2** `terminate_approval` now returns the affected `user_id` (UPDATE…RETURNING) and the handler calls `invalidate_approval_cache` → revoked client denied immediately. M2 (verified-key cache on API-key revoke) was already handled via `invalidate_api_key_cache`.
 - [ ] **R3-H6** One source of truth for bandwidth: tracker=enforcement, usage_writer=persistence; never re-add live deltas on reseed; remove/​wire dead Redis `incr_bandwidth`; re-check window in `add_and_over`.
 - [ ] **R3-H5** Usage writer: batch-drain (`recv_many`) into one transaction; on overflow block-with-timeout or reconcile dropped bytes; alert on drop counter.
 - [x] **R3-H3/H4** Fail-closed sweep: geo unknown-country now denies in allowlist mode (`geo_filter.rs`); `RedisRateLimiter::check` denies on Redis error (`rate_limit.rs`); `validate_connection_limit` denies on count error (`validators.rs`). Login limiter now keyed on socket peer via `ConnectInfo<SocketAddr>`; forwarded headers honored only from a loopback peer (`admin/handlers/auth.rs`, `admin/server.rs` serves with connect-info).
