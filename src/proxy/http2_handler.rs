@@ -348,20 +348,20 @@ async fn handle_h2_connect_validated(
                 .with_label_values(&["HTTP2", "success"])
                 .inc();
             if let Some(uid) = ctx.effective_uid() {
-                state.usage_writer.submit(crate::usage_writer::UsageRecord {
-                    user_id: uid,
-                    connection_id: conn_id,
-                    client_ip: client_addr.ip().to_string(),
-                    target_host: authority.clone(),
-                    protocol: "HTTP2".to_string(),
-                    started_at,
-                    ended_at,
-                    bytes_sent: bytes_sent as i64,
-                    bytes_received: bytes_received as i64,
-                    status: "success".to_string(),
-                });
                 state
-                    .track_bandwidth(uid, bytes_sent as i64 + bytes_received as i64)
+                    .usage_writer
+                    .submit(crate::usage_writer::UsageRecord {
+                        user_id: uid,
+                        connection_id: conn_id,
+                        client_ip: client_addr.ip().to_string(),
+                        target_host: authority.clone(),
+                        protocol: "HTTP2".to_string(),
+                        started_at,
+                        ended_at,
+                        bytes_sent: bytes_sent as i64,
+                        bytes_received: bytes_received as i64,
+                        status: "success".to_string(),
+                    })
                     .await;
             }
         }
@@ -376,18 +376,21 @@ async fn handle_h2_connect_validated(
                 .with_label_values(&["HTTP2", "failed"])
                 .inc();
             if let Some(uid) = ctx.effective_uid() {
-                state.usage_writer.submit(crate::usage_writer::UsageRecord {
-                    user_id: uid,
-                    connection_id: conn_id,
-                    client_ip: client_addr.ip().to_string(),
-                    target_host: authority.clone(),
-                    protocol: "HTTP2".to_string(),
-                    started_at,
-                    ended_at,
-                    bytes_sent: 0,
-                    bytes_received: 0,
-                    status: "failed".to_string(),
-                });
+                state
+                    .usage_writer
+                    .submit(crate::usage_writer::UsageRecord {
+                        user_id: uid,
+                        connection_id: conn_id,
+                        client_ip: client_addr.ip().to_string(),
+                        target_host: authority.clone(),
+                        protocol: "HTTP2".to_string(),
+                        started_at,
+                        ended_at,
+                        bytes_sent: 0,
+                        bytes_received: 0,
+                        status: "failed".to_string(),
+                    })
+                    .await;
             }
         }
     }
@@ -1007,11 +1010,11 @@ async fn handle_h2_forward_validated(
             crate::metrics::BYTES_TRANSFERRED
                 .with_label_values(&["received"])
                 .inc_by(bytes_transferred);
-
-            // Track bandwidth for quota
-            if let Some(uid) = ctx.effective_uid() {
-                state.track_bandwidth(uid, bytes_transferred as i64).await;
-            }
+            // NOTE: the non-CONNECT forward path does not yet persist a usage
+            // row, so its bytes aren't counted toward quota. The previous
+            // `track_bandwidth` call here only wrote a Redis counter that no
+            // enforcement path read, so removing it changes nothing functional.
+            // Proper forward-path usage accounting is tracked as a follow-up.
 
             tracing::info!(
                 target: "access_log",
