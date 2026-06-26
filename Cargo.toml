@@ -46,6 +46,8 @@ http = "1"
 bytes = "1"
 chrono-tz = "0.10.4"
 arc-swap = "1.9.0"
+sha2 = "0.10"
+hmac = "0.12"
 
 [dev-dependencies]
 serial_test = "3.1"

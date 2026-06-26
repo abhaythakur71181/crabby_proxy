@@ -7,6 +7,30 @@ use tokio::io::{self, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
+/// Process-random key for the auth-cache HMAC. Generated once per process so
+/// cache keys are unforgeable, never stable across restarts, and reveal nothing
+/// about the credentials.
+static AUTH_CACHE_HMAC_KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+
+/// Derive the opaque auth-cache key from credentials via HMAC-SHA256, so the
+/// in-memory cache never holds plaintext usernames/passwords as keys.
+fn auth_cache_key(username: &str, password: &str) -> [u8; 32] {
+    use hmac::{Hmac, Mac};
+    use rand::RngCore;
+    use sha2::Sha256;
+
+    let key = AUTH_CACHE_HMAC_KEY.get_or_init(|| {
+        let mut k = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut k);
+        k
+    });
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(username.as_bytes());
+    mac.update(&[0u8]); // domain separator so (a,b) != (ab,"")
+    mac.update(password.as_bytes());
+    mac.finalize().into_bytes().into()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ProxyProtocol {
     TCP,
@@ -267,9 +291,10 @@ impl ProxyProtocol {
     /// root_admin id), None on failure. Never returns a sentinel id.
     async fn validate_credentials(username: &str, password: &str, state: &AppState) -> Option<i64> {
         // ── In-process auth cache (avoids DB + argon2 on repeat connections) ──
-        // Key = (username, password) tuple — avoids hash collision risk.
-        // 60-second TTL.  API-key auth has its own Redis-backed cache so we skip it here.
-        let cache_key = (username.to_string(), password.to_string());
+        // Key = HMAC-SHA256(username, password) under a process-random key, so
+        // plaintext credentials never live as map keys, while the full 256-bit
+        // digest keeps it collision-safe. 60-second TTL.
+        let cache_key = auth_cache_key(username, password);
         if let Some(entry) = state.auth_cache.get(&cache_key) {
             let (uid, cached_at) = entry.value();
             if cached_at.elapsed() < std::time::Duration::from_secs(60) {
@@ -990,6 +1015,16 @@ impl MultiProtocolProxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_cache_key_is_deterministic_and_separated() {
+        let a = auth_cache_key("alice", "secret");
+        assert_eq!(a, auth_cache_key("alice", "secret")); // stable within process
+        assert_ne!(a, auth_cache_key("alice", "secre")); // different password
+        assert_ne!(a, auth_cache_key("alic", "esecret")); // domain separation
+        assert_ne!(a, auth_cache_key("bob", "secret")); // different user
+        assert_eq!(a.len(), 32);
+    }
 
     // === ProxyProtocol Display Tests ===
 
