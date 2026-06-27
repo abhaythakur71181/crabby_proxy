@@ -6,7 +6,7 @@ import { PageHeader } from "@/components/app/page-header";
 import { AnimatedCounter } from "@/components/app/animated-counter";
 import { Mono } from "@/components/app/mono";
 import { Sparkline } from "@/components/app/sparkline";
-import { useUsageSummary, useUsageTimeseries } from "@/lib/queries";
+import { useUsageSummary, useUsageTimeseries, useUserMap } from "@/lib/queries";
 import { fmtBytes } from "@/lib/format";
 
 export const Route = createFileRoute("/_authenticated/usage")({
@@ -17,6 +17,7 @@ export const Route = createFileRoute("/_authenticated/usage")({
 function UsagePage() {
   const { data } = useUsageSummary();
   const { data: ts } = useUsageTimeseries(7, "day");
+  const nameOf = useUserMap();
 
   const topUsers = data?.top_users ?? [];
   const sorted = [...topUsers].sort((a, b) => b.total_bandwidth - a.total_bandwidth);
@@ -53,7 +54,7 @@ function UsagePage() {
                     <div className="flex items-center gap-3">
                       <div className="grid size-7 place-items-center rounded-md bg-white/5 text-[10px] font-mono-tight">{i + 1}</div>
                       <div>
-                        <div className="text-sm font-medium">{"User #" + u.user_id}</div>
+                        <div className="text-sm font-medium">{nameOf(u.user_id)}</div>
                         <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{u.connection_count.toLocaleString()} conns</div>
                       </div>
                     </div>
@@ -85,7 +86,7 @@ function UsagePage() {
               <li key={u.user_id} className="flex items-center justify-between px-5 py-3 text-sm">
                 <span className="flex items-center gap-3">
                   <span className="grid size-6 place-items-center rounded bg-white/5 text-[10px] font-mono-tight">{i + 1}</span>
-                  {"User #" + u.user_id}
+                  {nameOf(u.user_id)}
                 </span>
                 <Mono className="text-xs text-foreground/80">{u.connection_count.toLocaleString()}</Mono>
               </li>

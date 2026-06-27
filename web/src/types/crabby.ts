@@ -80,6 +80,7 @@ export interface AuditEntry {
   id: string;
   ts: string;
   actor: string;
+  actor_id: number;
   action: string;
   target: string;
   ip: string;

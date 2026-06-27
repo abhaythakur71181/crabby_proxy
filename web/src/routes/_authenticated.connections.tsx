@@ -9,7 +9,7 @@ import { Mono } from "@/components/app/mono";
 import { DetailDrawer } from "@/components/app/detail-drawer";
 import { EmptyState } from "@/components/app/empty";
 import { useLiveConnections } from "@/mock/live";
-import { useConnections } from "@/lib/queries";
+import { useConnections, useUserMap } from "@/lib/queries";
 import { fmtBytes, fmtRelative } from "@/lib/format";
 import type { Connection } from "@/types/crabby";
 
@@ -23,6 +23,7 @@ const PROTOCOLS = ["ALL", "HTTPS", "HTTP", "SOCKS5", "SOCKS4", "H2"] as const;
 function ConnectionsPage() {
   const { connections } = useConnections();
   const { rows } = useLiveConnections(connections, 80);
+  const nameOf = useUserMap();
   const [q, setQ] = useState("");
   const [proto, setProto] = useState<(typeof PROTOCOLS)[number]>("ALL");
   const [active, setActive] = useState<Connection | null>(null);
@@ -117,7 +118,7 @@ function ConnectionsPage() {
                 <span className="flex items-center gap-1.5 text-[11px]">
                   <StatusDot tone="success" /> active
                 </span>
-                <span className="truncate text-[11px] text-foreground/80">{r.username}</span>
+                <span className="truncate text-[11px] text-foreground/80">{nameOf(r.user_id)}</span>
                 <Mono className="text-right text-[11px]">{fmtBytes(r.bytes_sent)}</Mono>
                 <Mono className="text-right text-[11px]">{fmtBytes(r.bytes_received)}</Mono>
               </li>
@@ -140,7 +141,7 @@ function ConnectionsPage() {
               value={<Mono className="text-xs">{active.target_host}:{active.target_port}</Mono>}
             />
             <DetailRow label="Protocol" value={<Pill variant="mono">{active.protocol}</Pill>} />
-            <DetailRow label="User" value={<span className="text-sm">{active.username}</span>} />
+            <DetailRow label="User" value={<span className="text-sm">{nameOf(active.user_id)}</span>} />
             <DetailRow label="Started" value={<span className="text-sm">{fmtRelative(active.started_at)}</span>} />
             <div className="grid grid-cols-2 gap-3">
               <Metric label="Sent" value={fmtBytes(active.bytes_sent)} />

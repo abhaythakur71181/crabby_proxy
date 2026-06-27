@@ -12,6 +12,15 @@ export function useUsers() {
   return { ...q, users: q.data ?? [] };
 }
 
+/// id → username map for resolving the user_id-only fields on connections,
+/// approvals, audit, usage, etc. into real names. Falls back to "User #<id>".
+export function useUserMap() {
+  const { users } = useUsers();
+  const map = new Map<number, string>(users.map((u) => [u.id, u.username]));
+  return (id: number | null | undefined): string =>
+    id == null ? "—" : (map.get(id) ?? `User #${id}`);
+}
+
 export function useConnections(pollMs = 3000) {
   const q = useQuery({
     queryKey: ["connections"],

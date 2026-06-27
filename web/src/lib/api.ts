@@ -404,9 +404,10 @@ const adaptAudit = (a: BackendAudit): AuditEntry => ({
   id: String(a.id),
   ts: isoReq(a.created_at),
   actor: `User #${a.user_id}`,
+  actor_id: a.user_id,
   action: a.action,
   target: [a.target_type, a.target_id].filter(Boolean).join(":") || "—",
-  ip: a.ip_address ?? "—",
+  ip: a.ip_address || "—",
   outcome: a.action.includes("denied") || a.action.includes("reject") ? "denied" : "ok",
   details: a.details ?? "",
 });
@@ -498,3 +499,10 @@ export interface ConfigResponse {
 export const getConfig = () => req<ConfigResponse>("/api/config");
 export const reloadConfig = () =>
   req<{ success: boolean; message: string }>("/api/config/reload", { method: "POST" });
+
+/// Update editable (non-security) config fields — root_admin only.
+export const updateConfig = (body: {
+  max_connections?: number;
+  connection_approval?: boolean;
+  reverse_tunnels?: boolean;
+}) => req<ConfigResponse>("/api/config", { method: "PUT", body: JSON.stringify(body) });
