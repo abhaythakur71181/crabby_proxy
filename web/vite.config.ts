@@ -12,4 +12,21 @@ export default defineConfig({
     // nitro/vite builds from this
     server: { entry: "server" },
   },
+  // Dev: proxy the admin API + health to the Rust backend so the browser talks
+  // same-origin (no CORS). In production nginx fills this role. Override target
+  // with CRABBY_BACKEND.
+  vite: {
+    server: {
+      proxy: {
+        "/api": {
+          target: process.env.CRABBY_BACKEND || "http://127.0.0.1:8081",
+          changeOrigin: true,
+        },
+        "/health": {
+          target: process.env.CRABBY_BACKEND || "http://127.0.0.1:8081",
+          changeOrigin: true,
+        },
+      },
+    },
+  },
 });

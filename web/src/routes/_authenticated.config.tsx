@@ -1,10 +1,10 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { motion } from "framer-motion";
 import { RefreshCw, Save } from "lucide-react";
-import { useState } from "react";
 import { Panel, PanelHeader } from "@/components/app/card";
 import { PageHeader } from "@/components/app/page-header";
-import { configSections } from "@/mock/seed";
+import { api, useConfig, useMutation } from "@/lib/queries";
+import { toast } from "sonner";
 
 export const Route = createFileRoute("/_authenticated/config")({
   head: () => ({ meta: [{ title: "Configuration · Crabby Proxy" }] }),
@@ -12,13 +12,44 @@ export const Route = createFileRoute("/_authenticated/config")({
 });
 
 function ConfigPage() {
-  const [reloading, setReloading] = useState(false);
+  const { data } = useConfig();
 
-  async function reload() {
-    setReloading(true);
-    await new Promise((r) => setTimeout(r, 1200));
-    setReloading(false);
-  }
+  const reloadMutation = useMutation({
+    mutationFn: () => api.reloadConfig(),
+    onSuccess: (r) => toast.success(r?.message || "Configuration reloaded"),
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Failed to reload config"),
+  });
+  const reloading = reloadMutation.isPending;
+
+  const configSections = [
+    {
+      id: "server",
+      title: "Server",
+      description: "Listeners and connection limits.",
+      fields: [
+        { key: "server.proxy_bind", label: "Proxy bind", value: data?.server?.proxy_bind ?? "—", type: "text" },
+        { key: "server.admin_bind", label: "Admin bind", value: data?.server?.admin_bind ?? "—", type: "text" },
+        { key: "server.max_connections", label: "Max connections", value: String(data?.server?.max_connections ?? "—"), type: "number" },
+      ],
+    },
+    {
+      id: "auth",
+      title: "Authentication",
+      description: "Identity and access controls.",
+      fields: [
+        { key: "authentication.enabled", label: "Authentication enabled", value: String(data?.authentication?.enabled ?? false), type: "switch" },
+      ],
+    },
+    {
+      id: "features",
+      title: "Features",
+      description: "Optional runtime capabilities.",
+      fields: [
+        { key: "features.connection_approval", label: "Connection approval", value: String(data?.features?.connection_approval ?? false), type: "switch" },
+        { key: "features.reverse_tunnels", label: "Reverse tunnels", value: String(data?.features?.reverse_tunnels ?? false), type: "switch" },
+      ],
+    },
+  ];
 
   return (
     <div className="mx-auto w-full max-w-[1200px] px-6 py-8 lg:px-10">
@@ -28,14 +59,17 @@ function ConfigPage() {
         action={
           <div className="flex items-center gap-2">
             <button
-              onClick={reload}
+              onClick={() => reloadMutation.mutate()}
               disabled={reloading}
               className="inline-flex h-10 items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-4 text-sm font-medium text-foreground hover:bg-white/[0.08]"
             >
               <RefreshCw className={"size-4 " + (reloading ? "animate-spin" : "")} />
               {reloading ? "Reloading…" : "Reload config"}
             </button>
-            <button className="inline-flex h-10 items-center gap-2 rounded-xl bg-[var(--accent-violet)] px-4 text-sm font-semibold text-[var(--primary-foreground)] hover:brightness-110">
+            <button
+              disabled
+              className="inline-flex h-10 items-center gap-2 rounded-xl bg-[var(--accent-violet)] px-4 text-sm font-semibold text-[var(--primary-foreground)] opacity-50 cursor-not-allowed"
+            >
               <Save className="size-4" /> Save changes
             </button>
           </div>
@@ -61,7 +95,7 @@ function ConfigPage() {
 }
 
 function FieldRow({ field }: { field: { key: string; label: string; value: string; type: string } }) {
-  const [val, setVal] = useState(field.value);
+  const val = field.value;
   if (field.type === "switch") {
     const on = val === "true";
     return (
@@ -72,9 +106,9 @@ function FieldRow({ field }: { field: { key: string; label: string; value: strin
         </div>
         <button
           aria-pressed={on}
-          onClick={() => setVal(on ? "false" : "true")}
+          disabled
           className={
-            "relative h-6 w-11 rounded-full border transition " +
+            "relative h-6 w-11 cursor-not-allowed rounded-full border transition " +
             (on ? "border-[var(--accent-violet)] bg-[var(--accent-violet)]/30" : "border-white/10 bg-white/[0.04]")
           }
         >
@@ -98,7 +132,7 @@ function FieldRow({ field }: { field: { key: string; label: string; value: strin
       </div>
       <input
         value={val}
-        onChange={(e) => setVal(e.target.value)}
+        readOnly
         className="h-10 w-full rounded-xl border border-white/[0.08] bg-white/[0.03] px-3 font-mono-tight text-sm outline-none transition focus:border-[var(--accent-violet)]/50 focus:bg-white/[0.05]"
       />
     </label>

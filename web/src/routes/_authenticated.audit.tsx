@@ -7,7 +7,7 @@ import { PageHeader } from "@/components/app/page-header";
 import { Pill } from "@/components/app/badge";
 import { StatusDot } from "@/components/app/status-dot";
 import { Mono } from "@/components/app/mono";
-import { auditEntries } from "@/mock/seed";
+import { useAudit } from "@/lib/queries";
 import { fmtRelative } from "@/lib/format";
 
 export const Route = createFileRoute("/_authenticated/audit")({
@@ -20,10 +20,11 @@ const OUTCOMES = ["all", "ok", "denied", "error"] as const;
 function AuditPage() {
   const [q, setQ] = useState("");
   const [out, setOut] = useState<(typeof OUTCOMES)[number]>("all");
+  const { entries } = useAudit(100);
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    return auditEntries.filter((a) => {
+    return entries.filter((a) => {
       if (out !== "all" && a.outcome !== out) return false;
       if (!needle) return true;
       return (
@@ -33,7 +34,7 @@ function AuditPage() {
         a.ip.includes(needle)
       );
     });
-  }, [q, out]);
+  }, [q, out, entries]);
 
   return (
     <div className="mx-auto w-full max-w-[1500px] px-6 py-8 lg:px-10">

@@ -7,7 +7,7 @@ import { Pill } from "@/components/app/badge";
 import { StatusDot } from "@/components/app/status-dot";
 import { Mono } from "@/components/app/mono";
 import { Sparkline, makeSeries } from "@/components/app/sparkline";
-import { healthComponents, systemStats } from "@/mock/seed";
+import { useHealth, useSystemStats } from "@/lib/queries";
 import { fmtClockHMS, fmtRelative } from "@/lib/format";
 
 export const Route = createFileRoute("/_authenticated/health")({
@@ -16,7 +16,9 @@ export const Route = createFileRoute("/_authenticated/health")({
 });
 
 function HealthPage() {
-  const degraded = healthComponents.some((c) => c.status !== "healthy");
+  const { components } = useHealth();
+  const { data: stats } = useSystemStats();
+  const degraded = components.some((c) => c.status !== "healthy");
 
   return (
     <div className="mx-auto w-full max-w-[1400px] px-6 py-8 lg:px-10">
@@ -31,13 +33,13 @@ function HealthPage() {
       />
 
       <section className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <Big label="Uptime" value={fmtClockHMS(systemStats.uptime_seconds)} />
-        <Big label="Version" value={`v${systemStats.version}`} />
-        <Big label="Active proxies" value={systemStats.active_tunnels.toString()} />
+        <Big label="Uptime" value={fmtClockHMS(stats?.uptime_seconds ?? 0)} />
+        <Big label="Version" value={`v${stats?.version ?? "—"}`} />
+        <Big label="Active proxies" value={(stats?.active_tunnels ?? 0).toString()} />
       </section>
 
       <section className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
-        {healthComponents.map((c, i) => (
+        {components.map((c, i) => (
           <motion.div key={c.name} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.05 }}>
             <Panel className="overflow-hidden">
               <PanelHeader
