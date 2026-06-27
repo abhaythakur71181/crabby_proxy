@@ -19,7 +19,8 @@ import {
 } from "lucide-react";
 import { useEffect } from "react";
 import { useRouter } from "@tanstack/react-router";
-import { users } from "@/mock/seed";
+import { useUsers } from "@/lib/queries";
+import { isAdmin } from "@/lib/auth";
 import { Kbd } from "./mono";
 import { signOut } from "@/lib/auth";
 import { useSyncExternalStore } from "react";
@@ -76,6 +77,10 @@ export function CommandPalette() {
   const isOpen = useCommandPalette((s) => s.isOpen);
   const close = useCommandPalette((s) => s.close);
   const router = useRouter();
+  // Real users for fuzzy jump (admins only — non-admins can't list users).
+  const admin = isAdmin();
+  const { users } = useUsers();
+  const userResults = admin ? users : [];
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -147,7 +152,7 @@ export function CommandPalette() {
                   <CmdItem icon={LogOut} onSelect={() => { signOut(); go("/login"); }}>Sign out</CmdItem>
                 </CmdGroup>
                 <CmdGroup heading="Users">
-                  {users.map((u) => (
+                  {userResults.map((u) => (
                     <CmdItem key={u.id} icon={Users} onSelect={() => go(`/users?id=${u.id}`)}>
                       <span className="text-foreground">{u.username}</span>
                       <span className="ml-2 text-[10px] uppercase tracking-wider text-muted-foreground">
