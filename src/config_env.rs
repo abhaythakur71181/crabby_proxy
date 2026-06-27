@@ -44,13 +44,25 @@ impl ConfigEnvExt for Config {
             );
         }
 
+        // Default credentials are refused at boot the same way a weak JWT
+        // secret is — a warning is too easy to miss and leaves the admin API
+        // guessable. Set CRABBY_ALLOW_DEFAULT_PASSWORDS=1 to bypass for local
+        // development only.
+        let allow_defaults = env::var("CRABBY_ALLOW_DEFAULT_PASSWORDS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
         // Admin Password - prioritize env var
         if let Ok(env_password) = env::var("CRABBY_ADMIN_PASSWORD") {
             tracing::info!("Using admin password from CRABBY_ADMIN_PASSWORD environment variable");
             self.admin.admin_password = env_password;
+        } else if self.admin.admin_password == "secure_admin_password" && !allow_defaults {
+            panic!(
+                "Admin password is the built-in default. Refusing to start with a guessable admin credential. Set CRABBY_ADMIN_PASSWORD (or CRABBY_ALLOW_DEFAULT_PASSWORDS=1 for local dev)."
+            );
         } else if self.admin.admin_password == "secure_admin_password" {
             tracing::warn!(
-                "⚠️  Admin password is using default value! Set CRABBY_ADMIN_PASSWORD for production."
+                "⚠️  Admin password is the default value — allowed only because CRABBY_ALLOW_DEFAULT_PASSWORDS is set."
             );
         }
 
@@ -60,9 +72,13 @@ impl ConfigEnvExt for Config {
                 "Using basic auth password from CRABBY_BASIC_AUTH_PASSWORD environment variable"
             );
             self.authentication.password = env_password;
+        } else if self.authentication.password == "changeme" && !allow_defaults {
+            panic!(
+                "Basic auth password is the built-in default ('changeme'). Refusing to start. Set CRABBY_BASIC_AUTH_PASSWORD (or CRABBY_ALLOW_DEFAULT_PASSWORDS=1 for local dev)."
+            );
         } else if self.authentication.password == "changeme" {
             tracing::warn!(
-                "⚠️  Basic auth password is using default value! Set CRABBY_BASIC_AUTH_PASSWORD for production."
+                "⚠️  Basic auth password is the default value — allowed only because CRABBY_ALLOW_DEFAULT_PASSWORDS is set."
             );
         }
     }
@@ -82,10 +98,12 @@ mod tests {
     #[serial]
     fn test_apply_env_jwt_secret_override() {
         std::env::set_var("CRABBY_JWT_SECRET", strong_secret());
+        std::env::set_var("CRABBY_ALLOW_DEFAULT_PASSWORDS", "1");
         let mut config = Config::default();
         config.apply_env_overrides();
         assert_eq!(config.authentication.jwt_secret, strong_secret());
         std::env::remove_var("CRABBY_JWT_SECRET");
+        std::env::remove_var("CRABBY_ALLOW_DEFAULT_PASSWORDS");
     }
 
     #[test]
@@ -103,20 +121,24 @@ mod tests {
     #[serial]
     fn test_apply_env_admin_password_override() {
         std::env::set_var("CRABBY_ADMIN_PASSWORD", "super_secure_pw");
+        std::env::set_var("CRABBY_ALLOW_DEFAULT_PASSWORDS", "1"); // basic pw stays default
         let mut config = Config::default();
         config.apply_env_overrides();
         assert_eq!(config.admin.admin_password, "super_secure_pw");
         std::env::remove_var("CRABBY_ADMIN_PASSWORD");
+        std::env::remove_var("CRABBY_ALLOW_DEFAULT_PASSWORDS");
     }
 
     #[test]
     #[serial]
     fn test_apply_env_basic_auth_password_override() {
         std::env::set_var("CRABBY_BASIC_AUTH_PASSWORD", "basic_pw_123");
+        std::env::set_var("CRABBY_ALLOW_DEFAULT_PASSWORDS", "1"); // admin pw stays default
         let mut config = Config::default();
         config.apply_env_overrides();
         assert_eq!(config.authentication.password, "basic_pw_123");
         std::env::remove_var("CRABBY_BASIC_AUTH_PASSWORD");
+        std::env::remove_var("CRABBY_ALLOW_DEFAULT_PASSWORDS");
     }
 
     #[test]
@@ -172,9 +194,10 @@ mod tests {
         std::env::remove_var("CRABBY_JWT_SECRET");
         std::env::remove_var("CRABBY_ADMIN_PASSWORD");
         std::env::remove_var("CRABBY_BASIC_AUTH_PASSWORD");
+        // Allow defaults so we exercise the warn path rather than the panic.
+        std::env::set_var("CRABBY_ALLOW_DEFAULT_PASSWORDS", "1");
 
         let mut config = Config::default();
-        // Should not panic even when defaults are used
         config.apply_env_overrides();
 
         // S2: JWT secret should be auto-generated (no longer the default)
@@ -185,5 +208,20 @@ mod tests {
         assert_eq!(config.authentication.jwt_secret.len(), 64); // Auto-generated is 64 chars
         assert_eq!(config.admin.admin_password, "secure_admin_password");
         assert_eq!(config.authentication.password, "changeme");
+        std::env::remove_var("CRABBY_ALLOW_DEFAULT_PASSWORDS");
+    }
+
+    #[test]
+    #[serial]
+    #[should_panic(expected = "Admin password is the built-in default")]
+    fn test_apply_env_panics_on_default_admin_password() {
+        // Note: no env vars set here. The cleanup after a panic never runs, so
+        // setting any env var would leak into other #[serial] tests. The JWT
+        // secret auto-generates from the default, so the panic is reached at
+        // the admin-password check without needing CRABBY_JWT_SECRET.
+        std::env::remove_var("CRABBY_ADMIN_PASSWORD");
+        std::env::remove_var("CRABBY_ALLOW_DEFAULT_PASSWORDS");
+        let mut config = Config::default(); // admin_password = default
+        config.apply_env_overrides(); // should panic — guessable admin credential
     }
 }
