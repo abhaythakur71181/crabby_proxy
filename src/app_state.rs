@@ -130,6 +130,11 @@ pub struct AppState {
     // Self-loop protection: blocks the proxy from connecting back to its own
     // listener. `None` if the bind address couldn't be parsed.
     pub self_loop_guard: Option<crate::self_loop::SelfLoopGuard>,
+
+    // Per-connection cancel handles, keyed by connection id. Lets an admin
+    // terminate a live connection (DELETE /api/connections/:id); the relay
+    // races against the Notify and tears down on signal.
+    pub conn_cancel: Arc<dashmap::DashMap<uuid::Uuid, Arc<tokio::sync::Notify>>>,
 }
 
 impl AppState {
@@ -320,6 +325,7 @@ impl AppState {
                 }
             },
             self_loop_guard,
+            conn_cancel: Arc::new(dashmap::DashMap::new()),
         })
     }
 

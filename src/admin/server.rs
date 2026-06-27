@@ -37,6 +37,10 @@ pub async fn run_admin_server(
             get(handlers::connections::count_connections),
         )
         .route(
+            "/api/connections/:id",
+            delete(handlers::connections::terminate_connection),
+        )
+        .route(
             "/api/connections/live",
             get(handlers::connections::live_connections),
         )
