@@ -148,7 +148,15 @@ impl TunnelManager {
         let port = self
             .create_reverse_tunnel(service_type, preferred_port, target_addr)
             .await?;
-        let tunnel = self.active_tunnels.get(&port).unwrap();
+        // Build the response from the just-inserted entry. Avoid `.unwrap()`:
+        // although the entry exists under the current `&mut self` lock, an
+        // unwrap would panic the admin request task on any future refactor that
+        // released the lock or removed the tunnel early.
+        let tunnel = self.active_tunnels.get(&port).ok_or_else(|| {
+            TunnelError::AllocationError(format!(
+                "tunnel on port {port} vanished immediately after creation"
+            ))
+        })?;
         Ok(TunnelInfo {
             tunnel_id: tunnel.tunnel_id.to_string(),
             listen_port: tunnel.listen_port,
