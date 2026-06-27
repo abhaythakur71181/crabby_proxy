@@ -75,6 +75,10 @@ pub async fn run_admin_server(
             "/api/usage/summary",
             get(handlers::usage::get_system_usage_summary),
         )
+        .route(
+            "/api/usage/timeseries",
+            get(handlers::usage::get_usage_timeseries),
+        )
         // Quota management routes
         .route(
             "/api/users/:id/quota",

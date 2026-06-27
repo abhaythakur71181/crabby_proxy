@@ -204,3 +204,50 @@ pub async fn get_system_usage_summary(
             .collect(),
     }))
 }
+
+#[derive(Deserialize)]
+pub struct TimeseriesQuery {
+    /// Range to cover, in days (default 7, max 365).
+    pub days: Option<i32>,
+    /// Bucket width: "hour" or "day" (default "day").
+    pub bucket: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct TimeseriesResponse {
+    pub period_days: i32,
+    pub bucket_secs: i64,
+    pub points: Vec<usage::UsageBucket>,
+}
+
+/// GET /api/usage/timeseries - Bucketed usage over time for trend charts
+/// (admin only). `?days=7&bucket=hour|day`.
+pub async fn get_usage_timeseries(
+    State(state): State<Arc<AppState>>,
+    axum::Extension(current_user_id): axum::Extension<i64>,
+    Query(params): Query<TimeseriesQuery>,
+) -> Result<Json<TimeseriesResponse>, ApiError> {
+    let current_user =
+        crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
+    current_user.require_admin()?;
+
+    let days = params.days.unwrap_or(7).clamp(1, 365);
+    let bucket_secs = match params.bucket.as_deref() {
+        Some("hour") => 3600,
+        _ => 86400,
+    };
+    let since = chrono::Utc::now().timestamp() - (days as i64 * 86400);
+
+    let points = usage::get_usage_timeseries(&state.db_pool, since, bucket_secs)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get usage timeseries: {}", e);
+            ApiError::internal("Failed to retrieve usage timeseries")
+        })?;
+
+    Ok(Json(TimeseriesResponse {
+        period_days: days,
+        bucket_secs,
+        points,
+    }))
+}

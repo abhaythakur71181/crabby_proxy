@@ -214,6 +214,54 @@ pub async fn get_top_users_by_bandwidth(
         .collect())
 }
 
+/// One time bucket of aggregated usage, for trend charts / sparklines.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageBucket {
+    /// Unix timestamp of the bucket start (aligned to `bucket_secs`).
+    pub ts: i64,
+    pub bytes_sent: i64,
+    pub bytes_received: i64,
+    pub connections: i64,
+}
+
+/// Bucketed usage over a time range, for dashboard/usage trend charts.
+/// `bucket_secs` is the bucket width (e.g. 3600 hourly, 86400 daily). Buckets
+/// with no traffic are omitted (the UI fills gaps); ascending by time.
+pub async fn get_usage_timeseries(
+    pool: &SqlitePool,
+    since: i64,
+    bucket_secs: i64,
+) -> Result<Vec<UsageBucket>, sqlx::Error> {
+    let bucket = bucket_secs.max(1);
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            (started_at / ?) * ? AS bucket_ts,
+            COALESCE(SUM(bytes_sent), 0)     AS bytes_sent,
+            COALESCE(SUM(bytes_received), 0) AS bytes_received,
+            COUNT(*)                         AS connections
+        FROM usage
+        WHERE started_at >= ?
+        GROUP BY bucket_ts
+        ORDER BY bucket_ts ASC
+        "#,
+    )
+    .bind(bucket)
+    .bind(bucket)
+    .bind(since)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| UsageBucket {
+            ts: r.get(0),
+            bytes_sent: r.get(1),
+            bytes_received: r.get(2),
+            connections: r.get(3),
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

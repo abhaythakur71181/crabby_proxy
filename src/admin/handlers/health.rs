@@ -52,35 +52,52 @@ pub struct ComponentHealth {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// How long this component's probe took, in milliseconds.
+    pub latency_ms: u64,
+    /// Unix timestamp the probe ran (so the UI can show "last checked").
+    pub checked_at: i64,
 }
 
 /// GET /api/health/deep — Verify connectivity to all backing services.
 pub async fn deep_health_check(State(state): State<Arc<AppState>>) -> Json<DeepHealthResponse> {
-    // Check SQLite
+    let now = chrono::Utc::now().timestamp();
+
+    // Check SQLite (timed)
+    let t = std::time::Instant::now();
     let db_health = match sqlx::query("SELECT 1").fetch_one(&state.db_pool).await {
         Ok(_) => ComponentHealth {
             status: "ok".to_string(),
             detail: None,
+            latency_ms: t.elapsed().as_millis() as u64,
+            checked_at: now,
         },
         Err(e) => ComponentHealth {
             status: "error".to_string(),
             detail: Some(e.to_string()),
+            latency_ms: t.elapsed().as_millis() as u64,
+            checked_at: now,
         },
     };
 
-    // Check state backend (memory or Redis)
+    // Check state backend (memory or Redis) (timed)
+    let t = std::time::Instant::now();
     let state_health = match state.state.count_connections().await {
         Ok(_) => ComponentHealth {
             status: "ok".to_string(),
             detail: None,
+            latency_ms: t.elapsed().as_millis() as u64,
+            checked_at: now,
         },
         Err(e) => ComponentHealth {
             status: "error".to_string(),
             detail: Some(e.to_string()),
+            latency_ms: t.elapsed().as_millis() as u64,
+            checked_at: now,
         },
     };
 
-    // Check DNS cache
+    // Check DNS cache (in-process, effectively instant)
+    let t = std::time::Instant::now();
     let (dns_entries, dns_addrs) = state.dns_cache.stats();
     let dns_health = ComponentHealth {
         status: "ok".to_string(),
@@ -88,6 +105,8 @@ pub async fn deep_health_check(State(state): State<Arc<AppState>>) -> Json<DeepH
             "{} entries, {} addresses cached",
             dns_entries, dns_addrs
         )),
+        latency_ms: t.elapsed().as_millis() as u64,
+        checked_at: now,
     };
 
     let all_ok = db_health.status == "ok" && state_health.status == "ok";
