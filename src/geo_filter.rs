@@ -79,14 +79,12 @@ pub fn init_geo_filter(path: Option<&str>) -> Option<SharedGeoFilter> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn test_is_ip_allowed_no_restrictions() {
         // Without a real DB, test the logic with a mock approach
         // Just verify the allow/block logic works
-        let blocked = vec!["CN".to_string(), "RU".to_string()];
-        let allowed: Vec<String> = vec![];
+        let blocked = ["CN".to_string(), "RU".to_string()];
 
         // Simulate: country = "US" → not blocked, no allowlist → allowed
         let code = "US".to_string();
@@ -99,7 +97,7 @@ mod tests {
         assert!(is_blocked);
 
         // Simulate: allowlist mode
-        let allowed = vec!["US".to_string(), "GB".to_string()];
+        let allowed = ["US".to_string(), "GB".to_string()];
         let code = "DE".to_string();
         let in_allowlist = allowed.iter().any(|c| c.to_uppercase() == code);
         assert!(!in_allowlist);

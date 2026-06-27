@@ -31,6 +31,10 @@ fn auth_cache_key(username: &str, password: &str) -> [u8; 32] {
     mac.finalize().into_bytes().into()
 }
 
+// Variants are deliberately the wire protocol names (TCP/HTTP/HTTPS); they
+// round-trip through serde and metrics labels, so renaming to PascalCase is not
+// worth the churn.
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ProxyProtocol {
     TCP,
@@ -1302,7 +1306,7 @@ mod tests {
 
     #[test]
     fn test_extract_sni_not_handshake() {
-        let mut data = vec![0x17; 100]; // Application data, not handshake
+        let data = vec![0x17; 100]; // Application data, not handshake
         let sni = ProxyProtocol::extract_sni_from_tls(&data);
         assert!(sni.is_none());
     }

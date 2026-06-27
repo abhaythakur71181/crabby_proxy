@@ -9,6 +9,9 @@ use tokio::{
     net::TcpStream,
 };
 
+// The Tls variant is large; boxing it (to shrink the enum copied per
+// connection) is a tracked perf follow-up that touches the pin/poll impls.
+#[allow(clippy::large_enum_variant)]
 pub enum ClientStream {
     Plain(TcpStream),
     Tls(tokio_rustls::server::TlsStream<tokio::net::TcpStream>),
