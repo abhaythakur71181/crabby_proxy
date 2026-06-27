@@ -386,7 +386,7 @@ A `root_admin` account is auto-created on first run if it doesn't exist.
 cargo test
 ```
 
-The project has **398 tests** across all modules, using in-memory SQLite databases and `serial_test` for tests that modify environment variables.
+The project has **443 unit tests + 7 integration tests**, using in-memory SQLite databases and `serial_test` for tests that modify environment variables. Run the integration suite single-threaded: `cargo test -- --test-threads=1` (it binds real sockets). Architecture and design rationale live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/adr/`](docs/adr/).
 
 ---
 
@@ -414,4 +414,4 @@ The project has **398 tests** across all modules, using in-memory SQLite databas
 
 ## License
 
-Not yet decided.
+MIT — see [`LICENSE`](LICENSE).
