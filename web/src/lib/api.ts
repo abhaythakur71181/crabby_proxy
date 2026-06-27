@@ -22,7 +22,18 @@ import type {
 } from "@/types/crabby";
 import { getToken, clearSession } from "./auth";
 
-const BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ?? "";
+// Normalize the configured API base: strip trailing slash, and ensure it has a
+// scheme. Without a scheme a value like "1.2.3.4:8000" is treated as a RELATIVE
+// path by fetch/WebSocket and gets joined onto the page origin
+// (http://host:5173/1.2.3.4:8000/api/login). Prepend http:// when missing; set
+// an explicit "https://..." in VITE_API_BASE_URL when the backend has TLS.
+function normalizeBase(raw: string | undefined): string {
+  const v = (raw ?? "").trim().replace(/\/+$/, "");
+  if (!v) return ""; // same-origin
+  if (/^https?:\/\//i.test(v)) return v;
+  return `http://${v}`;
+}
+const BASE = normalizeBase(import.meta.env.VITE_API_BASE_URL as string | undefined);
 
 export class ApiError extends Error {
   constructor(
