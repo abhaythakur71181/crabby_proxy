@@ -4,6 +4,7 @@ use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
 /// Record connection usage in the database
+#[allow(clippy::too_many_arguments)] // one row's worth of columns; a struct would just move the noise
 pub async fn record_usage(
     pool: &SqlitePool,
     user_id: i64,
