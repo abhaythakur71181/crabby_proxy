@@ -38,13 +38,9 @@ pub struct ReloadResponse {
     pub message: String,
 }
 
-/// Get current configuration (sensitive fields redacted)
-pub async fn get_config(
-    _admin: AdminUser,
-    State(state): State<Arc<AppState>>,
-) -> Json<ConfigResponse> {
-    let config = state.config.load();
-    Json(ConfigResponse {
+/// Build the redacted config response (no secrets).
+fn config_response(config: &crate::config::Config) -> ConfigResponse {
+    ConfigResponse {
         server: ServerConfigResponse {
             proxy_bind: config.server.proxy_bind.clone(),
             admin_bind: config.server.admin_bind.clone(),
@@ -57,7 +53,73 @@ pub async fn get_config(
             connection_approval: config.features.connection_approval,
             reverse_tunnels: config.features.reverse_tunnels,
         },
-    })
+    }
+}
+
+/// Get current configuration (sensitive fields redacted)
+pub async fn get_config(
+    _admin: AdminUser,
+    State(state): State<Arc<AppState>>,
+) -> Json<ConfigResponse> {
+    Json(config_response(&state.config.load()))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateConfigRequest {
+    pub max_connections: Option<usize>,
+    pub connection_approval: Option<bool>,
+    pub reverse_tunnels: Option<bool>,
+}
+
+/// PUT /api/config — Update the hot-reloadable, non-security config fields
+/// (root_admin only). Applies in-memory immediately AND persists to the config
+/// file. Security-critical fields (binds, secrets, auth toggle) are NOT editable
+/// here — they require a restart by design.
+pub async fn update_config(
+    State(state): State<Arc<AppState>>,
+    axum::Extension(current_user_id): axum::Extension<i64>,
+    Json(body): Json<UpdateConfigRequest>,
+) -> Result<Json<ConfigResponse>, ApiError> {
+    let current_user =
+        crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
+    if current_user.role != "root_admin" {
+        return Err(ApiError::forbidden("Only root_admin can edit configuration"));
+    }
+
+    let path = state
+        .config_path
+        .clone()
+        .ok_or_else(|| ApiError::internal("No config file path available"))?;
+
+    let apply = |cfg: &mut crate::config::Config| {
+        if let Some(mc) = body.max_connections {
+            cfg.server.max_connections = mc;
+        }
+        if let Some(ca) = body.connection_approval {
+            cfg.features.connection_approval = ca;
+        }
+        if let Some(rt) = body.reverse_tunnels {
+            cfg.features.reverse_tunnels = rt;
+        }
+    };
+
+    // Persist to the file: re-read from disk (so we don't write env-injected
+    // secrets that only live in memory), apply, write back.
+    let mut file_cfg = crate::config::Config::from_file(&path)
+        .map_err(|e| ApiError::internal(format!("read config: {e}")))?;
+    apply(&mut file_cfg);
+    let toml = toml::to_string_pretty(&file_cfg)
+        .map_err(|e| ApiError::internal(format!("serialize config: {e}")))?;
+    std::fs::write(&path, toml).map_err(|e| ApiError::internal(format!("write config: {e}")))?;
+
+    // Apply in-memory (preserves the running env-resolved secrets).
+    let mut mem = (*state.config.load_full()).clone();
+    apply(&mut mem);
+    let resp = config_response(&mem);
+    state.config.store(Arc::new(mem));
+
+    tracing::info!(target: "audit", user_id = current_user_id, "configuration updated");
+    Ok(Json(resp))
 }
 
 /// Reload configuration from file

@@ -16,6 +16,7 @@ import {
   useInvalidate,
   useMutation,
   useUsers,
+  useUserMap,
 } from "@/lib/queries";
 import { isAdmin } from "@/lib/auth";
 import { fmtRelative } from "@/lib/format";
@@ -40,6 +41,7 @@ function ApprovalsPage() {
   const invalidate = useInvalidate();
 
   const admin = isAdmin();
+  const nameOf = useUserMap();
   const [requestOpen, setRequestOpen] = useState(false);
   const [grantOpen, setGrantOpen] = useState(false);
 
@@ -171,7 +173,7 @@ function ApprovalsPage() {
                   }
                 >
                   <div className="flex items-center justify-between">
-                    <span className="text-sm font-medium">{a.username}</span>
+                    <span className="text-sm font-medium">{nameOf(a.user_id)}</span>
                     <Pill variant={a.status === "pending" ? "warning" : a.status === "approved" ? "success" : "danger"}>
                       <StatusDot tone={a.status === "pending" ? "warning" : a.status === "approved" ? "success" : "danger"} /> {a.status}
                     </Pill>
@@ -197,7 +199,7 @@ function ApprovalsPage() {
                   <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-muted-foreground">
                     Request #{sel.id}
                   </div>
-                  <div className="mt-1 text-xl font-semibold tracking-tight">{sel.username}</div>
+                  <div className="mt-1 text-xl font-semibold tracking-tight">{nameOf(sel.user_id)}</div>
                   <div className="mt-1 text-xs text-muted-foreground">
                     asked {fmtRelative(sel.requested_at)} · grant duration <Mono className="text-foreground/80">{sel.duration_hours}h</Mono>
                   </div>

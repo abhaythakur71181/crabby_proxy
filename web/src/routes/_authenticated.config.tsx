@@ -1,9 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { motion } from "framer-motion";
-import { RefreshCw, Save } from "lucide-react";
+import { RefreshCw, Save, Lock } from "lucide-react";
+import { useEffect, useState } from "react";
 import { Panel, PanelHeader } from "@/components/app/card";
 import { PageHeader } from "@/components/app/page-header";
-import { api, useConfig, useMutation } from "@/lib/queries";
+import { api, useConfig, useInvalidate, useMutation } from "@/lib/queries";
+import { getSession } from "@/lib/auth";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_authenticated/config")({
@@ -13,128 +15,211 @@ export const Route = createFileRoute("/_authenticated/config")({
 
 function ConfigPage() {
   const { data } = useConfig();
+  const invalidate = useInvalidate();
+  const isRoot = getSession()?.role === "root_admin";
+
+  // Editable fields (mirror server state; reset when it loads/changes).
+  const [maxConn, setMaxConn] = useState("");
+  const [connApproval, setConnApproval] = useState(false);
+  const [revTunnels, setRevTunnels] = useState(false);
+
+  useEffect(() => {
+    if (!data) return;
+    setMaxConn(String(data.server.max_connections));
+    setConnApproval(data.features.connection_approval);
+    setRevTunnels(data.features.reverse_tunnels);
+  }, [data]);
+
+  const dirty =
+    !!data &&
+    (Number(maxConn) !== data.server.max_connections ||
+      connApproval !== data.features.connection_approval ||
+      revTunnels !== data.features.reverse_tunnels);
+
+  const saveMut = useMutation({
+    mutationFn: () =>
+      api.updateConfig({
+        max_connections: Number(maxConn),
+        connection_approval: connApproval,
+        reverse_tunnels: revTunnels,
+      }),
+    onSuccess: () => {
+      toast.success("Configuration saved");
+      invalidate(["config"]);
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Failed to save config"),
+  });
 
   const reloadMutation = useMutation({
     mutationFn: () => api.reloadConfig(),
-    onSuccess: (r) => toast.success(r?.message || "Configuration reloaded"),
+    onSuccess: (r) => {
+      toast.success(r?.message || "Configuration reloaded");
+      invalidate(["config"]);
+    },
     onError: (e) => toast.error(e instanceof Error ? e.message : "Failed to reload config"),
   });
-  const reloading = reloadMutation.isPending;
-
-  const configSections = [
-    {
-      id: "server",
-      title: "Server",
-      description: "Listeners and connection limits.",
-      fields: [
-        { key: "server.proxy_bind", label: "Proxy bind", value: data?.server?.proxy_bind ?? "—", type: "text" },
-        { key: "server.admin_bind", label: "Admin bind", value: data?.server?.admin_bind ?? "—", type: "text" },
-        { key: "server.max_connections", label: "Max connections", value: String(data?.server?.max_connections ?? "—"), type: "number" },
-      ],
-    },
-    {
-      id: "auth",
-      title: "Authentication",
-      description: "Identity and access controls.",
-      fields: [
-        { key: "authentication.enabled", label: "Authentication enabled", value: String(data?.authentication?.enabled ?? false), type: "switch" },
-      ],
-    },
-    {
-      id: "features",
-      title: "Features",
-      description: "Optional runtime capabilities.",
-      fields: [
-        { key: "features.connection_approval", label: "Connection approval", value: String(data?.features?.connection_approval ?? false), type: "switch" },
-        { key: "features.reverse_tunnels", label: "Reverse tunnels", value: String(data?.features?.reverse_tunnels ?? false), type: "switch" },
-      ],
-    },
-  ];
 
   return (
     <div className="mx-auto w-full max-w-[1200px] px-6 py-8 lg:px-10">
       <PageHeader
         title="Configuration"
-        subtitle="Live runtime settings. Changes are validated, then applied on reload."
+        subtitle={
+          isRoot
+            ? "Edit hot-reloadable settings. Binds and secrets need a restart."
+            : "Live runtime settings (read-only — root_admin can edit)."
+        }
         action={
           <div className="flex items-center gap-2">
             <button
               onClick={() => reloadMutation.mutate()}
-              disabled={reloading}
-              className="inline-flex h-10 items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-4 text-sm font-medium text-foreground hover:bg-white/[0.08]"
+              disabled={reloadMutation.isPending}
+              className="inline-flex h-10 items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-4 text-sm font-medium hover:bg-white/[0.08] disabled:opacity-50"
             >
-              <RefreshCw className={"size-4 " + (reloading ? "animate-spin" : "")} />
-              {reloading ? "Reloading…" : "Reload config"}
+              <RefreshCw className={"size-4 " + (reloadMutation.isPending ? "animate-spin" : "")} />
+              {reloadMutation.isPending ? "Reloading…" : "Reload from file"}
             </button>
-            <button
-              disabled
-              className="inline-flex h-10 items-center gap-2 rounded-xl bg-[var(--accent-violet)] px-4 text-sm font-semibold text-[var(--primary-foreground)] opacity-50 cursor-not-allowed"
-            >
-              <Save className="size-4" /> Save changes
-            </button>
+            {isRoot && (
+              <button
+                onClick={() => saveMut.mutate()}
+                disabled={!dirty || saveMut.isPending}
+                className="inline-flex h-10 items-center gap-2 rounded-xl bg-[var(--accent-violet)] px-4 text-sm font-semibold text-[var(--primary-foreground)] hover:brightness-110 disabled:opacity-40"
+              >
+                <Save className="size-4" /> {saveMut.isPending ? "Saving…" : "Save changes"}
+              </button>
+            )}
           </div>
         }
       />
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        {configSections.map((s, idx) => (
-          <motion.div key={s.id} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: idx * 0.05 }}>
-            <Panel>
-              <PanelHeader title={s.title} hint={s.description} />
-              <div className="space-y-3 p-5">
-                {s.fields.map((f) => (
-                  <FieldRow key={f.key} field={f} />
-                ))}
-              </div>
-            </Panel>
-          </motion.div>
-        ))}
+        <Section title="Server" hint="Listeners and connection limits.">
+          <ReadOnlyRow label="Proxy bind" hint="restart required" value={data?.server.proxy_bind ?? "—"} />
+          <ReadOnlyRow label="Admin bind" hint="restart required" value={data?.server.admin_bind ?? "—"} />
+          <NumberRow
+            label="Max connections"
+            value={maxConn}
+            onChange={setMaxConn}
+            editable={isRoot}
+          />
+        </Section>
+
+        <Section title="Authentication" hint="Identity and access controls.">
+          <ReadOnlyRow
+            label="Authentication enabled"
+            hint="restart required"
+            value={String(data?.authentication.enabled ?? false)}
+          />
+        </Section>
+
+        <Section title="Features" hint="Optional runtime capabilities.">
+          <SwitchRow
+            label="Connection approval"
+            on={connApproval}
+            onChange={setConnApproval}
+            editable={isRoot}
+          />
+          <SwitchRow
+            label="Reverse tunnels"
+            on={revTunnels}
+            onChange={setRevTunnels}
+            editable={isRoot}
+          />
+        </Section>
       </div>
     </div>
   );
 }
 
-function FieldRow({ field }: { field: { key: string; label: string; value: string; type: string } }) {
-  const val = field.value;
-  if (field.type === "switch") {
-    const on = val === "true";
-    return (
-      <div className="flex items-center justify-between gap-4 py-1">
-        <div>
-          <div className="text-sm">{field.label}</div>
-          <div className="text-[10px] font-mono-tight text-muted-foreground">{field.key}</div>
-        </div>
-        <button
-          aria-pressed={on}
-          disabled
-          className={
-            "relative h-6 w-11 cursor-not-allowed rounded-full border transition " +
-            (on ? "border-[var(--accent-violet)] bg-[var(--accent-violet)]/30" : "border-white/10 bg-white/[0.04]")
-          }
-        >
-          <motion.span
-            layout
-            transition={{ type: "spring", stiffness: 500, damping: 30 }}
-            className={
-              "absolute top-0.5 size-5 rounded-full bg-white shadow " +
-              (on ? "right-0.5" : "left-0.5")
-            }
-          />
-        </button>
-      </div>
-    );
-  }
+function Section({ title, hint, children }: { title: string; hint: string; children: React.ReactNode }) {
+  return (
+    <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
+      <Panel>
+        <PanelHeader title={title} hint={hint} />
+        <div className="space-y-3 p-5">{children}</div>
+      </Panel>
+    </motion.div>
+  );
+}
+
+function ReadOnlyRow({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
     <label className="block">
       <div className="mb-1 flex items-center justify-between">
-        <span className="text-xs text-foreground">{field.label}</span>
-        <span className="font-mono-tight text-[10px] text-muted-foreground">{field.key}</span>
+        <span className="text-xs text-foreground">{label}</span>
+        {hint && (
+          <span className="inline-flex items-center gap-1 text-[10px] text-muted-foreground">
+            <Lock className="size-3" /> {hint}
+          </span>
+        )}
       </div>
       <input
-        value={val}
+        value={value}
         readOnly
-        className="h-10 w-full rounded-xl border border-white/[0.08] bg-white/[0.03] px-3 font-mono-tight text-sm outline-none transition focus:border-[var(--accent-violet)]/50 focus:bg-white/[0.05]"
+        className="h-10 w-full rounded-xl border border-white/[0.08] bg-white/[0.02] px-3 font-mono-tight text-sm text-muted-foreground outline-none"
       />
     </label>
+  );
+}
+
+function NumberRow({
+  label,
+  value,
+  onChange,
+  editable,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  editable: boolean;
+}) {
+  return (
+    <label className="block">
+      <div className="mb-1 text-xs text-foreground">{label}</div>
+      <input
+        type="number"
+        min={1}
+        value={value}
+        readOnly={!editable}
+        onChange={(e) => onChange(e.target.value)}
+        className={
+          "h-10 w-full rounded-xl border border-white/[0.08] px-3 font-mono-tight text-sm outline-none transition focus:border-[var(--accent-violet)]/50 " +
+          (editable ? "bg-white/[0.03] focus:bg-white/[0.05]" : "bg-white/[0.02] text-muted-foreground")
+        }
+      />
+    </label>
+  );
+}
+
+function SwitchRow({
+  label,
+  on,
+  onChange,
+  editable,
+}: {
+  label: string;
+  on: boolean;
+  onChange: (v: boolean) => void;
+  editable: boolean;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4 py-1">
+      <div className="text-sm">{label}</div>
+      <button
+        aria-pressed={on}
+        disabled={!editable}
+        onClick={() => editable && onChange(!on)}
+        className={
+          "relative h-6 w-11 rounded-full border transition " +
+          (editable ? "cursor-pointer" : "cursor-not-allowed") +
+          (on ? " border-[var(--accent-violet)] bg-[var(--accent-violet)]/30" : " border-white/10 bg-white/[0.04]")
+        }
+      >
+        <motion.span
+          layout
+          transition={{ type: "spring", stiffness: 500, damping: 30 }}
+          className={"absolute top-0.5 size-5 rounded-full bg-white shadow " + (on ? "right-0.5" : "left-0.5")}
+        />
+      </button>
+    </div>
   );
 }
