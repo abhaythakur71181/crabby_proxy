@@ -311,14 +311,6 @@ pub async fn delete_user(pool: &SqlitePool, user_id: i64) -> Result<(), sqlx::Er
     Ok(())
 }
 
-/// List all users (excluding password hashes)
-pub async fn list_users(pool: &SqlitePool) -> Result<Vec<User>, sqlx::Error> {
-    let users = sqlx::query_as::<_, User>("SELECT * FROM users ORDER BY created_at DESC")
-        .fetch_all(pool)
-        .await?;
-    Ok(users)
-}
-
 /// List users with pagination.
 pub async fn list_users_paginated(
     pool: &SqlitePool,
@@ -713,7 +705,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_users_empty() {
         let pool = setup_test_db().await;
-        let users = list_users(&pool).await.unwrap();
+        let users = list_users_paginated(&pool, 50, 0).await.unwrap();
         assert!(users.is_empty());
     }
 
@@ -730,7 +722,7 @@ mod tests {
             .await
             .unwrap();
 
-        let users = list_users(&pool).await.unwrap();
+        let users = list_users_paginated(&pool, 50, 0).await.unwrap();
         assert_eq!(users.len(), 3);
     }
 
