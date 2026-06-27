@@ -251,7 +251,7 @@ Base: admin API on `:8081`. Auth: `Authorization: Bearer <JWT>` (or Basic) on al
 **Pagination/filter/sort:** `?limit` (cap 200) + `?offset` on users & audit-log; audit-log also `user_id`, `action`. Most other lists are unpaginated today **[A: add cursor/limit envelopes uniformly]**.
 
 **Added for this rebuild** (branch `feat/ui-backend-support`): `DELETE /api/connections/:id` (terminate live connection), `GET /api/usage/timeseries` (trend data), per-tunnel telemetry fields on `TunnelInfo`, and `latency_ms`/`checked_at` on deep-health checks.
-**One swap caveat still open:** the live WebSocket `/api/connections/live` requires a bearer token, but browsers can't set `Authorization` on a WS handshake — wiring the real feed needs a short-lived ticket (query-param) or cookie auth. Not yet implemented (the UI's mock `useLiveConnections()` sidesteps it).
+**Live WebSocket auth (resolved):** an authed admin mints a single-use, 30s ticket via `POST /api/connections/live-ticket`, then opens `GET /api/connections/live?ticket=<t>` (public route, validates + consumes the ticket). The UI's `useLiveConnections()` does this and streams real snapshots, falling back to REST polling if the socket can't open.
 
 ---
 

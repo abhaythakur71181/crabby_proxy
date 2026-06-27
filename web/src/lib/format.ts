@@ -1,69 +1,52 @@
-/**
- * Formatting utilities for the Crabby Proxy dashboard.
- *
- * Backend returns Unix timestamps (i64 seconds), so formatRelativeTime
- * accepts both numbers (Unix seconds) and Date/string.
- */
-
-export function formatBytes(bytes: number | null | undefined): string {
-  if (!bytes || bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
-  const i = Math.floor(Math.log(Math.abs(bytes)) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
+export function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB", "TB", "PB"];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v < 10 ? v.toFixed(2) : v < 100 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
 }
 
-export function formatDuration(seconds: number | null | undefined): string {
-  if (!seconds) return '0s';
+export function fmtNumber(n: number): string {
+  return n.toLocaleString("en-US");
+}
+
+export function fmtDuration(seconds: number): string {
   const d = Math.floor(seconds / 86400);
   const h = Math.floor((seconds % 86400) / 3600);
   const m = Math.floor((seconds % 3600) / 60);
-  const s = Math.floor(seconds % 60);
-  const parts: string[] = [];
-  if (d > 0) parts.push(`${d}d`);
-  if (h > 0) parts.push(`${h}h`);
-  if (m > 0) parts.push(`${m}m`);
-  if (parts.length === 0) parts.push(`${s}s`);
-  return parts.join(' ');
+  if (d > 0) return `${d}d ${h}h ${m}m`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
 }
 
-/**
- * Format a timestamp as relative time ("2m ago", "3h ago", etc.)
- * Accepts Unix seconds (number), Date, or ISO string.
- */
-export function formatRelativeTime(value: number | Date | string | null | undefined): string {
-  if (value == null) return 'Never';
-  let d: Date;
-  if (typeof value === 'number') {
-    // Unix seconds → Date
-    d = new Date(value * 1000);
-  } else {
-    d = new Date(value);
-  }
-  const now = new Date();
-  const diff = Math.floor((now.getTime() - d.getTime()) / 1000);
-  if (diff < 0) return 'just now';
-  if (diff < 60) return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
-  return d.toLocaleDateString();
+export function fmtRelative(iso: string | null): string {
+  if (!iso) return "never";
+  const ms = Date.now() - new Date(iso).getTime();
+  const s = Math.floor(ms / 1000);
+  if (s < 5) return "just now";
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  if (d < 30) return `${d}d ago`;
+  return new Date(iso).toLocaleDateString();
 }
 
-/**
- * Format a Unix timestamp as a full date/time string.
- */
-export function formatDateTime(value: number | null | undefined): string {
-  if (value == null) return 'N/A';
-  return new Date(value * 1000).toLocaleString();
-}
-
-export function truncateUuid(uuid: string): string {
-  if (uuid.length <= 12) return uuid;
-  return `${uuid.slice(0, 6)}…${uuid.slice(-4)}`;
-}
-
-export function formatNumber(n: number | null | undefined): string {
-  if (n == null) return '0';
-  return n.toLocaleString();
+export function fmtClockHMS(seconds: number): string {
+  const h = Math.floor(seconds / 3600)
+    .toString()
+    .padStart(2, "0");
+  const m = Math.floor((seconds % 3600) / 60)
+    .toString()
+    .padStart(2, "0");
+  const s = Math.floor(seconds % 60)
+    .toString()
+    .padStart(2, "0");
+  return `${h}:${m}:${s}`;
 }
