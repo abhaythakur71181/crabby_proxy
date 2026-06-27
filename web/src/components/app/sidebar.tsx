@@ -16,45 +16,58 @@ import {
 } from "lucide-react";
 import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
-import { systemStats } from "@/mock/seed";
+import { isAdmin } from "@/lib/auth";
+import { useSystemStats } from "@/lib/queries";
+import { fmtBytes } from "@/lib/format";
 import { Mono } from "./mono";
 
-type Item = { to: string; label: string; icon: React.ComponentType<{ className?: string }>; badge?: string };
+type Item = {
+  to: string;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+  badge?: string;
+  adminOnly?: boolean;
+};
 
 const groups: { id: string; title: string; items: Item[] }[] = [
   {
     id: "ops",
     title: "Operations",
     items: [
-      { to: "/dashboard", label: "Overview", icon: LayoutDashboard },
-      { to: "/connections", label: "Connections", icon: Cable, badge: "live" },
-      { to: "/tunnels", label: "Tunnels", icon: Waypoints },
+      { to: "/dashboard", label: "Overview", icon: LayoutDashboard, adminOnly: true },
+      { to: "/connections", label: "Connections", icon: Cable, badge: "live", adminOnly: true },
+      { to: "/tunnels", label: "Tunnels", icon: Waypoints, adminOnly: true },
     ],
   },
   {
     id: "ident",
     title: "Identity",
     items: [
-      { to: "/users", label: "Users", icon: Users },
-      { to: "/groups", label: "Groups", icon: FolderTree },
+      { to: "/users", label: "Users", icon: Users, adminOnly: true },
+      { to: "/groups", label: "Groups", icon: FolderTree, adminOnly: true },
       { to: "/api-keys", label: "API Keys", icon: KeyRound },
-      { to: "/approvals", label: "Approvals", icon: ShieldCheck, badge: "3" },
+      { to: "/approvals", label: "Approvals", icon: ShieldCheck },
     ],
   },
   {
     id: "obs",
     title: "Observability",
     items: [
-      { to: "/usage", label: "Usage & Quotas", icon: BarChart3 },
-      { to: "/audit", label: "Audit Log", icon: ScrollText },
-      { to: "/health", label: "System Health", icon: HeartPulse },
-      { to: "/config", label: "Configuration", icon: Settings },
+      { to: "/usage", label: "Usage & Quotas", icon: BarChart3, adminOnly: true },
+      { to: "/audit", label: "Audit Log", icon: ScrollText, adminOnly: true },
+      { to: "/health", label: "System Health", icon: HeartPulse, adminOnly: true },
+      { to: "/config", label: "Configuration", icon: Settings, adminOnly: true },
     ],
   },
 ];
 
 export function Sidebar() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const admin = isAdmin();
+  const { data: stats } = useSystemStats();
+  const visibleGroups = groups
+    .map((g) => ({ ...g, items: g.items.filter((it) => admin || !it.adminOnly) }))
+    .filter((g) => g.items.length > 0);
 
   return (
     <aside className="sticky top-0 z-30 hidden h-dvh w-64 shrink-0 flex-col border-r border-white/[0.06] bg-[color-mix(in_oklab,var(--sidebar)_85%,transparent)] backdrop-blur-xl lg:flex">
@@ -66,13 +79,13 @@ export function Sidebar() {
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold tracking-tight">Crabby Proxy</div>
           <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-            <Mono>v{systemStats.version}</Mono> · control plane
+            <Mono>v{stats?.version ?? "0.1.0"}</Mono> · control plane
           </div>
         </div>
       </div>
 
       <nav className="flex-1 overflow-y-auto px-3 pb-4">
-        {groups.map((g) => (
+        {visibleGroups.map((g) => (
           <div key={g.id} className="mb-5">
             <div className="px-3 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.2em] text-muted-foreground/70">
               {g.title}
@@ -134,24 +147,22 @@ export function Sidebar() {
         ))}
       </nav>
 
-      <div className="mx-3 mb-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-3">
-        <div className="mb-2 flex items-center justify-between text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-          <span>Cluster quota</span>
-          <Activity className="size-3" />
+      {admin && (
+        <div className="mx-3 mb-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-3">
+          <div className="mb-2 flex items-center justify-between text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+            <span>24h traffic</span>
+            <Activity className="size-3" />
+          </div>
+          <div className="flex items-baseline justify-between">
+            <Mono className="text-sm font-semibold">
+              {fmtBytes((stats?.bytes_sent_24h ?? 0) + (stats?.bytes_received_24h ?? 0))}
+            </Mono>
+            <Mono className="text-[11px] text-muted-foreground">
+              {stats?.active_connections ?? 0} live
+            </Mono>
+          </div>
         </div>
-        <div className="mb-2 flex items-baseline justify-between">
-          <Mono className="text-sm font-semibold">754.2 GB</Mono>
-          <Mono className="text-[11px] text-muted-foreground">/ 1.0 TB</Mono>
-        </div>
-        <div className="h-1 overflow-hidden rounded-full bg-white/[0.06]">
-          <motion.div
-            initial={{ width: 0 }}
-            animate={{ width: "74%" }}
-            transition={{ duration: 1.2, ease: [0.16, 1, 0.3, 1] }}
-            className="h-full rounded-full bg-gradient-to-r from-[var(--accent-violet)] to-[oklch(0.74_0.17_200)] shadow-[0_0_10px_var(--accent-violet)]"
-          />
-        </div>
-      </div>
+      )}
 
       <UserMenu />
     </aside>
