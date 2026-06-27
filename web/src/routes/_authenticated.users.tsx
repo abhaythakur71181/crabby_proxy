@@ -2,13 +2,14 @@ import { createFileRoute } from "@tanstack/react-router";
 import { AnimatePresence, motion } from "framer-motion";
 import { Plus, Search, Trash2, X } from "lucide-react";
 import { useMemo, useState } from "react";
+import { toast } from "sonner";
 import { Panel } from "@/components/app/card";
 import { PageHeader } from "@/components/app/page-header";
 import { Pill } from "@/components/app/badge";
 import { StatusDot } from "@/components/app/status-dot";
 import { Mono } from "@/components/app/mono";
 import { DetailDrawer } from "@/components/app/detail-drawer";
-import { users as seedUsers } from "@/mock/seed";
+import { api, useInvalidate, useMutation, useUsers } from "@/lib/queries";
 import { fmtRelative } from "@/lib/format";
 import type { Role, User } from "@/types/crabby";
 
@@ -20,7 +21,7 @@ export const Route = createFileRoute("/_authenticated/users")({
 const ROLES: ("ALL" | Role)[] = ["ALL", "root_admin", "admin", "user"];
 
 function UsersPage() {
-  const [users, setUsers] = useState<User[]>(seedUsers);
+  const { users, isLoading } = useUsers();
   const [q, setQ] = useState("");
   const [role, setRole] = useState<(typeof ROLES)[number]>("ALL");
   const [openNew, setOpenNew] = useState(false);
@@ -89,6 +90,12 @@ function UsersPage() {
           <span className="text-right">Last login</span>
         </div>
         <ul className="divide-y divide-white/[0.04]">
+          {isLoading && !filtered.length && (
+            <li className="px-5 py-8 text-center text-sm text-muted-foreground">Loading users…</li>
+          )}
+          {!isLoading && !filtered.length && (
+            <li className="px-5 py-8 text-center text-sm text-muted-foreground">No users found.</li>
+          )}
           {filtered.map((u, i) => (
             <motion.li
               key={u.id}
@@ -122,19 +129,32 @@ function UsersPage() {
 
       <UserDetail user={active} onClose={() => setActive(null)} />
 
-      <CreateUserModal
-        open={openNew}
-        onClose={() => setOpenNew(false)}
-        onCreate={(u) => {
-          setUsers((cur) => [u, ...cur]);
-          setOpenNew(false);
-        }}
-      />
+      <CreateUserModal open={openNew} onClose={() => setOpenNew(false)} />
     </div>
   );
 }
 
 function UserDetail({ user, onClose }: { user: User | null; onClose: () => void }) {
+  const invalidate = useInvalidate();
+  const deactivate = useMutation({
+    mutationFn: (id: number) => api.deleteUser(id),
+    onSuccess: () => {
+      toast.success("User deactivated");
+      invalidate(["users"]);
+      onClose();
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+  const reactivate = useMutation({
+    mutationFn: (id: number) => api.updateUser(id, { is_active: true }),
+    onSuccess: () => {
+      toast.success("User reactivated");
+      invalidate(["users"]);
+      onClose();
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
   return (
     <DetailDrawer
       open={!!user}
@@ -144,9 +164,23 @@ function UserDetail({ user, onClose }: { user: User | null; onClose: () => void 
       footer={
         user && (
           <div className="flex items-center justify-between">
-            <button className="flex items-center gap-1.5 rounded-lg border border-[var(--danger)]/30 bg-[var(--danger)]/10 px-3 py-1.5 text-xs font-medium text-[var(--danger)] hover:bg-[var(--danger)]/15">
-              <Trash2 className="size-3.5" /> Delete
-            </button>
+            {user.active ? (
+              <button
+                disabled={deactivate.isPending}
+                onClick={() => deactivate.mutate(user.id)}
+                className="flex items-center gap-1.5 rounded-lg border border-[var(--danger)]/30 bg-[var(--danger)]/10 px-3 py-1.5 text-xs font-medium text-[var(--danger)] hover:bg-[var(--danger)]/15 disabled:opacity-50"
+              >
+                <Trash2 className="size-3.5" /> Deactivate
+              </button>
+            ) : (
+              <button
+                disabled={reactivate.isPending}
+                onClick={() => reactivate.mutate(user.id)}
+                className="flex items-center gap-1.5 rounded-lg border border-[var(--success)]/30 bg-[var(--success)]/10 px-3 py-1.5 text-xs font-medium text-[var(--success)] hover:bg-[var(--success)]/15 disabled:opacity-50"
+              >
+                <StatusDot tone="success" /> Reactivate
+              </button>
+            )}
             <button className="rounded-lg bg-[var(--accent-violet)] px-4 py-1.5 text-xs font-semibold text-[var(--primary-foreground)] hover:brightness-110">
               Edit user
             </button>
@@ -197,19 +231,32 @@ function Stat({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
-function CreateUserModal({
-  open,
-  onClose,
-  onCreate,
-}: {
-  open: boolean;
-  onClose: () => void;
-  onCreate: (u: User) => void;
-}) {
+function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [role, setRole] = useState<Role>("user");
   const [maxConn, setMaxConn] = useState(10);
   const [bw, setBw] = useState(1000);
+
+  const invalidate = useInvalidate();
+  const create = useMutation({
+    mutationFn: () =>
+      api.createUser({
+        username: username.trim(),
+        password,
+        role,
+        max_connections: maxConn,
+        bandwidth_limit_mb: bw,
+      }),
+    onSuccess: () => {
+      toast.success("User created");
+      invalidate(["users"]);
+      setUsername("");
+      setPassword("");
+      onClose();
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
 
   return (
     <AnimatePresence>
@@ -242,6 +289,7 @@ function CreateUserModal({
             </div>
             <div className="space-y-4 px-5 py-5">
               <Input label="Username" value={username} onChange={setUsername} placeholder="ada.lovelace" mono />
+              <Input label="Password" value={password} onChange={setPassword} placeholder="••••••••" type="password" />
               <div>
                 <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Role</div>
                 <div className="flex gap-1 rounded-xl border border-white/[0.08] bg-white/[0.02] p-1">
@@ -269,22 +317,8 @@ function CreateUserModal({
                 Cancel
               </button>
               <button
-                disabled={!username.trim()}
-                onClick={() => {
-                  onCreate({
-                    id: Math.floor(Math.random() * 9999),
-                    username,
-                    role,
-                    active: true,
-                    max_connections: maxConn,
-                    bandwidth_limit_mb: bw,
-                    bandwidth_used_mb: 0,
-                    last_login_at: null,
-                    created_at: new Date().toISOString(),
-                    groups: [],
-                  });
-                  setUsername("");
-                }}
+                disabled={!username.trim() || !password || create.isPending}
+                onClick={() => create.mutate()}
                 className="rounded-lg bg-[var(--accent-violet)] px-4 py-1.5 text-xs font-semibold text-[var(--primary-foreground)] disabled:opacity-50"
               >
                 Create user
@@ -303,17 +337,20 @@ function Input({
   onChange,
   placeholder,
   mono,
+  type,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
   mono?: boolean;
+  type?: string;
 }) {
   return (
     <label className="block">
       <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">{label}</div>
       <input
+        type={type}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}

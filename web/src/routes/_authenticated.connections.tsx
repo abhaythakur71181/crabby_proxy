@@ -9,7 +9,7 @@ import { Mono } from "@/components/app/mono";
 import { DetailDrawer } from "@/components/app/detail-drawer";
 import { EmptyState } from "@/components/app/empty";
 import { useLiveConnections } from "@/mock/live";
-import { initialConnections } from "@/mock/seed";
+import { useConnections } from "@/lib/queries";
 import { fmtBytes, fmtRelative } from "@/lib/format";
 import type { Connection } from "@/types/crabby";
 
@@ -21,7 +21,8 @@ export const Route = createFileRoute("/_authenticated/connections")({
 const PROTOCOLS = ["ALL", "HTTPS", "HTTP", "SOCKS5", "SOCKS4", "H2"] as const;
 
 function ConnectionsPage() {
-  const { rows } = useLiveConnections(initialConnections, 80);
+  const { connections } = useConnections();
+  const { rows } = useLiveConnections(connections, 80);
   const [q, setQ] = useState("");
   const [proto, setProto] = useState<(typeof PROTOCOLS)[number]>("ALL");
   const [active, setActive] = useState<Connection | null>(null);
