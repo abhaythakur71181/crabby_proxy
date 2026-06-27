@@ -396,16 +396,31 @@ async fn handle_client(
     let relay_start = std::time::Instant::now();
     let target_addr_str = format!("{}:{}", target.host, target.port);
     let mut protocol = ctx.protocol.take().unwrap();
-    let result = async_handle_client_with_target(
-        &mut stream,
-        client_addr,
-        &mut protocol,
-        target,
-        state,
-        ctx.user_id,
-        ctx.is_admin,
-    )
-    .await;
+    // Register a cancel handle so an admin can terminate this live connection
+    // (DELETE /api/connections/:id). The relay races against it; on signal the
+    // tunnel future is dropped, closing both halves.
+    let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+    state.conn_cancel.insert(conn_id, cancel.clone());
+    let result = tokio::select! {
+        biased;
+        _ = cancel.notified() => {
+            tracing::info!(target: "audit", %conn_id, %client_addr, "connection terminated by admin");
+            Err((
+                io::Error::new(io::ErrorKind::ConnectionAborted, "terminated by admin"),
+                ErrorType::Connection,
+            ))
+        }
+        r = async_handle_client_with_target(
+            &mut stream,
+            client_addr,
+            &mut protocol,
+            target,
+            state,
+            ctx.user_id,
+            ctx.is_admin,
+        ) => r,
+    };
+    state.conn_cancel.remove(&conn_id);
 
     crate::metrics::CONNECTION_DURATION
         .with_label_values(&[proto_label])
