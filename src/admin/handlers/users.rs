@@ -78,25 +78,21 @@ pub async fn list_users(
         })));
     }
 
-    // If pagination params are provided, use paginated query
-    if pagination.limit.is_some() || pagination.offset.is_some() {
-        let limit = pagination.limit.unwrap_or(50).min(200);
-        let offset = pagination.offset.unwrap_or(0);
-        let total = users::count_all_users(&state.db_pool).await?;
-        let users_list = users::list_users_paginated(&state.db_pool, limit, offset).await?;
-        let items: Vec<UserResponse> = users_list.into_iter().map(UserResponse::from).collect();
-        return Ok(Json(serde_json::json!({
-            "items": items,
-            "total": total,
-            "limit": limit,
-            "offset": offset,
-        })));
-    }
-
-    // Backwards-compatible: no pagination params → return flat array
-    let users_list = users::list_users(&state.db_pool).await?;
-    let response: Vec<UserResponse> = users_list.into_iter().map(UserResponse::from).collect();
-    Ok(Json(serde_json::json!(response)))
+    // Always return the same paginated envelope. Defaults apply when no params
+    // are given, so the response shape never changes (previously this returned
+    // a bare array without params and {items,...} with them, forcing clients to
+    // branch on the type).
+    let limit = pagination.limit.unwrap_or(50).min(200);
+    let offset = pagination.offset.unwrap_or(0);
+    let total = users::count_all_users(&state.db_pool).await?;
+    let users_list = users::list_users_paginated(&state.db_pool, limit, offset).await?;
+    let items: Vec<UserResponse> = users_list.into_iter().map(UserResponse::from).collect();
+    Ok(Json(serde_json::json!({
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    })))
 }
 
 /// Get user details (admin+ or self)
