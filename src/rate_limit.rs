@@ -243,6 +243,7 @@ impl Default for UserRateLimiter {
 ///   2. per-(IP, username) — caps targeted enumeration of a specific user
 ///      from a specific IP. Stops a single attacker from burning the per-IP
 ///      budget while still trying many users.
+#[allow(clippy::type_complexity)] // the governor LRU cache type is inherently verbose
 #[derive(Clone)]
 pub struct LoginRateLimiter {
     limiters: Arc<

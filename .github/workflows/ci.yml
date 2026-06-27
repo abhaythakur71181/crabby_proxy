@@ -26,10 +26,8 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
-      # Informational until the pre-existing clippy warnings (audit L10) are
-      # cleared; flip to `-D warnings` once the count is zero.
       - name: Clippy
-        run: cargo clippy --all-targets || true
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Build
         run: cargo build --locked --verbose

@@ -159,7 +159,8 @@ impl AppState {
                     }
                 }
             }
-            "memory" | _ => {
+            // Anything other than "redis" (incl. "memory" / unset) uses memory.
+            _ => {
                 tracing::info!("Using in-memory state backend");
                 Arc::new(MemoryBackend::new())
             }
