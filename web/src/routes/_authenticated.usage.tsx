@@ -5,7 +5,8 @@ import { Panel, PanelHeader } from "@/components/app/card";
 import { PageHeader } from "@/components/app/page-header";
 import { AnimatedCounter } from "@/components/app/animated-counter";
 import { Mono } from "@/components/app/mono";
-import { systemStats, users } from "@/mock/seed";
+import { Sparkline } from "@/components/app/sparkline";
+import { useUsageSummary, useUsageTimeseries } from "@/lib/queries";
 import { fmtBytes } from "@/lib/format";
 
 export const Route = createFileRoute("/_authenticated/usage")({
@@ -14,40 +15,52 @@ export const Route = createFileRoute("/_authenticated/usage")({
 });
 
 function UsagePage() {
-  const sorted = [...users].sort((a, b) => b.bandwidth_used_mb - a.bandwidth_used_mb);
-  const maxBw = Math.max(...users.map((u) => u.bandwidth_used_mb), 1);
+  const { data } = useUsageSummary();
+  const { data: ts } = useUsageTimeseries(7, "day");
+
+  const topUsers = data?.top_users ?? [];
+  const sorted = [...topUsers].sort((a, b) => b.total_bandwidth - a.total_bandwidth);
+  const maxBw = Math.max(...sorted.map((u) => u.total_bandwidth), 1);
+
+  const series = (ts?.points ?? []).map((p) => ({
+    x: new Date(p.ts * 1000),
+    y: p.bytes_sent + p.bytes_received,
+  }));
 
   return (
     <div className="mx-auto w-full max-w-[1400px] px-6 py-8 lg:px-10">
       <PageHeader title="Usage & Quotas" subtitle="Who consumed what — and who's approaching their cap." />
       <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <Kpi icon={<Cable className="size-4" />} label="Total connections" value={<AnimatedCounter value={systemStats.total_connections} />} />
-        <Kpi icon={<Gauge className="size-4" />} label="Total bandwidth" value={<AnimatedCounter value={systemStats.bytes_received_24h + systemStats.bytes_sent_24h} format={(n) => fmtBytes(Math.round(n))} />} />
-        <Kpi icon={<UsersIcon className="size-4" />} label="Unique users" value={<AnimatedCounter value={users.length} />} />
-        <Kpi icon={<Activity className="size-4" />} label="Data sent" value={<AnimatedCounter value={systemStats.bytes_sent_24h} format={(n) => fmtBytes(Math.round(n))} />} />
+        <Kpi icon={<Cable className="size-4" />} label="Total connections" value={<AnimatedCounter value={data?.total_connections ?? 0} />} />
+        <Kpi icon={<Gauge className="size-4" />} label="Total bandwidth" value={<AnimatedCounter value={data?.total_bandwidth ?? 0} format={(n) => fmtBytes(Math.round(n))} />} />
+        <Kpi icon={<UsersIcon className="size-4" />} label="Unique users" value={<AnimatedCounter value={data?.unique_users ?? 0} />} />
+        <Kpi icon={<Activity className="size-4" />} label="Data sent" value={<AnimatedCounter value={data?.total_bytes_sent ?? 0} format={(n) => fmtBytes(Math.round(n))} />} />
       </section>
 
       <section className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
         <Panel className="lg:col-span-2">
-          <PanelHeader title="Top users by bandwidth" hint="last 24 hours" />
+          <PanelHeader
+            title="Top users by bandwidth"
+            hint={`last ${data?.period_days ?? 7} days`}
+            action={series.length ? <Sparkline data={series.map((p) => p.y)} width={120} height={32} /> : undefined}
+          />
           <ul className="divide-y divide-white/[0.05]">
             {sorted.map((u, i) => {
-              const pct = Math.round((u.bandwidth_used_mb / maxBw) * 100);
-              const cap = Math.round((u.bandwidth_used_mb / u.bandwidth_limit_mb) * 100);
+              const pct = Math.round((u.total_bandwidth / maxBw) * 100);
               return (
-                <li key={u.id} className="px-5 py-4">
+                <li key={u.user_id} className="px-5 py-4">
                   <div className="mb-2 flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <div className="grid size-7 place-items-center rounded-md bg-white/5 text-[10px] font-mono-tight">{i + 1}</div>
                       <div>
-                        <div className="text-sm font-medium">{u.username}</div>
-                        <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{u.role}</div>
+                        <div className="text-sm font-medium">{"User #" + u.user_id}</div>
+                        <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{u.connection_count.toLocaleString()} conns</div>
                       </div>
                     </div>
                     <div className="text-right">
-                      <Mono className="text-sm">{u.bandwidth_used_mb.toLocaleString()} MB</Mono>
-                      <div className={"text-[10px] " + (cap > 80 ? "text-[var(--warning)]" : "text-muted-foreground")}>
-                        {cap}% of cap
+                      <Mono className="text-sm">{fmtBytes(u.total_bandwidth)}</Mono>
+                      <div className="text-[10px] text-muted-foreground">
+                        {pct}% of top
                       </div>
                     </div>
                   </div>
@@ -69,12 +82,12 @@ function UsagePage() {
           <PanelHeader title="Leaderboard" hint="connections" />
           <ul className="divide-y divide-white/[0.05]">
             {sorted.map((u, i) => (
-              <li key={u.id} className="flex items-center justify-between px-5 py-3 text-sm">
+              <li key={u.user_id} className="flex items-center justify-between px-5 py-3 text-sm">
                 <span className="flex items-center gap-3">
                   <span className="grid size-6 place-items-center rounded bg-white/5 text-[10px] font-mono-tight">{i + 1}</span>
-                  {u.username}
+                  {"User #" + u.user_id}
                 </span>
-                <Mono className="text-xs text-foreground/80">{(u.bandwidth_used_mb * 12).toLocaleString()}</Mono>
+                <Mono className="text-xs text-foreground/80">{u.connection_count.toLocaleString()}</Mono>
               </li>
             ))}
           </ul>

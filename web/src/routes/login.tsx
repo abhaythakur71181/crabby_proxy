@@ -21,13 +21,20 @@ function LoginPage() {
   const [password, setPassword] = useState("crabby");
   const [show, setShow] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
-    await new Promise((r) => setTimeout(r, 650));
-    signIn(username);
-    router.navigate({ to: "/dashboard" });
+    setError(null);
+    try {
+      await signIn(username, password);
+      router.navigate({ to: "/dashboard" });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Sign in failed");
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -107,6 +114,17 @@ function LoginPage() {
               <span>Sign in</span>
             )}
           </motion.button>
+
+          {error && (
+            <motion.p
+              initial={{ opacity: 0, x: [-6, 6, -4, 4, 0] }}
+              animate={{ opacity: 1, x: 0 }}
+              className="text-center text-[12px] text-[var(--accent-rose,#f43f5e)]"
+              role="alert"
+            >
+              {error}
+            </motion.p>
+          )}
         </form>
 
         <div className="mt-6 flex items-center justify-between text-[11px] text-muted-foreground">

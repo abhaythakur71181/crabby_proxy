@@ -8,9 +8,9 @@ import { Sparkline, makeSeries } from "@/components/app/sparkline";
 import { Mono } from "@/components/app/mono";
 import { Pill } from "@/components/app/badge";
 import { StatusDot } from "@/components/app/status-dot";
-import { auditEntries, systemStats, users } from "@/mock/seed";
+import { useAudit, useSystemStats, useUsers } from "@/lib/queries";
 import { useLiveConnections } from "@/mock/live";
-import { initialConnections } from "@/mock/seed";
+import { useConnections } from "@/lib/queries";
 import { fmtBytes, fmtClockHMS, fmtRelative } from "@/lib/format";
 
 export const Route = createFileRoute("/_authenticated/dashboard")({
@@ -24,7 +24,17 @@ export const Route = createFileRoute("/_authenticated/dashboard")({
 });
 
 function DashboardPage() {
-  const { rows } = useLiveConnections(initialConnections.slice(0, 8), 8);
+  const { connections } = useConnections();
+  const { rows } = useLiveConnections(connections.slice(0, 8), 8);
+  const { data: stats } = useSystemStats();
+  const { users } = useUsers();
+  const { entries: auditEntries } = useAudit(7);
+
+  const uptimeSeconds = stats?.uptime_seconds ?? 0;
+  const activeConnections = stats?.active_connections ?? 0;
+  const totalConnections = stats?.total_connections ?? 0;
+  const bytesSent24h = stats?.bytes_sent_24h ?? 0;
+  const bytesReceived24h = stats?.bytes_received_24h ?? 0;
 
   return (
     <div className="mx-auto w-full max-w-[1400px] px-6 py-8 lg:px-10">
@@ -48,7 +58,7 @@ function DashboardPage() {
           value={
             <Mono>
               <AnimatedCounter
-                value={systemStats.uptime_seconds}
+                value={uptimeSeconds}
                 format={(n) => fmtClockHMS(Math.round(n))}
               />
             </Mono>
@@ -61,7 +71,7 @@ function DashboardPage() {
           label="Active connections"
           value={
             <Mono>
-              <AnimatedCounter value={17} />
+              <AnimatedCounter value={activeConnections} />
             </Mono>
           }
           hint={<span className="text-[var(--success)]">+12% vs 1h ago</span>}
@@ -73,7 +83,7 @@ function DashboardPage() {
           label="Total connections"
           value={
             <Mono>
-              <AnimatedCounter value={systemStats.total_connections} />
+              <AnimatedCounter value={totalConnections} />
             </Mono>
           }
           hint="rolling 7-day"
@@ -85,7 +95,7 @@ function DashboardPage() {
           value={
             <Mono>
               <AnimatedCounter
-                value={systemStats.bytes_sent_24h + systemStats.bytes_received_24h}
+                value={bytesSent24h + bytesReceived24h}
                 format={(n) => fmtBytes(Math.round(n))}
               />
             </Mono>
@@ -116,14 +126,14 @@ function DashboardPage() {
             <BandwidthBar
               tone="violet"
               label="Sent"
-              bytes={systemStats.bytes_sent_24h}
-              max={systemStats.bytes_received_24h}
+              bytes={bytesSent24h}
+              max={bytesReceived24h}
             />
             <BandwidthBar
               tone="cyan"
               label="Received"
-              bytes={systemStats.bytes_received_24h}
-              max={systemStats.bytes_received_24h}
+              bytes={bytesReceived24h}
+              max={bytesReceived24h}
             />
           </div>
           <div className="px-5 pb-5">
@@ -301,7 +311,7 @@ function BandwidthBar({
   max: number;
   tone: "violet" | "cyan";
 }) {
-  const pct = Math.max(2, Math.round((bytes / max) * 100));
+  const pct = max > 0 ? Math.max(2, Math.round((bytes / max) * 100)) : 2;
   const color = tone === "violet" ? "var(--accent-violet)" : "oklch(0.74 0.17 200)";
   return (
     <div>

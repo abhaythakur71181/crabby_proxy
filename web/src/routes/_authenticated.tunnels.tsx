@@ -1,11 +1,12 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { Pause, Play, Waypoints } from "lucide-react";
+import { toast } from "sonner";
 import { Panel, PanelHeader } from "@/components/app/card";
 import { PageHeader } from "@/components/app/page-header";
 import { Pill } from "@/components/app/badge";
 import { StatusDot } from "@/components/app/status-dot";
 import { Mono } from "@/components/app/mono";
-import { tunnels } from "@/mock/seed";
+import { api, useInvalidate, useMutation, useTunnels } from "@/lib/queries";
 import { fmtBytes } from "@/lib/format";
 
 export const Route = createFileRoute("/_authenticated/tunnels")({
@@ -14,12 +15,39 @@ export const Route = createFileRoute("/_authenticated/tunnels")({
 });
 
 function TunnelsPage() {
+  const { tunnels, isLoading } = useTunnels();
+  const invalidate = useInvalidate();
+
+  const closeTunnel = useMutation({
+    mutationFn: (listen: string) => api.closeTunnel(Number(listen.split(":").pop())),
+    onSuccess: () => {
+      toast.success("Tunnel stopped");
+      invalidate(["tunnels"]);
+    },
+    onError: (e: Error) => toast.error(`Failed to stop tunnel: ${e.message}`),
+  });
+
+  const startTunnel = useMutation({
+    mutationFn: (t: { name: string; target: string }) =>
+      api.createTunnel({ service_type: t.name || "http", target_addr: t.target }),
+    onSuccess: () => {
+      toast.success("Tunnel started");
+      invalidate(["tunnels"]);
+    },
+    onError: (e: Error) => toast.error(`Failed to start tunnel: ${e.message}`),
+  });
+
   return (
     <div className="mx-auto w-full max-w-[1400px] px-6 py-8 lg:px-10">
       <PageHeader
         title="Tunnels"
         subtitle="Inbound listeners and the upstream routes they relay to."
       />
+      {isLoading ? (
+        <p className="text-sm text-muted-foreground">Loading tunnels…</p>
+      ) : tunnels.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No tunnels yet.</p>
+      ) : (
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
         {tunnels.map((t) => {
           const running = t.status === "running";
@@ -48,8 +76,14 @@ function TunnelsPage() {
                   <Mini label="Latency" value={`${t.latency_ms} ms`} />
                 </div>
                 <button
+                  onClick={() =>
+                    running
+                      ? closeTunnel.mutate(t.listen)
+                      : startTunnel.mutate({ name: t.name, target: t.target })
+                  }
+                  disabled={closeTunnel.isPending || startTunnel.isPending}
                   className={
-                    "mt-2 inline-flex h-9 w-full items-center justify-center gap-2 rounded-xl text-xs font-semibold transition " +
+                    "mt-2 inline-flex h-9 w-full items-center justify-center gap-2 rounded-xl text-xs font-semibold transition disabled:opacity-60 " +
                     (running
                       ? "border border-white/10 bg-white/[0.03] text-foreground hover:bg-white/[0.06]"
                       : "bg-[var(--accent-violet)] text-[var(--primary-foreground)] hover:brightness-110")
@@ -62,6 +96,7 @@ function TunnelsPage() {
           );
         })}
       </div>
+      )}
     </div>
   );
 }

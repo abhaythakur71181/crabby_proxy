@@ -2,15 +2,15 @@ import { createFileRoute } from "@tanstack/react-router";
 import { motion } from "framer-motion";
 import { Check, ShieldCheck, X } from "lucide-react";
 import { useMemo, useState } from "react";
+import { toast } from "sonner";
 import { Panel } from "@/components/app/card";
 import { PageHeader } from "@/components/app/page-header";
 import { Pill } from "@/components/app/badge";
 import { Mono } from "@/components/app/mono";
 import { StatusDot } from "@/components/app/status-dot";
 import { EmptyState } from "@/components/app/empty";
-import { approvals as seed } from "@/mock/seed";
+import { api, useApprovalRequests, useApprovals, useInvalidate, useMutation } from "@/lib/queries";
 import { fmtRelative } from "@/lib/format";
-import type { Approval } from "@/types/crabby";
 
 export const Route = createFileRoute("/_authenticated/approvals")({
   head: () => ({ meta: [{ title: "Approvals · Crabby Proxy" }] }),
@@ -27,29 +27,46 @@ type Tab = (typeof TABS)[number]["id"];
 
 function ApprovalsPage() {
   const [tab, setTab] = useState<Tab>("pending");
-  const [list, setList] = useState<Approval[]>(seed);
+  const [activeId, setActiveId] = useState<number | null>(null);
+  const [termReason, setTermReason] = useState("");
+  const invalidate = useInvalidate();
+
+  const { requests, isLoading: reqLoading } = useApprovalRequests();
+  const { approvals, isLoading: grantsLoading } = useApprovals();
+
   const filtered = useMemo(() => {
-    if (tab === "pending") return list.filter((a) => a.status === "pending");
-    if (tab === "active") return list.filter((a) => a.status === "approved");
-    if (tab === "history") return list.filter((a) => a.status !== "pending");
-    return list;
-  }, [list, tab]);
-  const [active, setActive] = useState<Approval | null>(filtered[0] ?? null);
-  const sel = filtered.find((a) => a.id === active?.id) ?? filtered[0] ?? null;
+    if (tab === "pending") return requests.filter((a) => a.status === "pending");
+    if (tab === "active") return approvals;
+    if (tab === "history") return requests.filter((a) => a.status !== "pending");
+    return requests;
+  }, [requests, approvals, tab]);
+
+  const isLoading = tab === "active" ? grantsLoading : reqLoading;
+  const sel = filtered.find((a) => a.id === activeId) ?? filtered[0] ?? null;
+
+  const decideMut = useMutation({
+    mutationFn: ({ id, ok }: { id: number; ok: boolean }) =>
+      ok ? api.approveRequest(id) : api.rejectRequest(id),
+    onSuccess: (_d, { ok }) => {
+      toast.success(ok ? "Request approved" : "Request rejected");
+      invalidate(["approval-requests", "approvals"]);
+    },
+    onError: (e: unknown) => toast.error(e instanceof Error ? e.message : "Action failed"),
+  });
+
+  const terminateMut = useMutation({
+    mutationFn: ({ id, reason }: { id: number; reason: string }) =>
+      api.terminateApproval(id, reason),
+    onSuccess: () => {
+      toast.success("Grant terminated");
+      setTermReason("");
+      invalidate(["approval-requests", "approvals"]);
+    },
+    onError: (e: unknown) => toast.error(e instanceof Error ? e.message : "Action failed"),
+  });
 
   function decide(id: number, ok: boolean) {
-    setList((cur) =>
-      cur.map((a) =>
-        a.id === id
-          ? {
-              ...a,
-              status: ok ? "approved" : "rejected",
-              decided_at: new Date().toISOString(),
-              decided_by: "root",
-            }
-          : a,
-      ),
-    );
+    decideMut.mutate({ id, ok });
   }
 
   return (
@@ -80,16 +97,18 @@ function ApprovalsPage() {
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[420px_1fr]">
         <Panel className="overflow-hidden">
           <div className="border-b border-white/[0.06] px-5 py-3 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-            {filtered.length} request{filtered.length === 1 ? "" : "s"}
+            {isLoading ? "Loading…" : `${filtered.length} request${filtered.length === 1 ? "" : "s"}`}
           </div>
-          {filtered.length === 0 ? (
+          {isLoading ? (
+            <EmptyState icon={<ShieldCheck className="size-4" />} title="Loading…" className="m-6" />
+          ) : filtered.length === 0 ? (
             <EmptyState icon={<ShieldCheck className="size-4" />} title="Inbox zero" description="No requests need your attention." className="m-6" />
           ) : (
             <ul className="divide-y divide-white/[0.04]">
               {filtered.map((a) => (
                 <li
                   key={a.id}
-                  onClick={() => setActive(a)}
+                  onClick={() => setActiveId(a.id)}
                   className={
                     "cursor-pointer px-5 py-4 transition " +
                     (sel?.id === a.id ? "bg-[var(--accent-violet-soft)]" : "hover:bg-white/[0.03]")
@@ -152,16 +171,41 @@ function ApprovalsPage() {
                 <div className="mt-6 flex items-center gap-2">
                   <button
                     onClick={() => decide(sel.id, true)}
-                    className="inline-flex h-10 items-center gap-2 rounded-xl bg-[var(--success)] px-4 text-sm font-semibold text-black shadow-[0_10px_30px_-10px_var(--success)] hover:brightness-110"
+                    disabled={decideMut.isPending}
+                    className="inline-flex h-10 items-center gap-2 rounded-xl bg-[var(--success)] px-4 text-sm font-semibold text-black shadow-[0_10px_30px_-10px_var(--success)] hover:brightness-110 disabled:opacity-50"
                   >
                     <Check className="size-4" /> Approve
                   </button>
                   <button
                     onClick={() => decide(sel.id, false)}
-                    className="inline-flex h-10 items-center gap-2 rounded-xl border border-[var(--danger)]/30 bg-[var(--danger)]/10 px-4 text-sm font-semibold text-[var(--danger)] hover:bg-[var(--danger)]/15"
+                    disabled={decideMut.isPending}
+                    className="inline-flex h-10 items-center gap-2 rounded-xl border border-[var(--danger)]/30 bg-[var(--danger)]/10 px-4 text-sm font-semibold text-[var(--danger)] hover:bg-[var(--danger)]/15 disabled:opacity-50"
                   >
                     <X className="size-4" /> Deny
                   </button>
+                </div>
+              )}
+
+              {tab === "active" && (
+                <div className="mt-6">
+                  <div className="mb-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                    Terminate grant
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      value={termReason}
+                      onChange={(e) => setTermReason(e.target.value)}
+                      placeholder="Reason (required)"
+                      className="h-10 flex-1 rounded-xl border border-white/[0.08] bg-white/[0.02] px-3 text-sm outline-none placeholder:text-muted-foreground focus:border-white/[0.16]"
+                    />
+                    <button
+                      onClick={() => terminateMut.mutate({ id: sel.id, reason: termReason.trim() })}
+                      disabled={!termReason.trim() || terminateMut.isPending}
+                      className="inline-flex h-10 items-center gap-2 rounded-xl border border-[var(--danger)]/30 bg-[var(--danger)]/10 px-4 text-sm font-semibold text-[var(--danger)] hover:bg-[var(--danger)]/15 disabled:opacity-50"
+                    >
+                      <X className="size-4" /> Terminate
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
