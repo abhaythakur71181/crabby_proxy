@@ -35,6 +35,37 @@ impl RedisBackend {
     fn counter_key(&self, name: &str) -> String {
         self.key(&format!("counter:{}", name))
     }
+
+    /// Count live members of a connection index set, removing any whose backing
+    /// `conn:<id>` key no longer exists (crash orphans / TTL expiry). Bounded by
+    /// the set size, which for per-user sets is at most that user's connection
+    /// limit.
+    async fn prune_and_count(&self, set_key: &str) -> StateResult<usize> {
+        let mut conn = self.conn.clone();
+        let ids: Vec<String> = conn
+            .smembers(set_key)
+            .await
+            .map_err(|e| StateBackendError::ConnectionFailed(e.to_string()))?;
+        let mut live = 0usize;
+        for id_str in ids {
+            let key = match Uuid::parse_str(&id_str) {
+                Ok(id) => self.conn_key(id),
+                Err(_) => {
+                    let _: Result<(), _> = conn.srem(set_key, &id_str).await;
+                    continue;
+                }
+            };
+            // On a transient EXISTS error, assume live (don't under-count and
+            // wrongly allow past a limit).
+            let exists: bool = conn.exists(&key).await.unwrap_or(true);
+            if exists {
+                live += 1;
+            } else {
+                let _: Result<(), _> = conn.srem(set_key, &id_str).await;
+            }
+        }
+        Ok(live)
+    }
 }
 
 #[async_trait]
@@ -119,21 +150,17 @@ impl StateBackend for RedisBackend {
     }
 
     async fn count_connections(&self) -> StateResult<usize> {
-        let mut conn = self.conn.clone();
-        let count: usize = conn
-            .scard(self.key("connections"))
-            .await
-            .map_err(|e| StateBackendError::ConnectionFailed(e.to_string()))?;
-        Ok(count)
+        // Prune-and-count rather than a raw SCARD: the index set has no TTL, so
+        // a crash (or expiry of the 1h conn key) that skips delete_connection
+        // leaves orphaned members that would otherwise inflate the count.
+        self.prune_and_count(&self.key("connections")).await
     }
 
     async fn count_user_connections(&self, user_id: i64) -> StateResult<usize> {
-        let mut conn = self.conn.clone();
-        let count: usize = conn
-            .scard(self.key(&format!("user_conns:{}", user_id)))
+        // Accuracy matters here — this drives the per-user connection limit, so
+        // an over-count would wrongly deny legitimate connections.
+        self.prune_and_count(&self.key(&format!("user_conns:{}", user_id)))
             .await
-            .map_err(|e| StateBackendError::ConnectionFailed(e.to_string()))?;
-        Ok(count)
     }
 
     async fn get_pending(&self, id: Uuid) -> StateResult<ConnectionRequest> {
