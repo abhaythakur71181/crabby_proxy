@@ -71,7 +71,8 @@ services:
       target: runtime
       args:
         BUN_VERSION: "1"
-        # Empty → SPA calls same-origin /api, which nginx proxies to backend.
+        # Public URL of the admin API the browser calls (e.g. http://host:8081).
+        # The backend's [admin] cors_origins must include this web origin.
         VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
     image: crabby-proxy-web:latest
     container_name: crabby-proxy-web
@@ -91,7 +92,7 @@ services:
       - ALL
 
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/"]
       interval: 30s
       timeout: 5s
       retries: 3
