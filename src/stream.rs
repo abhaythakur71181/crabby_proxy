@@ -400,3 +400,99 @@ where
 
     tokio::try_join!(relay1, relay2)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{duplex, split, AsyncReadExt, AsyncWriteExt};
+
+    // relay_with_logging copies every byte and reports the exact total.
+    #[tokio::test]
+    async fn relay_with_logging_copies_all_bytes() {
+        let (mut src_client, src_proxy) = duplex(4096);
+        let (dst_proxy, mut dst_client) = duplex(4096);
+
+        let mut tunnel = TunnelStream::new(src_proxy, dst_proxy);
+        let relay = tokio::spawn(async move { tunnel.relay_with_logging("test").await });
+
+        src_client.write_all(b"hello world").await.unwrap();
+        src_client.shutdown().await.unwrap();
+
+        let mut got = Vec::new();
+        dst_client.read_to_end(&mut got).await.unwrap();
+        assert_eq!(got, b"hello world");
+        assert_eq!(relay.await.unwrap().unwrap(), 11);
+    }
+
+    // create_throttled_tunnel with no throttle/quota relays both directions and
+    // returns each direction's byte total.
+    #[tokio::test]
+    async fn throttled_tunnel_relays_both_directions() {
+        let (mut client, client_proxy) = duplex(4096);
+        let (mut upstream, upstream_proxy) = duplex(4096);
+        let (cr, cw) = split(client_proxy);
+        let (ur, uw) = split(upstream_proxy);
+
+        let task = tokio::spawn(async move {
+            create_throttled_tunnel((cr, cw), (ur, uw), "c2u", "u2c", None, None, false).await
+        });
+
+        client.write_all(b"ping").await.unwrap();
+        client.shutdown().await.unwrap();
+        upstream.write_all(b"pongpong").await.unwrap();
+        upstream.shutdown().await.unwrap();
+
+        let mut to_upstream = Vec::new();
+        upstream.read_to_end(&mut to_upstream).await.unwrap();
+        let mut to_client = Vec::new();
+        client.read_to_end(&mut to_client).await.unwrap();
+        assert_eq!(to_upstream, b"ping");
+        assert_eq!(to_client, b"pongpong");
+
+        let (a, b) = task.await.unwrap().unwrap();
+        // One direction carried 4 bytes, the other 8 (order depends on mapping).
+        let mut totals = [a, b];
+        totals.sort_unstable();
+        assert_eq!(totals, [4, 8]);
+    }
+
+    // With enforcement on and a tiny limit, a large transfer trips the quota
+    // and the shared abort flag is set (connection torn down, not hung).
+    #[tokio::test]
+    async fn throttled_tunnel_enforces_quota() {
+        let tracker =
+            std::sync::Arc::new(crate::quota_tracker::UserQuotaTracker::new(0, Some(8), 0));
+        let tracker_probe = tracker.clone();
+        let (mut client, client_proxy) = duplex(64 * 1024);
+        let (upstream, upstream_proxy) = duplex(64 * 1024);
+        let (cr, cw) = split(client_proxy);
+        let (ur, uw) = split(upstream_proxy);
+
+        // Keep the upstream client end alive so reads don't error prematurely.
+        let _upstream = upstream;
+
+        let task = tokio::spawn(async move {
+            create_throttled_tunnel((cr, cw), (ur, uw), "c2u", "u2c", None, Some(tracker), true)
+                .await
+        });
+
+        // Send well beyond the 8-byte limit.
+        let big = vec![0u8; 4096];
+        let _ = client.write_all(&big).await;
+        let _ = client.shutdown().await;
+
+        // Must complete (not hang). Enforcement tripped: the tracker is over its
+        // limit and the upstream->client direction carried nothing.
+        let (_a, b) = task.await.unwrap().unwrap();
+        assert!(tracker_probe.is_over(), "quota should have tripped");
+        assert_eq!(b, 0);
+    }
+
+    #[test]
+    fn quota_tracker_add_and_over_trips_at_limit() {
+        let t = crate::quota_tracker::UserQuotaTracker::new(0, Some(10), 0);
+        assert!(!t.add_and_over(5));
+        assert!(t.add_and_over(5)); // reaches 10 >= limit
+        assert!(t.used() >= 10);
+    }
+}
