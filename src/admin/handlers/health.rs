@@ -202,11 +202,10 @@ pub async fn dashboard(
                 .collect(),
             Err(_) => vec![],
         };
-    // Total users
-    let total_users = match crate::db::users::count_users(&state.db_pool).await {
-        Ok(count) => count,
-        Err(_) => 0,
-    };
+    // Total users (0 if the count query fails)
+    let total_users = crate::db::users::count_users(&state.db_pool)
+        .await
+        .unwrap_or_default();
     // Active tunnels
     let active_tunnels = state.tunnels.read().await.count_active();
     Json(DashboardResponse {
