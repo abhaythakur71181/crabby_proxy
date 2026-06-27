@@ -313,7 +313,9 @@ REMAINING (lower priority / larger):
   - H1 token_version logout-revocation (needs migration + create_jwt change)
   - H7 connection-pool: decide implement-return vs remove (currently dead but harmless)
   - M23 frontend typed API + TS strict + error boundary; H13 localStorage→HttpOnly cookie (needs backend cookie auth); M24 route code-splitting
-  - M9 quota-0 semantics, M10/M11 throttle staleness+bucket direction, M21 tunnel TOCTOU, M22 CORS strict parse
+  - M9 quota-0 semantics, M10/M11 throttle staleness+bucket direction
+  - [x] M21 tunnel admin `.unwrap()` → `AllocationError` (no panic in admin path; TOCTOU port-bind race still noted)
+  - [x] M22 CORS now logs+counts invalid origins instead of silently dropping them
   - H14 more tests (event_bus/tunnel/webhook/redis, e2e auth/quota, parser fuzz); web Playwright
   - PERF: L1 box ClientStream, L2 buffers, L5 Arc config; L3/L4/L6/L7/L8
   - DOCS: ARCHITECTURE.md + ADRs + runbooks; README test count/license
