@@ -356,6 +356,15 @@ export async function listApprovals(): Promise<Approval[]> {
 export const terminateApproval = (id: number, reason: string) =>
   req<void>(`/api/approvals/${id}`, { method: "DELETE", body: JSON.stringify({ reason }) });
 
+/// Admin: forcefully create an active (approved) grant for a user — no request
+/// step. POST /api/approvals.
+export const createApproval = (body: {
+  user_id: number;
+  client_ip: string;
+  duration_hours: number;
+  reason?: string;
+}) => req<unknown>("/api/approvals", { method: "POST", body: JSON.stringify(body) });
+
 // ── Groups ────────────────────────────────────────────────────────
 interface BackendGroup {
   id: number;
