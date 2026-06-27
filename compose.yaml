@@ -71,9 +71,11 @@ services:
       target: runtime
       args:
         BUN_VERSION: "1"
-        # Public URL of the admin API the browser calls (e.g. http://host:8081).
-        # The backend's [admin] cors_origins must include this web origin.
-        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
+        # Public URL of the admin API the browser calls. Defaults to the admin
+        # port published on the host (127.0.0.1:8081). The backend's [admin]
+        # cors_origins must include the web origin (http://localhost:3000 by
+        # default — already in config.toml). Override for non-local hosts.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8081}
     image: crabby-proxy-web:latest
     container_name: crabby-proxy-web
     restart: unless-stopped
