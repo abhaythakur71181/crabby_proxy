@@ -21,7 +21,13 @@ pub async fn run_admin_server(
         .route("/health", get(handlers::health::health_check))
         .route("/health/deep", get(handlers::health::deep_health_check))
         .route("/metrics", get(handlers::metrics::prometheus_metrics))
-        .route("/api/login", post(handlers::auth::login));
+        .route("/api/login", post(handlers::auth::login))
+        // Authorized by a one-time ticket (minted at /api/connections/live-ticket),
+        // since a browser can't put a bearer on the WS handshake.
+        .route(
+            "/api/connections/live",
+            get(handlers::connections::live_connections),
+        );
 
     // Protected routes (auth required)
     let protected_routes = Router::new()
@@ -41,8 +47,8 @@ pub async fn run_admin_server(
             delete(handlers::connections::terminate_connection),
         )
         .route(
-            "/api/connections/live",
-            get(handlers::connections::live_connections),
+            "/api/connections/live-ticket",
+            post(handlers::connections::issue_live_ticket),
         )
         .route("/api/tunnels", get(handlers::tunnels::list_tunnels))
         .route("/api/tunnels", post(handlers::tunnels::create_tunnel))
