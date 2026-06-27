@@ -235,8 +235,10 @@ Base: admin API on `:8081`. Auth: `Authorization: Bearer <JWT>` (or Basic) on al
 |---|---|---|---|
 | `/api/connections` | GET | admin | `[ConnectionInfo]` |
 | `/api/connections/count` | GET | admin | integer |
-| `/api/connections/live` | GET (WS) | admin | 2s JSON snapshots |
-| `/api/tunnels` | GET/POST | admin | list / create |
+| `/api/connections/:id` | DELETE | admin | **terminate a live connection** (204; 404 if not active on this instance) |
+| `/api/connections/live` | GET (WS) | admin | 2s JSON snapshots — see WS-auth caveat below |
+| `/api/usage/timeseries` | GET | admin | `?days&bucket=hour\|day` → `{period_days,bucket_secs,points:[{ts,bytes_sent,bytes_received,connections}]}` (trend charts/sparklines) |
+| `/api/tunnels` | GET/POST | admin | list / create — `TunnelInfo` now also returns `status, bytes_transferred, total_connections, active_connections` |
 | `/api/tunnels/:port` | DELETE | admin | close |
 | `/api/audit-log` | GET | admin | `{entries,total,limit,offset}`; `?user_id&action&limit&offset` (limit cap 200) |
 | `/api/users/:id/sessions` | GET/DELETE | self/admin | list / force-logout |
@@ -247,6 +249,9 @@ Base: admin API on `:8081`. Auth: `Authorization: Bearer <JWT>` (or Basic) on al
 | `/health`,`/health/deep`,`/metrics` | GET | **public** | liveness + Prometheus (bind to localhost) |
 
 **Pagination/filter/sort:** `?limit` (cap 200) + `?offset` on users & audit-log; audit-log also `user_id`, `action`. Most other lists are unpaginated today **[A: add cursor/limit envelopes uniformly]**.
+
+**Added for this rebuild** (branch `feat/ui-backend-support`): `DELETE /api/connections/:id` (terminate live connection), `GET /api/usage/timeseries` (trend data), per-tunnel telemetry fields on `TunnelInfo`, and `latency_ms`/`checked_at` on deep-health checks.
+**One swap caveat still open:** the live WebSocket `/api/connections/live` requires a bearer token, but browsers can't set `Authorization` on a WS handshake — wiring the real feed needs a short-lived ticket (query-param) or cookie auth. Not yet implemented (the UI's mock `useLiveConnections()` sidesteps it).
 
 ---
 
