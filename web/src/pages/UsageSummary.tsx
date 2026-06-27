@@ -7,19 +7,25 @@ import { Link } from 'react-router-dom';
 import { Cable, Wifi, Users, Activity } from 'lucide-react';
 import { Chart as ChartJS, CategoryScale, LinearScale, BarElement, Tooltip } from 'chart.js';
 import { Bar } from 'react-chartjs-2';
+import { Skeleton } from '@/components/ui/skeleton';
+import { EmptyState } from '@/components/EmptyState';
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip);
 
 export default function UsageSummary() {
-  const { data } = useQuery({ queryKey: ['usage-summary'], queryFn: () => api.getUsageSummary() });
+  const { data, isLoading, isError } = useQuery({ queryKey: ['usage-summary'], queryFn: () => api.getUsageSummary() });
 
-  if (!data) return null;
+  if (isLoading) return <div className="space-y-4"><Skeleton className="h-10 w-64" /><Skeleton className="h-64" /></div>;
+  if (isError || !data) return <EmptyState title="Couldn't load usage summary" icon="⚠️" />;
 
+  // Backend `/api/usage/summary` top_users carry { user_id, total_bandwidth,
+  // connection_count } and no username, so label rows by user id.
+  const topUsers = data.top_users ?? [];
   const chartData = {
-    labels: data.top_users.map(u => u.username),
+    labels: topUsers.map(u => `User #${u.user_id}`),
     datasets: [{
       label: 'Bandwidth',
-      data: data.top_users.map(u => u.bandwidth / (1024 * 1024)),
+      data: topUsers.map(u => (u.total_bandwidth ?? 0) / (1024 * 1024)),
       backgroundColor: '#06b6d4',
       borderRadius: 4,
     }],
@@ -58,12 +64,12 @@ export default function UsageSummary() {
               <TableHead>#</TableHead><TableHead>User</TableHead><TableHead className="text-right">Bandwidth</TableHead><TableHead className="text-right">Connections</TableHead>
             </TableRow></TableHeader>
             <TableBody>
-              {data.top_users.map((u, i) => (
+              {topUsers.map((u, i) => (
                 <TableRow key={u.user_id} className="border-border/30">
                   <TableCell className="font-mono text-muted-foreground">{i + 1}</TableCell>
-                  <TableCell><Link to={`/users/${u.user_id}`} className="text-primary hover:underline">{u.username}</Link></TableCell>
-                  <TableCell className="text-right font-mono text-sm">{formatBytes(u.bandwidth)}</TableCell>
-                  <TableCell className="text-right font-mono text-sm">{formatNumber(u.connections)}</TableCell>
+                  <TableCell><Link to={`/users/${u.user_id}`} className="text-primary hover:underline">User #{u.user_id}</Link></TableCell>
+                  <TableCell className="text-right font-mono text-sm">{formatBytes(u.total_bandwidth)}</TableCell>
+                  <TableCell className="text-right font-mono text-sm">{formatNumber(u.connection_count)}</TableCell>
                 </TableRow>
               ))}
             </TableBody>
