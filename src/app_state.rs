@@ -135,6 +135,11 @@ pub struct AppState {
     // terminate a live connection (DELETE /api/connections/:id); the relay
     // races against the Notify and tears down on signal.
     pub conn_cancel: Arc<dashmap::DashMap<uuid::Uuid, Arc<tokio::sync::Notify>>>,
+
+    // Short-lived single-use tickets for the live-connections WebSocket, keyed
+    // by ticket string → issue time. Browsers can't send a bearer on the WS
+    // handshake, so an authed admin mints a ticket and opens the WS with it.
+    pub ws_tickets: Arc<dashmap::DashMap<String, std::time::Instant>>,
 }
 
 impl AppState {
@@ -326,6 +331,7 @@ impl AppState {
             },
             self_loop_guard,
             conn_cancel: Arc::new(dashmap::DashMap::new()),
+            ws_tickets: Arc::new(dashmap::DashMap::new()),
         })
     }
 
