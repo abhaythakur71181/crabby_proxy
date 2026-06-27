@@ -633,7 +633,7 @@ mod tests {
         let req = test_create_user_request("update_pw");
         let id = create_user(&pool, &req, None).await.unwrap();
 
-        let updated = update_user(&pool, id, Some("NewPass456!"), None, None, None, None)
+        let _updated = update_user(&pool, id, Some("NewPass456!"), None, None, None, None)
             .await
             .unwrap();
 
