@@ -240,6 +240,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
 
+    // Tear down reverse tunnels: abort their listener tasks and release the
+    // allocated ports. Without this, tunnel listeners kept accepting/forwarding
+    // past "drain complete" and were only killed abruptly at process exit.
+    state.shutdown().await;
+
     tracing::info!("Graceful shutdown complete");
     Ok(())
 }
