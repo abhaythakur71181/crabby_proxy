@@ -71,8 +71,11 @@ services:
       target: runtime
       args:
         BUN_VERSION: "1"
-        # Empty → SPA calls same-origin /api, which nginx proxies to backend.
-        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
+        # Public URL of the admin API the browser calls. Defaults to the admin
+        # port published on the host (127.0.0.1:8081). The backend's [admin]
+        # cors_origins must include the web origin (http://localhost:3000 by
+        # default — already in config.toml). Override for non-local hosts.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8081}
     image: crabby-proxy-web:latest
     container_name: crabby-proxy-web
     restart: unless-stopped
@@ -91,7 +94,7 @@ services:
       - ALL
 
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/"]
       interval: 30s
       timeout: 5s
       retries: 3

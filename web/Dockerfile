@@ -1,62 +1,53 @@
 # syntax=docker/dockerfile:1.7
+#
+# Build + serve the TanStack Start admin console as a Nitro node-server.
+# The browser talks to the Rust admin API directly via VITE_API_BASE_URL
+# (the backend's CORS allow-list must include this web origin), so no
+# reverse-proxy is required in front.
 
 ARG BUN_VERSION=1
-ARG NGINX_VERSION=1.27-alpine
+ARG NODE_VERSION=22-alpine
 
 ########################################
-# Stage 1: build the Vite/React SPA.
-#
-# bun is the source-of-truth package manager here (bun.lock is committed
-# and kept in sync; package-lock.json lags behind), so we install + build
-# with bun for a reproducible dep graph.
+# Stage 1: build (bun + node-server preset)
 ########################################
 FROM oven/bun:${BUN_VERSION} AS builder
-
 WORKDIR /app
+ENV CI=1 NODE_ENV=production
 
-ENV CI=1 \
-    NODE_ENV=production
-
-# Install deps first for better layer caching. Using --frozen-lockfile
-# so CI fails loudly if bun.lock drifts from package.json.
 COPY package.json bun.lock ./
 RUN --mount=type=cache,target=/root/.bun/install/cache \
     bun install --frozen-lockfile
 
-# Then copy sources and build. VITE_* build-time vars can be passed via
-# --build-arg and picked up by Vite automatically.
 COPY . .
 
+# Public base URL of the admin API (e.g. https://admin.example.com). Baked into
+# the client bundle at build time. Empty → same-origin (front it with a proxy).
 ARG VITE_API_BASE_URL=""
 ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
+# Emit a standalone node server instead of the default cloudflare worker.
+ENV NITRO_PRESET=node-server
 
 RUN bun run build
 
 ########################################
-# Stage 2: serve static assets via nginx.
+# Stage 2: runtime (node serves .output)
 ########################################
-FROM nginx:${NGINX_VERSION} AS runtime
+FROM node:${NODE_VERSION} AS runtime
+WORKDIR /app
+ENV NODE_ENV=production \
+    PORT=8080 \
+    HOST=0.0.0.0
 
-# Drop default site, install tini + curl for healthcheck/PID 1 hygiene.
-RUN apk add --no-cache tini curl \
- && rm -rf /usr/share/nginx/html/* /etc/nginx/conf.d/default.conf
+RUN apk add --no-cache tini curl
 
-COPY --from=builder /app/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=builder /app/.output ./.output
 
-# nginx:alpine already runs as non-root for worker processes; master needs
-# root to bind <1024. Keep port 8080 so we can drop root and still bind.
-RUN sed -i 's|listen\s*80;|listen 8080;|' /etc/nginx/conf.d/default.conf \
- && chown -R nginx:nginx /var/cache/nginx /var/log/nginx /usr/share/nginx/html \
- && touch /var/run/nginx.pid \
- && chown nginx:nginx /var/run/nginx.pid
-
-USER nginx:nginx
-
+USER node
 EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=8s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8080/ >/dev/null || exit 1
 
 ENTRYPOINT ["/sbin/tini","--"]
-CMD ["nginx","-g","daemon off;"]
+CMD ["node", ".output/server/index.mjs"]
