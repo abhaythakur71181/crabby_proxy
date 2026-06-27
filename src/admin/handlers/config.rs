@@ -85,11 +85,11 @@ pub async fn reload_config(
             }))
         }
         Err(e) => {
+            // Return a real error status (was HTTP 200 with success:false, which
+            // hid failures from monitoring) and don't leak the raw error
+            // (filesystem paths / parser internals) to the client.
             tracing::error!("Failed to reload configuration: {}", e);
-            Ok(Json(ReloadResponse {
-                success: false,
-                message: format!("Failed to reload configuration: {}", e),
-            }))
+            Err(ApiError::internal("Failed to reload configuration"))
         }
     }
 }

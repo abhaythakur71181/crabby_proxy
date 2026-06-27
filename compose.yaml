@@ -22,7 +22,10 @@ services:
 
     ports:
       - "${PROXY_PORT:-8080}:8080"
-      - "${ADMIN_PORT:-8081}:8081"
+      # Admin API + /metrics bind to localhost on the host by default — the
+      # admin surface and unauthenticated /metrics must not be world-reachable.
+      # Override ADMIN_BIND_HOST=0.0.0.0 only behind a firewall / private net.
+      - "${ADMIN_BIND_HOST:-127.0.0.1}:${ADMIN_PORT:-8081}:8081"
 
     volumes:
       # SQLite DB + any app-writable state. Persisted across restarts.
@@ -49,7 +52,7 @@ services:
       - ALL
 
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8081/metrics"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8081/health"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -347,14 +347,66 @@ impl AppState {
     }
 
     pub async fn reload_config(&self) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(path) = &self.config_path {
-            let new_config = Config::from_file(path)?;
-            self.config.store(Arc::new(new_config));
-            tracing::info!("Configuration reloaded from {}", path);
-            Ok(())
-        } else {
-            Err("Config path not available for reload".into())
+        let path = self
+            .config_path
+            .as_ref()
+            .ok_or("Config path not available for reload")?;
+        let mut new_config = Config::from_file(path)?;
+        let current = self.config.load();
+
+        // Security-critical fields are NOT hot-reloadable: a runtime file edit
+        // must never be able to disable admin auth, rotate the JWT signing key
+        // (which would silently invalidate every live session), change the
+        // shared passwords, or claim to rebind a listener (which can't actually
+        // move at runtime). Preserve the running values and warn if the file
+        // tried to change them; these take effect only on restart.
+        macro_rules! preserve {
+            ($field:expr, $cur:expr, $name:literal) => {
+                if $field != $cur {
+                    tracing::warn!(
+                        "config reload: change to '{}' ignored — restart required for security-critical fields",
+                        $name
+                    );
+                    $field = $cur.clone();
+                }
+            };
         }
+        preserve!(
+            new_config.authentication.jwt_secret,
+            current.authentication.jwt_secret,
+            "authentication.jwt_secret"
+        );
+        preserve!(
+            new_config.authentication.password,
+            current.authentication.password,
+            "authentication.password"
+        );
+        preserve!(
+            new_config.admin.admin_password,
+            current.admin.admin_password,
+            "admin.admin_password"
+        );
+        preserve!(
+            new_config.server.proxy_bind,
+            current.server.proxy_bind,
+            "server.proxy_bind"
+        );
+        preserve!(
+            new_config.server.admin_bind,
+            current.server.admin_bind,
+            "server.admin_bind"
+        );
+        if new_config.admin.auth_enabled != current.admin.auth_enabled {
+            tracing::warn!(
+                "config reload: change to 'admin.auth_enabled' ignored — restart required"
+            );
+            new_config.admin.auth_enabled = current.admin.auth_enabled;
+        }
+
+        drop(current);
+        self.config.store(Arc::new(new_config));
+        tracing::info!("Configuration reloaded from {}", path);
+        Ok(())
     }
 
     pub async fn shutdown(&self) {
