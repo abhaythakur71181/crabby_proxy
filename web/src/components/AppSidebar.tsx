@@ -12,25 +12,28 @@ import {
 } from '@/components/ui/sidebar';
 import { cn } from '@/lib/utils';
 
+// `adminOnly` items are hidden from non-admin users (and their routes are
+// guarded by AdminRoute). Approvals + API Keys are self-service for any user.
 const navItems = [
-  { title: 'Dashboard', url: '/dashboard', icon: LayoutDashboard },
-  { title: 'Connections', url: '/connections', icon: Cable, badge: true },
-  { title: 'Users', url: '/users', icon: Users },
-  { title: 'Groups', url: '/groups', icon: FolderOpen },
-  { title: 'API Keys', url: '/api-keys', icon: KeyRound },
-  { title: 'Usage & Quotas', url: '/usage', icon: BarChart3 },
-  { title: 'Approvals', url: '/approvals', icon: CheckCircle },
-  { title: 'Tunnels', url: '/tunnels', icon: Landmark },
-  { title: 'Audit Log', url: '/audit-log', icon: ScrollText },
-  { title: 'Configuration', url: '/configuration', icon: Settings },
-  { title: 'System Health', url: '/system-health', icon: HeartPulse },
+  { title: 'Dashboard', url: '/dashboard', icon: LayoutDashboard, adminOnly: true },
+  { title: 'Connections', url: '/connections', icon: Cable, badge: true, adminOnly: true },
+  { title: 'Users', url: '/users', icon: Users, adminOnly: true },
+  { title: 'Groups', url: '/groups', icon: FolderOpen, adminOnly: true },
+  { title: 'API Keys', url: '/api-keys', icon: KeyRound, adminOnly: false },
+  { title: 'Usage & Quotas', url: '/usage', icon: BarChart3, adminOnly: true },
+  { title: 'Approvals', url: '/approvals', icon: CheckCircle, adminOnly: false },
+  { title: 'Tunnels', url: '/tunnels', icon: Landmark, adminOnly: true },
+  { title: 'Audit Log', url: '/audit-log', icon: ScrollText, adminOnly: true },
+  { title: 'Configuration', url: '/configuration', icon: Settings, adminOnly: true },
+  { title: 'System Health', url: '/system-health', icon: HeartPulse, adminOnly: true },
 ];
 
 export function AppSidebar() {
   const { state } = useSidebar();
   const collapsed = state === 'collapsed';
   const location = useLocation();
-  const { user, logout } = useAuth();
+  const { user, logout, isAdmin } = useAuth();
+  const visibleNavItems = navItems.filter((item) => isAdmin || !item.adminOnly);
 
   const roleBadgeColor: Record<string, string> = {
     root_admin: 'bg-red-500/20 text-red-400 border-red-500/30',
@@ -53,7 +56,7 @@ export function AppSidebar() {
         <SidebarGroup>
           <SidebarGroupContent>
             <SidebarMenu>
-              {navItems.map(item => (
+              {visibleNavItems.map(item => (
                 <SidebarMenuItem key={item.title}>
                   <SidebarMenuButton asChild>
                     <NavLink
@@ -76,7 +79,7 @@ export function AppSidebar() {
         {user && (
           <div className={cn('flex items-center gap-2', collapsed && 'justify-center')}>
             <div className="h-8 w-8 rounded-full bg-primary/20 flex items-center justify-center text-primary text-sm font-bold shrink-0">
-              {user.username[0].toUpperCase()}
+              {user.username?.[0]?.toUpperCase() ?? '?'}
             </div>
             {!collapsed && (
               <div className="flex-1 min-w-0">
