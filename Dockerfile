@@ -61,7 +61,7 @@ USER crabby:crabby
 EXPOSE 8080 8081
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8081/metrics >/dev/null || exit 1
+    CMD curl -fsS http://127.0.0.1:8081/health >/dev/null || exit 1
 
 ENTRYPOINT ["/usr/bin/tini","--","/usr/local/bin/crabby_proxy"]
 CMD ["--config","/app/config.toml", \
