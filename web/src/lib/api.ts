@@ -23,8 +23,11 @@ const BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 function getFullPath(path: string): string {
   if (!BASE_URL) return path;
   let prefix = BASE_URL;
+  // Default to HTTPS when the configured base URL has no scheme. The previous
+  // default of http:// sent login credentials and the bearer token in
+  // cleartext. For a local plaintext backend, set an explicit "http://..." URL.
   if (!prefix.startsWith('http://') && !prefix.startsWith('https://')) {
-    prefix = `http://${prefix}`;
+    prefix = `https://${prefix}`;
   }
   return `${prefix.replace(/\/$/, '')}${path}`;
 }
