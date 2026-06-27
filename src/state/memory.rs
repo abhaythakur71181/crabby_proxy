@@ -72,12 +72,17 @@ impl StateBackend for MemoryBackend {
         Ok(count)
     }
 
-    async fn get_pending(&self, _id: Uuid) -> StateResult<ConnectionRequest> {
-        // Can't return because ConnectionRequest doesn't implement Clone
-        // This is a limitation of the in-memory backend
-        Err(StateBackendError::Other(
-            "get_pending not supported in memory backend".to_string(),
-        ))
+    async fn get_pending(&self, id: Uuid) -> StateResult<ConnectionRequest> {
+        // ConnectionRequest derives Clone (response_tx is an Arc), so the memory
+        // backend can serve pending requests just like Redis — the old "not
+        // supported" stub silently broke the approval workflow on the default
+        // single-instance deployment.
+        self.pending
+            .read()
+            .await
+            .get(&id)
+            .cloned()
+            .ok_or(StateBackendError::NotFound)
     }
 
     async fn add_pending(&self, req: ConnectionRequest) -> StateResult<()> {
@@ -95,10 +100,7 @@ impl StateBackend for MemoryBackend {
     }
 
     async fn list_pending(&self) -> StateResult<Vec<ConnectionRequest>> {
-        // Can't clone ConnectionRequest, not supported in memory backend
-        Err(StateBackendError::Other(
-            "list_pending not supported in memory backend".to_string(),
-        ))
+        Ok(self.pending.read().await.values().cloned().collect())
     }
 
     async fn increment_counter(&self, key: &str, value: u64) -> StateResult<()> {
@@ -267,7 +269,8 @@ mod tests {
         };
 
         backend.add_pending(req).await.unwrap();
-        // Can't verify directly since get_pending returns error
+        let got = backend.get_pending(id).await.unwrap();
+        assert_eq!(got.id, id);
     }
 
     #[tokio::test]
@@ -297,17 +300,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_pending_not_supported() {
+    async fn test_get_pending_missing_is_not_found() {
         let backend = MemoryBackend::new();
         let result = backend.get_pending(Uuid::new_v4()).await;
-        assert!(matches!(result, Err(StateBackendError::Other(_))));
+        assert!(matches!(result, Err(StateBackendError::NotFound)));
     }
 
     #[tokio::test]
-    async fn test_list_pending_not_supported() {
+    async fn test_list_pending_returns_added() {
         let backend = MemoryBackend::new();
-        let result = backend.list_pending().await;
-        assert!(matches!(result, Err(StateBackendError::Other(_))));
+        assert!(backend.list_pending().await.unwrap().is_empty());
+
+        let id = Uuid::new_v4();
+        let req = ConnectionRequest {
+            id,
+            client_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 5000),
+            connection_type: ConnectionType::ReverseTunnel {
+                service_type: ServiceType::WebService,
+                listen_port: None,
+            },
+            requested_at: Instant::now(),
+            response_tx: None,
+        };
+        backend.add_pending(req).await.unwrap();
+
+        let pending = backend.list_pending().await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, id);
     }
 
     // === Counter Tests ===
