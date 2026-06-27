@@ -1,4 +1,6 @@
 use chrono::Utc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::{collections::HashMap, net::SocketAddr};
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinHandle;
@@ -9,6 +11,17 @@ use crate::connection::ServiceType;
 
 use super::{error::TunnelError, port_allocator::PortAllocator};
 
+/// Live per-tunnel counters, shared with the tunnel's listener task.
+#[derive(Debug, Default)]
+pub struct TunnelMetrics {
+    /// Total bytes relayed in both directions across all connections.
+    pub bytes_transferred: AtomicU64,
+    /// Connections accepted over the tunnel's lifetime.
+    pub total_connections: AtomicU64,
+    /// Connections currently being relayed.
+    pub active_connections: AtomicU64,
+}
+
 /// Public tunnel info for admin API responses
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TunnelInfo {
@@ -17,6 +30,11 @@ pub struct TunnelInfo {
     pub target_addr: String,
     pub service_type: String,
     pub created_at: i64,
+    /// "active" — the tunnel's listener is accepting (always true while listed).
+    pub status: String,
+    pub bytes_transferred: u64,
+    pub total_connections: u64,
+    pub active_connections: u64,
 }
 
 pub struct TunnelManager {
@@ -32,6 +50,23 @@ struct ActiveTunnel {
     target_addr: SocketAddr,
     service_type: ServiceType,
     created_at: chrono::DateTime<Utc>,
+    metrics: Arc<TunnelMetrics>,
+}
+
+impl ActiveTunnel {
+    fn to_info(&self) -> TunnelInfo {
+        TunnelInfo {
+            tunnel_id: self.tunnel_id.to_string(),
+            listen_port: self.listen_port,
+            target_addr: self.target_addr.to_string(),
+            service_type: format!("{:?}", self.service_type),
+            created_at: self.created_at.timestamp(),
+            status: "active".to_string(),
+            bytes_transferred: self.metrics.bytes_transferred.load(Ordering::Relaxed),
+            total_connections: self.metrics.total_connections.load(Ordering::Relaxed),
+            active_connections: self.metrics.active_connections.load(Ordering::Relaxed),
+        }
+    }
 }
 
 impl TunnelManager {
@@ -63,6 +98,7 @@ impl TunnelManager {
         };
 
         // Create tunnel
+        let metrics = Arc::new(TunnelMetrics::default());
         let tunnel = ActiveTunnel {
             tunnel_id: Uuid::new_v4(),
             client_id: Uuid::new_v4(),
@@ -70,12 +106,14 @@ impl TunnelManager {
             target_addr: client_addr,
             service_type: service_type.clone(),
             created_at: Utc::now(),
+            metrics: metrics.clone(),
         };
 
         let handle = tokio::spawn(tunnel_listener_task_with_listener(
             listener,
             port,
             client_addr,
+            metrics,
         ));
         self.tasks.entry(port).or_default().push(handle);
 
@@ -121,16 +159,7 @@ impl TunnelManager {
 
     /// List all active tunnels (for admin API)
     pub fn list_active(&self) -> Vec<TunnelInfo> {
-        self.active_tunnels
-            .values()
-            .map(|t| TunnelInfo {
-                tunnel_id: t.tunnel_id.to_string(),
-                listen_port: t.listen_port,
-                target_addr: t.target_addr.to_string(),
-                service_type: format!("{:?}", t.service_type),
-                created_at: t.created_at.timestamp(),
-            })
-            .collect()
+        self.active_tunnels.values().map(|t| t.to_info()).collect()
     }
 
     /// Count active tunnels
@@ -157,13 +186,7 @@ impl TunnelManager {
                 "tunnel on port {port} vanished immediately after creation"
             ))
         })?;
-        Ok(TunnelInfo {
-            tunnel_id: tunnel.tunnel_id.to_string(),
-            listen_port: tunnel.listen_port,
-            target_addr: tunnel.target_addr.to_string(),
-            service_type: format!("{:?}", tunnel.service_type),
-            created_at: tunnel.created_at.timestamp(),
-        })
+        Ok(tunnel.to_info())
     }
 }
 
@@ -193,11 +216,19 @@ async fn tunnel_listener_task_with_listener(
     listener: tokio::net::TcpListener,
     port: u16,
     target_addr: SocketAddr,
+    metrics: Arc<TunnelMetrics>,
 ) {
     loop {
         match listener.accept().await {
             Ok((inbound, _)) => {
-                tokio::spawn(handle_tunnel_connection(inbound, target_addr));
+                metrics.total_connections.fetch_add(1, Ordering::Relaxed);
+                metrics.active_connections.fetch_add(1, Ordering::Relaxed);
+                let m = metrics.clone();
+                tokio::spawn(async move {
+                    let bytes = handle_tunnel_connection(inbound, target_addr).await;
+                    m.bytes_transferred.fetch_add(bytes, Ordering::Relaxed);
+                    m.active_connections.fetch_sub(1, Ordering::Relaxed);
+                });
             }
             Err(e) => {
                 tracing::error!("Accept error on port {port}: {e}");
@@ -206,12 +237,16 @@ async fn tunnel_listener_task_with_listener(
     }
 }
 
-async fn handle_tunnel_connection(mut inbound: tokio::net::TcpStream, target_addr: SocketAddr) {
+/// Relay one tunnel connection; returns total bytes moved in both directions.
+async fn handle_tunnel_connection(
+    mut inbound: tokio::net::TcpStream,
+    target_addr: SocketAddr,
+) -> u64 {
     let mut outbound = match TcpStream::connect(target_addr).await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("Failed to connect to client {target_addr}: {e}");
-            return;
+            return 0;
         }
     };
 
@@ -219,16 +254,22 @@ async fn handle_tunnel_connection(mut inbound: tokio::net::TcpStream, target_add
     let (mut ro, mut wo) = outbound.split();
 
     let client_to_server = async {
-        io::copy(&mut ri, &mut wo).await?;
-        wo.shutdown().await
+        let n = io::copy(&mut ri, &mut wo).await?;
+        wo.shutdown().await?;
+        io::Result::Ok(n)
     };
 
     let server_to_client = async {
-        io::copy(&mut ro, &mut wi).await?;
-        wi.shutdown().await
+        let n = io::copy(&mut ro, &mut wi).await?;
+        wi.shutdown().await?;
+        io::Result::Ok(n)
     };
 
-    if let Err(e) = tokio::try_join!(client_to_server, server_to_client) {
-        tracing::error!("Tunnel error: {e}");
+    match tokio::try_join!(client_to_server, server_to_client) {
+        Ok((a, b)) => a + b,
+        Err(e) => {
+            tracing::error!("Tunnel error: {e}");
+            0
+        }
     }
 }
