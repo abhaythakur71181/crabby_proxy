@@ -15,6 +15,8 @@ interface AuthContextType {
   logout: () => void;
   isAuthenticated: boolean;
   hasRole: (...roles: UserRole[]) => boolean;
+  /// True for `admin` or `root_admin` — the canonical "can see admin panels" flag.
+  isAdmin: boolean;
 }
 
 const AuthContext = createContext<AuthContextType>(null!);
@@ -49,8 +51,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return roles.includes(user.role);
   }, [user]);
 
+  const isAdmin = !!user && (user.role === 'admin' || user.role === 'root_admin');
+
   return (
-    <AuthContext.Provider value={{ user, login, logout, isAuthenticated: !!user, hasRole }}>
+    <AuthContext.Provider
+      value={{ user, login, logout, isAuthenticated: !!user, hasRole, isAdmin }}
+    >
       {children}
     </AuthContext.Provider>
   );

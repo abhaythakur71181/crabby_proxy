@@ -125,6 +125,7 @@ export default function Approvals() {
       setTerminateReason('');
       qc.invalidateQueries({ queryKey: ['approvals'] });
     },
+    onError: (e: Error) => toast.error(e.message),
   });
 
   const pendingRequests = (requests || []).filter(r => r.status === 'pending');
