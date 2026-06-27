@@ -3,13 +3,18 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Sidebar } from "@/components/app/sidebar";
 import { TopBar } from "@/components/app/topbar";
 import { CommandPalette } from "@/components/app/command-palette";
-import { getSession } from "@/lib/auth";
+import { getSession, isAdmin, isAdminPath } from "@/lib/auth";
 
 export const Route = createFileRoute("/_authenticated")({
-  beforeLoad: () => {
+  beforeLoad: ({ location }) => {
     if (typeof window === "undefined") return;
     if (!getSession()) {
       throw redirect({ to: "/login" });
+    }
+    // Role gate: non-admins can't reach admin-only pages (backend 403s anyway).
+    // Send them to their approvals view instead.
+    if (isAdminPath(location.pathname) && !isAdmin()) {
+      throw redirect({ to: "/approvals" });
     }
   },
   component: AppShell,
