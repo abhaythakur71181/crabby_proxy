@@ -5,14 +5,20 @@ use crate::state::backend::ConnectionInfo;
 use axum::{
     extract::{
         ws::{Message, WebSocket},
-        Path, State, WebSocketUpgrade,
+        Path, Query, State, WebSocketUpgrade,
     },
     http::StatusCode,
     response::IntoResponse,
     Json,
 };
+use serde::Deserialize;
 use std::sync::Arc;
 use uuid::Uuid;
+
+/// Live-feed tickets are short-lived single-use tokens. Browsers can't set an
+/// Authorization header on a WebSocket handshake, so an authenticated admin
+/// first mints a ticket here, then opens the WS with `?ticket=`.
+const LIVE_TICKET_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// GET /api/connections - List all active connections
 pub async fn list_connections(
@@ -66,13 +72,53 @@ pub async fn terminate_connection(
     }
 }
 
-/// GET /api/connections/live - WebSocket for live connection events.
+/// POST /api/connections/live-ticket - Mint a short-lived single-use ticket
+/// (admin) to open the live-connections WebSocket. Returns `{ticket,expires_in}`.
+pub async fn issue_live_ticket(
+    _admin: AdminUser,
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    use rand::Rng;
+    let ticket: String = rand::thread_rng()
+        .sample_iter(&rand::distributions::Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect();
+    // Opportunistic prune of expired tickets, then store this one.
+    state
+        .ws_tickets
+        .retain(|_, t| t.elapsed() < LIVE_TICKET_TTL);
+    state
+        .ws_tickets
+        .insert(ticket.clone(), std::time::Instant::now());
+    Json(serde_json::json!({ "ticket": ticket, "expires_in": LIVE_TICKET_TTL.as_secs() }))
+}
+
+#[derive(Deserialize)]
+pub struct LiveQuery {
+    pub ticket: Option<String>,
+}
+
+/// GET /api/connections/live - WebSocket for live connection events (PUBLIC
+/// route, authorized by a one-time `?ticket=` minted via live-ticket).
 /// Sends a JSON snapshot of active connections every 2 seconds.
 pub async fn live_connections(
-    _admin: AdminUser,
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
+    Query(q): Query<LiveQuery>,
 ) -> impl IntoResponse {
+    // Validate + consume the single-use ticket before upgrading.
+    let valid = match q.ticket {
+        Some(t) => state
+            .ws_tickets
+            .remove(&t)
+            .map(|(_, issued)| issued.elapsed() < LIVE_TICKET_TTL)
+            .unwrap_or(false),
+        None => false,
+    };
+    if !valid {
+        return (StatusCode::UNAUTHORIZED, "invalid or expired live ticket").into_response();
+    }
     ws.on_upgrade(move |socket| handle_live_connections(socket, state))
 }
 

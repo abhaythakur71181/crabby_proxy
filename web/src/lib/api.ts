@@ -218,6 +218,24 @@ export const connectionCount = () => req<number>("/api/connections/count");
 export const terminateConnection = (id: string) =>
   req<void>(`/api/connections/${id}`, { method: "DELETE" });
 
+/// Map a raw connections array (REST or WS snapshot payload) to UI Connections.
+export const adaptConnections = (raw: unknown[]): Connection[] =>
+  (raw as BackendConn[]).map(adaptConn);
+
+/// Mint a one-time ticket for the live-connections WebSocket.
+export const issueLiveTicket = () =>
+  req<{ ticket: string; expires_in: number }>("/api/connections/live-ticket", {
+    method: "POST",
+  });
+
+/// Build the ws(s):// URL for the live feed from a ticket.
+export function liveSocketUrl(ticket: string): string {
+  let origin = BASE;
+  if (!origin && typeof window !== "undefined") origin = window.location.origin;
+  const wsOrigin = origin.replace(/^http/, "ws");
+  return `${wsOrigin}/api/connections/live?ticket=${encodeURIComponent(ticket)}`;
+}
+
 // ── Tunnels ───────────────────────────────────────────────────────
 interface BackendTunnel {
   tunnel_id: string;
