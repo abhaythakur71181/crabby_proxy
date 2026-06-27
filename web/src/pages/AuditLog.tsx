@@ -52,7 +52,7 @@ export default function AuditLog() {
                   <>
                     <TableRow key={e.id} className="border-border/30 cursor-pointer hover:bg-secondary/30" onClick={() => setExpanded(expanded === e.id ? null : e.id)}>
                       <TableCell className="font-mono text-muted-foreground">{e.id}</TableCell>
-                      <TableCell className="text-sm text-primary">{e.username}</TableCell>
+                      <TableCell className="text-sm text-primary">{e.username ?? `User #${e.user_id}`}</TableCell>
                       <TableCell><span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${actionColors[e.action] || 'bg-muted text-muted-foreground'}`}>{e.action}</span></TableCell>
                       <TableCell className="text-xs">{e.target_type}:{e.target_id}</TableCell>
                       <TableCell className="font-mono text-xs">{e.ip_address}</TableCell>
