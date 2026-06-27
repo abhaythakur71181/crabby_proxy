@@ -307,6 +307,14 @@ Four root patterns drive most findings:
 - [ ] **R3-M14** Argon2 explicit params + pepper; stronger password/username policy.
 - [ ] **R3-MISC** L3 relay error byte-accounting; L4 quota `saturating_add` + skip-when-unlimited; L6 DNS eviction off hot path; L7 EC key support + cert file-watch; L8 cargo-chef Docker layer; M9 quota-0 semantics; M10/M11 throttle staleness + bucket direction; M16 reload 500-on-fail; M18 block default passwords; M20 wire/remove middleware chain; M21 tunnel port TOCTOU + unwrap; M22 CORS strict origin parse.
 
-## STATUS: Round 3 — Phase 1+2 COMPLETE; Phase 3 backend mostly done.
-Done: C1-C4, H1(partial), H2, H3, H4, H5, H6, H8, H10(partial), H11, H12, H14(relay), H16, M1/M2, M3, M4, M16, M18, M19. 443 unit + 7 integration green; rustfmt-clean. 11 commits on fix/audit-r3-criticals.
-REMAINING: frontend H13/M23/M24 (separate stack); M5/M6/M7 (event bus reconnect, memory backend parity, redis conn-set TTL); H7 (pool decision); H1 token_version; more H14 (event_bus/tunnel/webhook/redis tests, e2e, fuzz); L-tier (clippy cleanup→flip CI gate, ClientStream box, docs/ADRs).
+## STATUS: Round 3 — Phases 1, 2, 3 substantially COMPLETE. 15 commits on fix/audit-r3-criticals; 443 unit + 7 integration green; rustfmt-clean; clippy -D warnings enforced in CI.
+DONE: C1, C2, C3, C4, H1(partial), H2, H3, H4, H5, H6, H7(n/a — see note), H8, H10(partial), H11, H12, H13(partial), H14(relay), H16, M1, M2, M3, M4, M5, M6, M7, M16, M18, M19, M24, L10(clippy).
+REMAINING (lower priority / larger):
+  - H1 token_version logout-revocation (needs migration + create_jwt change)
+  - H7 connection-pool: decide implement-return vs remove (currently dead but harmless)
+  - M23 frontend typed API + TS strict + error boundary; H13 localStorage→HttpOnly cookie (needs backend cookie auth); M24 route code-splitting
+  - M9 quota-0 semantics, M10/M11 throttle staleness+bucket direction, M21 tunnel TOCTOU, M22 CORS strict parse
+  - H14 more tests (event_bus/tunnel/webhook/redis, e2e auth/quota, parser fuzz); web Playwright
+  - PERF: L1 box ClientStream, L2 buffers, L5 Arc config; L3/L4/L6/L7/L8
+  - DOCS: ARCHITECTURE.md + ADRs + runbooks; README test count/license
+  - H6 follow-ups: month-rollover, forward-path usage persistence
