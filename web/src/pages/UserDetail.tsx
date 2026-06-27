@@ -57,7 +57,12 @@ export default function UserDetail() {
 
   const deleteMut = useMutation({
     mutationFn: () => api.deleteUser(userId),
-    onSuccess: () => { toast.success('User deleted'); navigate('/users'); },
+    onSuccess: () => { toast.success('User deactivated'); navigate('/users'); },
+  });
+
+  const reactivateMut = useMutation({
+    mutationFn: () => api.updateUser(userId, { is_active: true }),
+    onSuccess: () => { toast.success('User reactivated'); qc.invalidateQueries({ queryKey: ['user', userId] }); },
   });
 
   const updateMut = useMutation({
@@ -105,7 +110,11 @@ export default function UserDetail() {
         {isAdmin && (
           <div className="flex gap-2">
             <Button variant="outline" size="sm" onClick={() => { setEditData({ role: user.role, max_connections: user.max_connections, bandwidth_limit_mb: user.bandwidth_limit_mb, is_active: user.is_active }); setEditOpen(true); }}>Edit</Button>
-            {authUser?.id !== user.id && <Button variant="destructive" size="sm" onClick={() => setDeleteOpen(true)}><Trash2 className="h-4 w-4" /></Button>}
+            {authUser?.id !== user.id && (
+              user.is_active
+                ? <Button variant="destructive" size="sm" onClick={() => setDeleteOpen(true)} title="Deactivate user"><Trash2 className="h-4 w-4" /></Button>
+                : <Button variant="default" size="sm" onClick={() => reactivateMut.mutate()} disabled={reactivateMut.isPending}>Reactivate</Button>
+            )}
           </div>
         )}
       </div>
@@ -301,10 +310,10 @@ export default function UserDetail() {
       {/* Delete Dialog */}
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <DialogContent>
-          <DialogHeader><DialogTitle>Delete User</DialogTitle><DialogDescription>Are you sure you want to delete <strong>{user.username}</strong>? This cannot be undone.</DialogDescription></DialogHeader>
+          <DialogHeader><DialogTitle>Deactivate User</DialogTitle><DialogDescription>Deactivate <strong>{user.username}</strong>? This disables their account, API keys, and active sessions. You can reactivate them later from this page.</DialogDescription></DialogHeader>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDeleteOpen(false)}>Cancel</Button>
-            <Button variant="destructive" onClick={() => deleteMut.mutate()} disabled={deleteMut.isPending}>Delete</Button>
+            <Button variant="destructive" onClick={() => deleteMut.mutate()} disabled={deleteMut.isPending}>Deactivate</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
