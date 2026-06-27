@@ -1,16 +1,20 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { motion } from "framer-motion";
-import { Activity, Cable, Clock, Database, Gauge, Users as UsersIcon } from "lucide-react";
+import { Activity, Cable, Clock, Gauge } from "lucide-react";
+import { useEffect, useState } from "react";
 import { Panel, PanelHeader } from "@/components/app/card";
 import { PageHeader } from "@/components/app/page-header";
 import { AnimatedCounter } from "@/components/app/animated-counter";
-import { Sparkline, makeSeries } from "@/components/app/sparkline";
 import { Mono } from "@/components/app/mono";
 import { Pill } from "@/components/app/badge";
 import { StatusDot } from "@/components/app/status-dot";
-import { useAudit, useSystemStats, useUsers } from "@/lib/queries";
+import {
+  useAudit,
+  useDashboard,
+  useUserMap,
+  useUsageTimeseries,
+} from "@/lib/queries";
 import { useLiveConnections } from "@/mock/live";
-import { useConnections } from "@/lib/queries";
 import { fmtBytes, fmtClockHMS, fmtRelative } from "@/lib/format";
 
 export const Route = createFileRoute("/_authenticated/dashboard")({
@@ -24,17 +28,35 @@ export const Route = createFileRoute("/_authenticated/dashboard")({
 });
 
 function DashboardPage() {
-  const { connections } = useConnections();
-  const { rows } = useLiveConnections(connections.slice(0, 8), 8);
-  const { data: stats } = useSystemStats();
-  const { users } = useUsers();
+  const { rows } = useLiveConnections([], 8);
+  const { data: dash } = useDashboard();
   const { entries: auditEntries } = useAudit(7);
+  const { data: ts } = useUsageTimeseries(1, "hour");
+  const nameOf = useUserMap();
 
-  const uptimeSeconds = stats?.uptime_seconds ?? 0;
-  const activeConnections = stats?.active_connections ?? 0;
-  const totalConnections = stats?.total_connections ?? 0;
-  const bytesSent24h = stats?.bytes_sent_24h ?? 0;
-  const bytesReceived24h = stats?.bytes_received_24h ?? 0;
+  const activeConnections = dash?.active_connections ?? 0;
+  const totalConnections = dash?.total_connections ?? 0;
+  const bytesSent = dash?.bytes_sent ?? 0;
+  const bytesReceived = dash?.bytes_received ?? 0;
+  const bandwidth24h = dash?.bandwidth_24h ?? 0;
+  const topUsers = dash?.top_users_24h ?? [];
+
+  // Live uptime clock: rebase from the server value on each poll, tick locally.
+  const [uptime, setUptime] = useState(0);
+  useEffect(() => {
+    if (dash?.uptime_seconds == null) return;
+    const base = dash.uptime_seconds;
+    const start = Date.now();
+    setUptime(base);
+    const id = window.setInterval(
+      () => setUptime(base + Math.floor((Date.now() - start) / 1000)),
+      1000,
+    );
+    return () => window.clearInterval(id);
+  }, [dash?.uptime_seconds]);
+
+  const tsPoints = ts?.points ?? [];
+  const maxBucket = Math.max(1, ...tsPoints.map((p) => p.bytes_sent + p.bytes_received));
 
   return (
     <div className="mx-auto w-full max-w-[1400px] px-6 py-8 lg:px-10">
@@ -55,16 +77,8 @@ function DashboardPage() {
         <KpiTile
           icon={<Clock className="size-4" />}
           label="Uptime"
-          value={
-            <Mono>
-              <AnimatedCounter
-                value={uptimeSeconds}
-                format={(n) => fmtClockHMS(Math.round(n))}
-              />
-            </Mono>
-          }
-          hint="4d 15h 37m"
-          spark={makeSeries(24, 80, 8)}
+          value={<Mono>{fmtClockHMS(uptime)}</Mono>}
+          hint="since last restart"
         />
         <KpiTile
           icon={<Cable className="size-4" />}
@@ -74,8 +88,7 @@ function DashboardPage() {
               <AnimatedCounter value={activeConnections} />
             </Mono>
           }
-          hint={<span className="text-[var(--success)]">+12% vs 1h ago</span>}
-          spark={makeSeries(24, 50, 35)}
+          hint="live"
           glow
         />
         <KpiTile
@@ -86,22 +99,17 @@ function DashboardPage() {
               <AnimatedCounter value={totalConnections} />
             </Mono>
           }
-          hint="rolling 7-day"
-          spark={makeSeries(24, 120, 50)}
+          hint="since start"
         />
         <KpiTile
           icon={<Gauge className="size-4" />}
           label="Bandwidth · 24h"
           value={
             <Mono>
-              <AnimatedCounter
-                value={bytesSent24h + bytesReceived24h}
-                format={(n) => fmtBytes(Math.round(n))}
-              />
+              <AnimatedCounter value={bandwidth24h} format={(n) => fmtBytes(Math.round(n))} />
             </Mono>
           }
-          hint="peak 184 MB/s"
-          spark={makeSeries(24, 70, 40)}
+          hint="rolling 24 hours"
         />
       </section>
 
@@ -110,7 +118,7 @@ function DashboardPage() {
         <Panel className="lg:col-span-2">
           <PanelHeader
             title="Bandwidth breakdown"
-            hint="rolling 24 hours"
+            hint="total since start"
             action={
               <div className="flex items-center gap-4 text-[10px] uppercase tracking-wider text-muted-foreground">
                 <span className="flex items-center gap-1.5">
@@ -123,51 +131,49 @@ function DashboardPage() {
             }
           />
           <div className="grid grid-cols-2 gap-6 px-5 py-6">
-            <BandwidthBar
-              tone="violet"
-              label="Sent"
-              bytes={bytesSent24h}
-              max={bytesReceived24h}
-            />
-            <BandwidthBar
-              tone="cyan"
-              label="Received"
-              bytes={bytesReceived24h}
-              max={bytesReceived24h}
-            />
+            <BandwidthBar tone="violet" label="Sent" bytes={bytesSent} max={Math.max(bytesSent, bytesReceived)} />
+            <BandwidthBar tone="cyan" label="Received" bytes={bytesReceived} max={Math.max(bytesSent, bytesReceived)} />
           </div>
           <div className="px-5 pb-5">
-            <div className="flex h-32 items-end gap-1.5">
-              {makeSeries(48, 60, 30).map((v, i) => (
-                <motion.div
-                  key={i}
-                  initial={{ height: 0 }}
-                  animate={{ height: `${Math.max(8, v)}%` }}
-                  transition={{ delay: i * 0.012, duration: 0.6, ease: [0.16, 1, 0.3, 1] }}
-                  className="flex-1 rounded-t bg-gradient-to-t from-[var(--accent-violet)]/30 to-[var(--accent-violet)]/80"
-                />
-              ))}
+            <div className="mb-2 text-[10px] uppercase tracking-wider text-muted-foreground">
+              Traffic · last 24h (hourly)
             </div>
-            <div className="mt-2 flex justify-between text-[10px] font-mono-tight text-muted-foreground">
-              <span>00:00</span>
-              <span>06:00</span>
-              <span>12:00</span>
-              <span>18:00</span>
-              <span className="text-[var(--accent-violet)]">NOW</span>
-            </div>
+            {tsPoints.length === 0 ? (
+              <div className="flex h-32 items-center justify-center text-xs text-muted-foreground">
+                No traffic recorded in the last 24 hours.
+              </div>
+            ) : (
+              <div className="flex h-32 items-end gap-1.5">
+                {tsPoints.map((p) => {
+                  const total = p.bytes_sent + p.bytes_received;
+                  const h = Math.max(4, Math.round((total / maxBucket) * 100));
+                  return (
+                    <motion.div
+                      key={p.ts}
+                      title={`${fmtBytes(total)} · ${p.connections} conns`}
+                      initial={{ height: 0 }}
+                      animate={{ height: `${h}%` }}
+                      transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
+                      className="flex-1 rounded-t bg-gradient-to-t from-[var(--accent-violet)]/30 to-[var(--accent-violet)]/80"
+                    />
+                  );
+                })}
+              </div>
+            )}
           </div>
         </Panel>
 
         <Panel>
           <PanelHeader title="Top users · 24h" hint="by bandwidth" />
-          <ul className="divide-y divide-white/[0.05]">
-            {users
-              .slice()
-              .sort((a, b) => b.bandwidth_used_mb - a.bandwidth_used_mb)
-              .slice(0, 6)
-              .map((u, i) => (
+          {topUsers.length === 0 ? (
+            <div className="px-5 py-10 text-center text-xs text-muted-foreground">
+              No usage in the last 24 hours.
+            </div>
+          ) : (
+            <ul className="divide-y divide-white/[0.05]">
+              {topUsers.slice(0, 6).map((u, i) => (
                 <motion.li
-                  key={u.id}
+                  key={u.user_id}
                   initial={{ opacity: 0, x: -8 }}
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: i * 0.05 }}
@@ -177,19 +183,16 @@ function DashboardPage() {
                     {String(i + 1).padStart(2, "0")}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-xs font-medium text-foreground">
-                      {u.username}
-                    </div>
+                    <div className="truncate text-xs font-medium text-foreground">{nameOf(u.user_id)}</div>
                     <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                      {u.role}
+                      {u.connections} conns
                     </div>
                   </div>
-                  <Mono className="text-[11px] text-foreground/80">
-                    {fmtBytes(u.bandwidth_used_mb * 1_000_000)}
-                  </Mono>
+                  <Mono className="text-[11px] text-foreground/80">{fmtBytes(u.bandwidth)}</Mono>
                 </motion.li>
               ))}
-          </ul>
+            </ul>
+          )}
         </Panel>
       </section>
 
@@ -198,7 +201,7 @@ function DashboardPage() {
         <Panel className="lg:col-span-2">
           <PanelHeader
             title="Live connections"
-            hint="streaming · simulated"
+            hint="streaming · live"
             action={
               <Pill variant="success">
                 <StatusDot tone="success" /> streaming
@@ -253,7 +256,7 @@ function DashboardPage() {
                 />
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-xs">
-                    <span className="text-foreground">{a.actor}</span>{" "}
+                    <span className="text-foreground">{nameOf(a.actor_id)}</span>{" "}
                     <span className="text-muted-foreground">{a.action}</span>{" "}
                     <Mono className="text-foreground/70">{a.target}</Mono>
                   </div>
@@ -275,14 +278,12 @@ function KpiTile({
   label,
   value,
   hint,
-  spark,
   glow,
 }: {
   icon: React.ReactNode;
   label: string;
   value: React.ReactNode;
   hint?: React.ReactNode;
-  spark?: number[];
   glow?: boolean;
 }) {
   return (
@@ -293,7 +294,6 @@ function KpiTile({
       </div>
       <div className="mt-3 flex items-end justify-between gap-2">
         <div className="text-[28px] font-semibold leading-none tracking-tight">{value}</div>
-        {spark && <Sparkline data={spark} width={88} height={28} />}
       </div>
       {hint && <div className="mt-2 text-[10px] font-mono-tight text-muted-foreground">{hint}</div>}
     </Panel>

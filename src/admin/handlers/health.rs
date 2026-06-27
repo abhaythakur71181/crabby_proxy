@@ -52,8 +52,10 @@ pub struct ComponentHealth {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
-    /// How long this component's probe took, in milliseconds.
-    pub latency_ms: u64,
+    /// How long this component's probe took, in milliseconds (fractional — a
+    /// fast local SQLite/Redis probe is well under 1ms, so integer ms always
+    /// read as 0).
+    pub latency_ms: f64,
     /// Unix timestamp the probe ran (so the UI can show "last checked").
     pub checked_at: i64,
 }
@@ -68,13 +70,13 @@ pub async fn deep_health_check(State(state): State<Arc<AppState>>) -> Json<DeepH
         Ok(_) => ComponentHealth {
             status: "ok".to_string(),
             detail: None,
-            latency_ms: t.elapsed().as_millis() as u64,
+            latency_ms: t.elapsed().as_micros() as f64 / 1000.0,
             checked_at: now,
         },
         Err(e) => ComponentHealth {
             status: "error".to_string(),
             detail: Some(e.to_string()),
-            latency_ms: t.elapsed().as_millis() as u64,
+            latency_ms: t.elapsed().as_micros() as f64 / 1000.0,
             checked_at: now,
         },
     };
@@ -85,13 +87,13 @@ pub async fn deep_health_check(State(state): State<Arc<AppState>>) -> Json<DeepH
         Ok(_) => ComponentHealth {
             status: "ok".to_string(),
             detail: None,
-            latency_ms: t.elapsed().as_millis() as u64,
+            latency_ms: t.elapsed().as_micros() as f64 / 1000.0,
             checked_at: now,
         },
         Err(e) => ComponentHealth {
             status: "error".to_string(),
             detail: Some(e.to_string()),
-            latency_ms: t.elapsed().as_millis() as u64,
+            latency_ms: t.elapsed().as_micros() as f64 / 1000.0,
             checked_at: now,
         },
     };
@@ -105,7 +107,7 @@ pub async fn deep_health_check(State(state): State<Arc<AppState>>) -> Json<DeepH
             "{} entries, {} addresses cached",
             dns_entries, dns_addrs
         )),
-        latency_ms: t.elapsed().as_millis() as u64,
+        latency_ms: t.elapsed().as_micros() as f64 / 1000.0,
         checked_at: now,
     };
 

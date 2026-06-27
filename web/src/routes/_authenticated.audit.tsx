@@ -7,7 +7,7 @@ import { PageHeader } from "@/components/app/page-header";
 import { Pill } from "@/components/app/badge";
 import { StatusDot } from "@/components/app/status-dot";
 import { Mono } from "@/components/app/mono";
-import { useAudit } from "@/lib/queries";
+import { useAudit, useUserMap } from "@/lib/queries";
 import { fmtRelative } from "@/lib/format";
 
 export const Route = createFileRoute("/_authenticated/audit")({
@@ -21,6 +21,7 @@ function AuditPage() {
   const [q, setQ] = useState("");
   const [out, setOut] = useState<(typeof OUTCOMES)[number]>("all");
   const { entries } = useAudit(100);
+  const nameOf = useUserMap();
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
@@ -79,7 +80,7 @@ function AuditPage() {
               className="grid grid-cols-[140px_120px_180px_1fr_120px_90px] items-center gap-3 px-5 py-2.5 text-xs hover:bg-white/[0.03]"
             >
               <span className="text-muted-foreground">{fmtRelative(a.ts)}</span>
-              <span className="truncate">{a.actor}</span>
+              <span className="truncate">{nameOf(a.actor_id)}</span>
               <Mono className="text-[11px] text-foreground/85">{a.action}</Mono>
               <span className="truncate">
                 <Mono className="text-[11px] text-foreground/70">{a.target}</Mono>
