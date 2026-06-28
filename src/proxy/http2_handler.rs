@@ -19,6 +19,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
+/// Max concurrent client-initiated streams per h2 connection. Without this an
+/// h2 client can open unbounded multiplexed streams, each spawning an upstream
+/// task, evading the per-TCP-connection limit (DoS).
+const MAX_H2_CONCURRENT_STREAMS: u32 = 256;
+
+/// Hard cap on a buffered forward request/response body. The non-CONNECT
+/// forward path buffers bodies in memory, so an unbounded body would OOM the
+/// process; cap it and reject oversized payloads.
+const MAX_H2_FORWARD_BODY_BYTES: usize = 16 * 1024 * 1024;
+
 /// Handle a full HTTP/2 connection.
 ///
 /// This function:
@@ -33,7 +43,11 @@ pub async fn handle_h2_connection(
     state_arc: Arc<AppState>,
 ) {
     let state = &*state_arc;
-    let mut h2 = match h2::server::handshake(stream).await {
+    let mut h2 = match h2::server::Builder::new()
+        .max_concurrent_streams(MAX_H2_CONCURRENT_STREAMS)
+        .handshake::<_, bytes::Bytes>(stream)
+        .await
+    {
         Ok(conn) => conn,
         Err(e) => {
             tracing::error!("[HTTP2] Handshake failed for {}: {}", client_addr, e);
@@ -868,6 +882,19 @@ async fn handle_h2_forward_validated(
         match chunk {
             Ok(data) => {
                 let _ = recv_stream.flow_control().release_capacity(data.len());
+                if body_data.len() + data.len() > MAX_H2_FORWARD_BODY_BYTES {
+                    tracing::warn!(
+                        "[HTTP2-FWD] {} request body exceeds {} bytes — rejecting",
+                        client_addr,
+                        MAX_H2_FORWARD_BODY_BYTES
+                    );
+                    let resp = http::Response::builder()
+                        .status(http::StatusCode::PAYLOAD_TOO_LARGE)
+                        .body(())
+                        .unwrap_or_else(|_| http::Response::new(()));
+                    let _ = respond.send_response(resp, true);
+                    return;
+                }
                 body_data.extend_from_slice(&data);
             }
             Err(e) => {
@@ -911,7 +938,7 @@ async fn handle_h2_forward_validated(
 
     let started_at = std::time::Instant::now();
     match upstream_req.send().await {
-        Ok(upstream_resp) => {
+        Ok(mut upstream_resp) => {
             let status = upstream_resp.status();
             let mut builder = http::Response::builder().status(status.as_u16());
 
@@ -922,7 +949,44 @@ async fn handle_h2_forward_validated(
                 }
             }
 
-            let resp_body = upstream_resp.bytes().await.unwrap_or_default();
+            // Read the response body with a hard cap so a large/chunked upstream
+            // response can't grow unbounded in memory.
+            let mut buf: Vec<u8> = Vec::new();
+            let mut too_large = false;
+            loop {
+                match upstream_resp.chunk().await {
+                    Ok(Some(chunk)) => {
+                        if buf.len() + chunk.len() > MAX_H2_FORWARD_BODY_BYTES {
+                            too_large = true;
+                            break;
+                        }
+                        buf.extend_from_slice(&chunk);
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::error!("[HTTP2-FWD] Error reading upstream body: {}", e);
+                        let resp = http::Response::builder()
+                            .status(http::StatusCode::BAD_GATEWAY)
+                            .body(())
+                            .unwrap_or_else(|_| http::Response::new(()));
+                        let _ = respond.send_response(resp, true);
+                        return;
+                    }
+                }
+            }
+            if too_large {
+                tracing::warn!(
+                    "[HTTP2-FWD] upstream response exceeds {} bytes — rejecting",
+                    MAX_H2_FORWARD_BODY_BYTES
+                );
+                let resp = http::Response::builder()
+                    .status(http::StatusCode::BAD_GATEWAY)
+                    .body(())
+                    .unwrap_or_else(|_| http::Response::new(()));
+                let _ = respond.send_response(resp, true);
+                return;
+            }
+            let resp_body = bytes::Bytes::from(buf);
             let bytes_transferred = resp_body.len() as u64;
             let response = builder.body(()).unwrap_or_else(|_| http::Response::new(()));
 
