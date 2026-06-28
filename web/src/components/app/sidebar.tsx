@@ -64,7 +64,7 @@ const groups: { id: string; title: string; items: Item[] }[] = [
 export function Sidebar() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const admin = isAdmin();
-  const { data: stats } = useSystemStats();
+  const { data: stats } = useSystemStats(10000, admin);
   const visibleGroups = groups
     .map((g) => ({ ...g, items: g.items.filter((it) => admin || !it.adminOnly) }))
     .filter((g) => g.items.length > 0);
