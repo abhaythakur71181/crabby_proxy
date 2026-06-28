@@ -144,6 +144,7 @@ pub struct UserStats {
 #[derive(Debug, Serialize)]
 pub struct ApiKeyResponse {
     pub id: i64,
+    pub name: String,
     pub prefix: String,
     pub created_at: i64,
     pub last_used_at: Option<i64>,
@@ -155,6 +156,7 @@ impl From<ApiKey> for ApiKeyResponse {
     fn from(key: ApiKey) -> Self {
         Self {
             id: key.id,
+            name: key.name,
             prefix: key.prefix,
             created_at: key.created_at,
             last_used_at: key.last_used_at,

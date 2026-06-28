@@ -152,38 +152,74 @@ export const deleteUser = (id: number) =>
 // ── API keys ──────────────────────────────────────────────────────
 interface BackendApiKey {
   id: number;
-  user_id: number;
+  user_id?: number;
   name: string;
-  key_prefix: string;
+  prefix: string;
   created_at: number;
   expires_at: number | null;
   last_used_at: number | null;
   is_active: boolean;
 }
-const adaptKey = (k: BackendApiKey, username: string): ApiKey => ({
+const adaptKey = (k: BackendApiKey, userId: number, username: string): ApiKey => ({
   id: String(k.id),
-  name: k.name,
-  user_id: k.user_id,
+  name: k.name || "(unnamed)",
+  user_id: k.user_id ?? userId,
   username,
-  prefix: k.key_prefix,
+  prefix: k.prefix,
   last_used_at: iso(k.last_used_at),
   created_at: isoReq(k.created_at),
   expires_at: iso(k.expires_at),
 });
 export async function listApiKeys(userId: number, username = ""): Promise<ApiKey[]> {
   const r = await req<BackendApiKey[]>(`/api/users/${userId}/api-keys`);
-  return r.map((k) => adaptKey(k, username));
+  return r.map((k) => adaptKey(k, userId, username));
 }
+/// Create a key — backend returns { key (full, once), details }.
 export const createApiKey = (
   userId: number,
   body: { name: string; expires_in_days?: number },
 ) =>
-  req<{ key: string } & BackendApiKey>(`/api/users/${userId}/api-keys`, {
+  req<{ key: string; details: BackendApiKey }>(`/api/users/${userId}/api-keys`, {
     method: "POST",
     body: JSON.stringify(body),
   });
 export const revokeApiKey = (userId: number, keyId: string | number) =>
   req<void>(`/api/users/${userId}/api-keys/${keyId}`, { method: "DELETE" });
+
+// ── User sub-resources (for the admin user-detail view) ──────────────
+export interface UserUsage {
+  user_id: number;
+  period_days: number;
+  connection_count: number;
+  bytes_sent: number;
+  bytes_received: number;
+  total_bandwidth: number;
+}
+export const getUserUsage = (id: number) => req<UserUsage>(`/api/users/${id}/usage`);
+
+export interface UserQuota {
+  user_id: number;
+  quota_bytes: number | null;
+  used_bytes: number;
+  remaining_bytes: number | null;
+  percentage_used: number | null;
+}
+export const getUserQuota = (id: number) => req<UserQuota>(`/api/users/${id}/quota`);
+export const updateUserQuota = (id: number, quota_bytes: number | null) =>
+  req<unknown>(`/api/users/${id}/quota`, { method: "PUT", body: JSON.stringify({ quota_bytes }) });
+
+export interface UserSession {
+  id: number;
+  user_id: number;
+  created_at: number;
+  expires_at: number;
+  ip_address: string | null;
+  user_agent: string | null;
+}
+export const getUserSessions = (id: number) =>
+  req<UserSession[]>(`/api/users/${id}/sessions`);
+export const deleteUserSessions = (id: number) =>
+  req<unknown>(`/api/users/${id}/sessions`, { method: "DELETE" });
 
 // ── Connections ───────────────────────────────────────────────────
 interface BackendConn {
@@ -388,6 +424,23 @@ export const createGroup = (body: { name: string; description?: string }) =>
   req<unknown>("/api/groups", { method: "POST", body: JSON.stringify(body) });
 export const deleteGroup = (id: number) =>
   req<void>(`/api/groups/${id}`, { method: "DELETE" });
+
+export interface GroupMember {
+  user_id: number;
+  username: string;
+  role: string;
+}
+export async function listGroupMembers(groupId: number): Promise<GroupMember[]> {
+  const r = await req<{ members: GroupMember[] }>(`/api/groups/${groupId}/members`);
+  return r.members ?? [];
+}
+export const addGroupMember = (groupId: number, userId: number) =>
+  req<unknown>(`/api/groups/${groupId}/members`, {
+    method: "POST",
+    body: JSON.stringify({ user_id: userId }),
+  });
+export const removeGroupMember = (groupId: number, userId: number) =>
+  req<void>(`/api/groups/${groupId}/members/${userId}`, { method: "DELETE" });
 
 // ── Audit ─────────────────────────────────────────────────────────
 interface BackendAudit {

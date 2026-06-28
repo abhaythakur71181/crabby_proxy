@@ -5,13 +5,14 @@ import { StatusDot } from "./status-dot";
 import { useTicker } from "@/mock/live";
 import { useSystemStats } from "@/lib/queries";
 import { fmtClockHMS } from "@/lib/format";
-import { signOut } from "@/lib/auth";
+import { signOut, isAdmin } from "@/lib/auth";
 import { useCommandPalette } from "./command-palette";
 
 export function TopBar({ crumbs }: { crumbs: { label: string; to?: string }[] }) {
   const router = useRouter();
   const open = useCommandPalette((s) => s.open);
-  const { data: stats } = useSystemStats();
+  const admin = isAdmin();
+  const { data: stats } = useSystemStats(10000, admin); // admin-only /api/dashboard
   const now = stats?.active_connections ?? 0;
   // Tick the uptime clock forward between server polls.
   const tick = useTicker(1000);
@@ -49,7 +50,7 @@ export function TopBar({ crumbs }: { crumbs: { label: string; to?: string }[] })
           </span>
         </button>
 
-        <div className="hidden items-center gap-2.5 rounded-full border border-[var(--accent-violet)]/25 bg-[var(--accent-violet-soft)] px-3 py-1.5 md:flex">
+        <div className={(admin ? "hidden md:flex" : "hidden") + " items-center gap-2.5 rounded-full border border-[var(--accent-violet)]/25 bg-[var(--accent-violet-soft)] px-3 py-1.5"}>
           <StatusDot tone="violet" />
           <Mono className="text-[11px] font-semibold uppercase tracking-wider text-[var(--accent-violet)]">
             {now} active

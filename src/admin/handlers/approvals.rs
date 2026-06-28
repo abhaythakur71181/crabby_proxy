@@ -70,10 +70,10 @@ pub async fn create_approval(
         Some("approval"),
         Some(&id.to_string()),
         Some(&format!(
-            "User {}, IP: {}, duration: {}h",
-            payload.user_id, payload.client_ip, payload.duration_hours
+            "User {}, duration: {}h",
+            payload.user_id, payload.duration_hours
         )),
-        None,
+        Some(&payload.client_ip),
     )
     .await;
 
