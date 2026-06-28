@@ -91,15 +91,23 @@ export function useConfig() {
   return useQuery({ queryKey: ["config"], queryFn: api.getConfig });
 }
 
-export function useDashboard(pollMs = 10000) {
-  return useQuery({ queryKey: ["dashboard"], queryFn: api.getDashboard, refetchInterval: pollMs });
+export function useDashboard(pollMs = 10000, enabled = true) {
+  return useQuery({
+    queryKey: ["dashboard"],
+    queryFn: api.getDashboard,
+    refetchInterval: pollMs,
+    enabled,
+  });
 }
 
-export function useSystemStats(pollMs = 10000) {
+// `enabled` lets admin-only chrome (topbar/sidebar) skip the admin-only
+// /api/dashboard call for non-admin users (which would 403).
+export function useSystemStats(pollMs = 10000, enabled = true) {
   return useQuery({
     queryKey: ["system-stats"],
     queryFn: api.getSystemStats,
     refetchInterval: pollMs,
+    enabled,
   });
 }
 

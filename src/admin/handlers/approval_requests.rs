@@ -103,11 +103,8 @@ pub async fn create_request(
         "approval_request_created",
         Some("approval_request"),
         Some(&id.to_string()),
-        Some(&format!(
-            "IP: {}, duration: {}h",
-            payload.client_ip, payload.duration_hours
-        )),
-        None,
+        Some(&format!("duration: {}h", payload.duration_hours)),
+        Some(&payload.client_ip),
     )
     .await;
 
@@ -180,7 +177,7 @@ pub async fn approve_request(
                 Some("approval_request"),
                 Some(&request_id.to_string()),
                 Some(&format!("Approved for user {}", r.user_id)),
-                None,
+                Some(&r.client_ip),
             )
             .await;
             Ok(Json(serde_json::json!({

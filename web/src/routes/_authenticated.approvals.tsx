@@ -74,6 +74,7 @@ function ApprovalsPage() {
     onSuccess: () => {
       toast.success("Grant terminated");
       setTermReason("");
+      setActiveId(null);
       invalidate(["approval-requests", "approvals"]);
     },
     onError: (e: unknown) => toast.error(e instanceof Error ? e.message : "Action failed"),
@@ -225,7 +226,7 @@ function ApprovalsPage() {
                 </p>
               </div>
 
-              {sel.status === "pending" && (
+              {admin && sel.status === "pending" && (
                 <div className="mt-6 flex items-center gap-2">
                   <button
                     onClick={() => decide(sel.id, true)}
