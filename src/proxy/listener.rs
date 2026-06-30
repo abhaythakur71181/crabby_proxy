@@ -425,23 +425,25 @@ async fn handle_client(
                 .with_label_values(&["received"])
                 .inc_by(bytes_received);
             if let Some(uid) = ctx.effective_uid() {
-                state.usage_writer.submit(crate::usage_writer::UsageRecord {
-                    user_id: uid,
-                    connection_id: conn_id,
-                    client_ip: client_ip_str.clone(),
-                    target_host: target_addr_str.clone(),
-                    protocol: proto_label.to_string(),
-                    started_at,
-                    ended_at,
-                    bytes_sent: bytes_sent as i64,
-                    bytes_received: bytes_received as i64,
-                    status: "success".to_string(),
-                });
                 state
-                    .track_bandwidth(uid, bytes_sent as i64 + bytes_received as i64)
+                    .usage_writer
+                    .submit(crate::usage_writer::UsageRecord {
+                        user_id: uid,
+                        connection_id: conn_id,
+                        client_ip: client_ip_str.clone(),
+                        target_host: target_addr_str.clone(),
+                        protocol: proto_label.to_string(),
+                        started_at,
+                        ended_at,
+                        bytes_sent: bytes_sent as i64,
+                        bytes_received: bytes_received as i64,
+                        status: "success".to_string(),
+                    })
                     .await;
-                // Quota cache invalidation removed — 30s DashMap TTL handles staleness.
-                // Explicit invalidation only occurs on admin quota changes via event bus.
+                // Persistence is the single source of truth for cumulative
+                // usage (the live quota tracker handles in-flight enforcement).
+                // The former Redis bandwidth counter was a write-only duplicate
+                // and has been removed.
             }
             crate::metrics::REQUESTS_TOTAL
                 .with_label_values(&[proto_label, "success"])
@@ -488,18 +490,21 @@ async fn handle_client(
                 "connection failed"
             );
             if let Some(uid) = ctx.effective_uid() {
-                state.usage_writer.submit(crate::usage_writer::UsageRecord {
-                    user_id: uid,
-                    connection_id: conn_id,
-                    client_ip: client_ip_str.clone(),
-                    target_host: target_addr_str.clone(),
-                    protocol: proto_label.to_string(),
-                    started_at,
-                    ended_at,
-                    bytes_sent: 0,
-                    bytes_received: 0,
-                    status: error_label.to_string(),
-                });
+                state
+                    .usage_writer
+                    .submit(crate::usage_writer::UsageRecord {
+                        user_id: uid,
+                        connection_id: conn_id,
+                        client_ip: client_ip_str.clone(),
+                        target_host: target_addr_str.clone(),
+                        protocol: proto_label.to_string(),
+                        started_at,
+                        ended_at,
+                        bytes_sent: 0,
+                        bytes_received: 0,
+                        status: error_label.to_string(),
+                    })
+                    .await;
             }
             if error_type != ErrorType::Tunnel {
                 let _ = send_error_response(&protocol, &mut stream, error_type).await;
