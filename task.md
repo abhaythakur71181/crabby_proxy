@@ -293,7 +293,7 @@ Four root patterns drive most findings:
 ## PHASE 3 — Next quarter (operability & trust)
 
 - [ ] **R3-H14** Tests: relay (`stream.rs` via `tokio::io::duplex`), listener, event_bus, tunnel, webhook; e2e auth/quota rejection; parser fuzzing; web login+CRUD Playwright.
-- [ ] **R3-M3/M4/M19** Config-reload validation (reject security downgrades, run env overrides + secret check); wire `RUST_LOG`/`config.logging.level` (drop hardcoded TRACE); harden Docker/compose exposure (`/metrics`, admin bind).
+- [x] **R3-M3/M4/M19** M3: `reload_config` preserves security-critical fields (jwt_secret, passwords, auth_enabled, bind addrs) from the running config and warns if the file tries to change them — a runtime edit can't disable auth or rotate the signing key. M4: logging now uses `EnvFilter` honoring `RUST_LOG` (default info), dropping the hardcoded TRACE. M19: compose binds admin port to `127.0.0.1` by default (`ADMIN_BIND_HOST` to override); healthcheck hits `/health` not `/metrics`. Also M16 (reload handler returns 500 on failure, no raw-error leak) and M18 (default admin/basic passwords now refuse boot unless `CRABBY_ALLOW_DEFAULT_PASSWORDS=1`).
 - [ ] **R3-M5/M6/M7** Event bus → Redis Streams w/ reconnect; memory backend parity for pending/approvals; TTL/prune the Redis connections set.
 - [ ] **R3-H7/H10** Decide connection-pool fate (implement return or remove); complete graceful shutdown (call `state.shutdown()`, drain tunnels, flush usage writer, cancel bg tasks).
 - [ ] **R3-H13/M23/M24** Frontend: https default + `HttpOnly` cookies + CSP/HSTS; error boundary + typed API + TS strict; code splitting + dedupe chart libs.

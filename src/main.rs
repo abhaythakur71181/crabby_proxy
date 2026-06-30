@@ -79,19 +79,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .install_default()
         .expect("failed to install rustls ring crypto provider");
 
+    // Honor RUST_LOG (e.g. "info", "crabby_proxy=debug,warn"); default to info.
+    // Previously the level was hardcoded to TRACE, which ignored RUST_LOG and
+    // flooded production logs (and could leak sensitive request data).
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     match args.log_format.as_str() {
         "json" => {
             tracing_subscriber::fmt()
                 .json()
-                .with_max_level(tracing::Level::TRACE)
+                .with_env_filter(env_filter)
                 .with_target(true)
                 .with_thread_ids(true)
                 .init();
         }
         _ => {
-            tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::TRACE)
-                .init();
+            tracing_subscriber::fmt().with_env_filter(env_filter).init();
         }
     }
 
