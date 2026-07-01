@@ -292,10 +292,10 @@ Four root patterns drive most findings:
 
 ## PHASE 3 — Next quarter (operability & trust)
 
-- [ ] **R3-H14** Tests: relay (`stream.rs` via `tokio::io::duplex`), listener, event_bus, tunnel, webhook; e2e auth/quota rejection; parser fuzzing; web login+CRUD Playwright.
+- [~] **R3-H14** Relay (`stream.rs`) now has 4 `tokio::io::duplex` tests (byte totals, both-direction relay, quota teardown, tracker boundary) + listener `peer_is_trusted_proxy` tests + `self_loop` egress tests. REMAINING: event_bus, tunnel manager, webhook, redis backend; e2e auth/quota rejection; parser fuzzing; web Playwright.
 - [x] **R3-M3/M4/M19** M3: `reload_config` preserves security-critical fields (jwt_secret, passwords, auth_enabled, bind addrs) from the running config and warns if the file tries to change them — a runtime edit can't disable auth or rotate the signing key. M4: logging now uses `EnvFilter` honoring `RUST_LOG` (default info), dropping the hardcoded TRACE. M19: compose binds admin port to `127.0.0.1` by default (`ADMIN_BIND_HOST` to override); healthcheck hits `/health` not `/metrics`. Also M16 (reload handler returns 500 on failure, no raw-error leak) and M18 (default admin/basic passwords now refuse boot unless `CRABBY_ALLOW_DEFAULT_PASSWORDS=1`).
 - [ ] **R3-M5/M6/M7** Event bus → Redis Streams w/ reconnect; memory backend parity for pending/approvals; TTL/prune the Redis connections set.
-- [ ] **R3-H7/H10** Decide connection-pool fate (implement return or remove); complete graceful shutdown (call `state.shutdown()`, drain tunnels, flush usage writer, cancel bg tasks).
+- [~] **R3-H7/H10** H10: graceful shutdown now calls `state.shutdown()` after the drain loop — tunnel listener tasks aborted + ports released. REMAINING: flush usage writer + cancel bg loops on shutdown; H7 connection-pool fate decision (implement return or remove) still open.
 - [ ] **R3-H13/M23/M24** Frontend: https default + `HttpOnly` cookies + CSP/HSTS; error boundary + typed API + TS strict; code splitting + dedupe chart libs.
 
 ## PHASE 4 — Long-term (hardening & scale)
@@ -306,5 +306,6 @@ Four root patterns drive most findings:
 - [ ] **R3-M14** Argon2 explicit params + pepper; stronger password/username policy.
 - [ ] **R3-MISC** L3 relay error byte-accounting; L4 quota `saturating_add` + skip-when-unlimited; L6 DNS eviction off hot path; L7 EC key support + cert file-watch; L8 cargo-chef Docker layer; M9 quota-0 semantics; M10/M11 throttle staleness + bucket direction; M16 reload 500-on-fail; M18 block default passwords; M20 wire/remove middleware chain; M21 tunnel port TOCTOU + unwrap; M22 CORS strict origin parse.
 
-## STATUS: Round 3 — Phase 1 + Phase 2 COMPLETE. Done: C1-C4, H1(partial), H2, H3, H4, H5, H6, H8, H11, H12, H16, M1/M2. 438 unit + 7 integration green; rustfmt-clean.
-Carried follow-ups: H1 token_version (logout/rotate revocation, needs migration); H6 month-rollover + forward-path usage persistence; H14 tests for new code. Next: Phase 3 (H14 tests, M3/M4/M19 config-reload+logging+exposure, frontend H13).
+## STATUS: Round 3 — Phase 1+2 COMPLETE; Phase 3 backend mostly done.
+Done: C1-C4, H1(partial), H2, H3, H4, H5, H6, H8, H10(partial), H11, H12, H14(relay), H16, M1/M2, M3, M4, M16, M18, M19. 443 unit + 7 integration green; rustfmt-clean. 11 commits on fix/audit-r3-criticals.
+REMAINING: frontend H13/M23/M24 (separate stack); M5/M6/M7 (event bus reconnect, memory backend parity, redis conn-set TTL); H7 (pool decision); H1 token_version; more H14 (event_bus/tunnel/webhook/redis tests, e2e, fuzz); L-tier (clippy cleanup→flip CI gate, ClientStream box, docs/ADRs).
