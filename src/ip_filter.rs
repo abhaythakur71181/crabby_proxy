@@ -102,7 +102,6 @@ impl IpFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{Ipv4Addr, Ipv6Addr};
 
     // === Original Tests (kept) ===
 

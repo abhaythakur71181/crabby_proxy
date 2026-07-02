@@ -498,6 +498,7 @@ fn parse_authority(authority: &str) -> Option<(String, u16)> {
 
 /// Handle the actual TCP tunnel for an HTTP/2 CONNECT stream.
 /// Returns (bytes_sent, bytes_received) on success.
+#[allow(clippy::too_many_arguments)]
 async fn handle_h2_tunnel(
     authority: &str,
     client_addr: SocketAddr,

@@ -134,7 +134,6 @@ impl Default for MiddlewareChain {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::SocketAddr;
 
     struct AlwaysAllow;
 
