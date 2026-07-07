@@ -194,10 +194,24 @@ pub async fn run_admin_server(
             .allow_headers([axum::http::header::CONTENT_TYPE])
             .allow_origin(Any)
     } else {
+        // Parse each origin; log loudly on a malformed entry instead of silently
+        // dropping it (a silent drop manifests later as a confusing "CORS broke"
+        // with no clue which entry was bad).
         let origins: Vec<_> = cors_origins
             .iter()
-            .filter_map(|o| o.parse::<axum::http::HeaderValue>().ok())
+            .filter_map(|o| match o.parse::<axum::http::HeaderValue>() {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tracing::error!("Ignoring invalid CORS origin '{}': {}", o, e);
+                    None
+                }
+            })
             .collect();
+        if origins.is_empty() {
+            tracing::error!(
+                "All configured CORS origins were invalid — admin API will reject cross-origin requests"
+            );
+        }
         tracing::info!("CORS allowed origins: {:?}", cors_origins);
         CorsLayer::new()
             .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
