@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::admin::auth::AdminUser;
 use crate::app_state::AppState;
 
 #[derive(Serialize, Deserialize)]
@@ -108,7 +109,7 @@ pub async fn deep_health_check(State(state): State<Arc<AppState>>) -> Json<DeepH
 }
 
 /// Server statistics endpoint
-pub async fn stats(State(state): State<Arc<AppState>>) -> Json<StatsResponse> {
+pub async fn stats(_admin: AdminUser, State(state): State<Arc<AppState>>) -> Json<StatsResponse> {
     let active_count = state.state.count_connections().await.unwrap_or(0);
     let total_count = state
         .state
@@ -166,7 +167,10 @@ pub struct TopUserDashboard {
 }
 
 /// GET /api/dashboard — Aggregate dashboard data in a single call
-pub async fn dashboard(State(state): State<Arc<AppState>>) -> Json<DashboardResponse> {
+pub async fn dashboard(
+    _admin: AdminUser,
+    State(state): State<Arc<AppState>>,
+) -> Json<DashboardResponse> {
     let active_count = state.state.count_connections().await.unwrap_or(0);
     let total_count = state
         .state
@@ -263,7 +267,10 @@ pub struct RateLimitStats {
 }
 
 /// GET /api/metrics — Structured JSON metrics for the dashboard UI
-pub async fn json_metrics(State(_state): State<Arc<AppState>>) -> Json<JsonMetricsResponse> {
+pub async fn json_metrics(
+    _admin: AdminUser,
+    State(_state): State<Arc<AppState>>,
+) -> Json<JsonMetricsResponse> {
     use prometheus::proto::MetricType;
 
     // Collect active connections by protocol
