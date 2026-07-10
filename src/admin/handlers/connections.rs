@@ -5,12 +5,14 @@ use crate::state::backend::ConnectionInfo;
 use axum::{
     extract::{
         ws::{Message, WebSocket},
-        State, WebSocketUpgrade,
+        Path, State, WebSocketUpgrade,
     },
+    http::StatusCode,
     response::IntoResponse,
     Json,
 };
 use std::sync::Arc;
+use uuid::Uuid;
 
 /// GET /api/connections - List all active connections
 pub async fn list_connections(
@@ -37,6 +39,30 @@ pub async fn count_connections(
             tracing::error!("Failed to count connections: {}", e);
             Err(ApiError::internal("Failed to count connections"))
         }
+    }
+}
+
+/// DELETE /api/connections/:id - Terminate a live connection (admin).
+/// Signals the relay to tear down and removes the tracked record. Returns 404
+/// if the connection isn't currently active on this instance.
+pub async fn terminate_connection(
+    _admin: AdminUser,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, ApiError> {
+    let known = state.conn_cancel.get(&id).map(|n| n.clone());
+    match known {
+        Some(notify) => {
+            notify.notify_waiters();
+            // Best-effort: drop the tracked record too (the relay also cleans up).
+            let _ = state.state.delete_connection(id).await;
+            tracing::info!(target: "audit", conn_id = %id, "admin terminated connection");
+            Ok(StatusCode::NO_CONTENT)
+        }
+        None => Err(ApiError::not_found(format!(
+            "Connection {} is not active on this instance",
+            id
+        ))),
     }
 }
 
