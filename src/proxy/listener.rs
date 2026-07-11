@@ -46,6 +46,7 @@ pub async fn run_proxy_server(state: Arc<AppState>, addr: SocketAddr) {
             // Accept new connections
             Ok((mut client_stream, client_addr)) = listener.accept() => {
                 let _ = client_stream.set_nodelay(true);
+                utils::enable_tcp_keepalive(&client_stream);
                 let permit = match semaphore.clone().try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => {
@@ -651,6 +652,7 @@ async fn async_handle_client_with_target(
             .observe(upstream_start.elapsed().as_secs_f64());
     }
     let _ = target_stream.set_nodelay(true);
+    utils::enable_tcp_keepalive(&target_stream);
     tracing::info!(
         "[{}]: Connection established to {} by {}",
         &protocol,
@@ -720,6 +722,13 @@ async fn async_handle_client_with_target(
         _ => None,
     };
 
+    // Idle timeout reaps half-open tunnels whose peer vanished without FIN/RST.
+    // 0 in config disables it.
+    let idle_timeout = match state.config.load().server.idle_timeout_secs {
+        0 => None,
+        secs => Some(Duration::from_secs(secs)),
+    };
+
     match crate::stream::create_throttled_tunnel(
         client_halves,
         target_halves,
@@ -728,6 +737,7 @@ async fn async_handle_client_with_target(
         throttler,
         quota_tracker,
         !is_admin,
+        idle_timeout,
     )
     .await
     {
