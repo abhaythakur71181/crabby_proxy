@@ -106,6 +106,45 @@ services:
         max-size: "10m"
         max-file: "5"
 
+  # Next-generation console (webv2) — static SPA behind nginx with a
+  # same-origin /api proxy (no CORS config needed on the backend). Runs
+  # alongside the legacy crabby-web during rollout.
+  crabby-webv2:
+    build:
+      context: ./webv2
+      dockerfile: Dockerfile
+      args:
+        BUN_VERSION: "1"
+    image: crabby-proxy-webv2:latest
+    container_name: crabby-proxy-webv2
+    restart: unless-stopped
+
+    depends_on:
+      crabby-proxy:
+        condition: service_healthy
+
+    ports:
+      - "${WEBV2_PORT:-3001}:8080"
+
+    security_opt:
+      - no-new-privileges:true
+
+    cap_drop:
+      - ALL
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
 volumes:
   crabby-data:
     driver: local
