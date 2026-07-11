@@ -55,23 +55,35 @@ pub async fn run_proxy_server(state: Arc<AppState>, addr: SocketAddr) {
                     }
                 };
 
-                // Parse PROXY protocol header if enabled (extracts real client IP)
-                let proxy_protocol_enabled = state.config.load().server.proxy_protocol_enabled;
-                let real_addr = if proxy_protocol_enabled {
-                    match crate::proxy_protocol::parse_proxy_protocol_v1(&mut client_stream).await {
-                        Ok(Some(addr)) => {
-                            tracing::debug!("PROXY protocol: real client {} (socket: {})", addr, client_addr);
-                            addr
+                // Parse PROXY protocol header only when enabled AND the immediate
+                // socket peer is a trusted upstream. An untrusted peer must never
+                // be able to forge its source IP (which drives IP/geo/rate
+                // filters), so we leave the stream untouched and use the real
+                // socket address in that case.
+                let real_addr = {
+                    let cfg = state.config.load();
+                    let trust_header = cfg.server.proxy_protocol_enabled
+                        && peer_is_trusted_proxy(
+                            client_addr.ip(),
+                            &cfg.server.proxy_protocol_trusted_cidrs,
+                        );
+                    drop(cfg);
+                    if trust_header {
+                        match crate::proxy_protocol::parse_proxy_protocol_v1(&mut client_stream).await {
+                            Ok(Some(addr)) => {
+                                tracing::debug!("PROXY protocol: real client {} (socket: {})", addr, client_addr);
+                                addr
+                            }
+                            Ok(None) => client_addr, // PROXY UNKNOWN
+                            Err(e) => {
+                                tracing::warn!("PROXY protocol parse error from {}: {}", client_addr, e);
+                                drop(client_stream);
+                                continue;
+                            }
                         }
-                        Ok(None) => client_addr, // PROXY UNKNOWN
-                        Err(e) => {
-                            tracing::warn!("PROXY protocol parse error from {}: {}", client_addr, e);
-                            drop(client_stream);
-                            continue;
-                        }
+                    } else {
+                        client_addr
                     }
-                } else {
-                    client_addr
                 };
 
                 let state = state.clone();
@@ -105,6 +117,25 @@ pub async fn run_proxy_server(state: Arc<AppState>, addr: SocketAddr) {
         }
     }
     tracing::info!("Proxy listener stopped");
+}
+
+/// True if `peer` falls within any of the configured trusted-proxy CIDRs.
+/// Invalid CIDR entries are skipped (logged once at parse). Returns false on an
+/// empty list, so an enabled-but-unconfigured PROXY protocol trusts nobody.
+fn peer_is_trusted_proxy(peer: std::net::IpAddr, trusted_cidrs: &[String]) -> bool {
+    trusted_cidrs.iter().any(|c| {
+        match c.parse::<ipnet::IpNet>() {
+            Ok(net) => net.contains(&peer),
+            Err(_) => match c.parse::<std::net::IpAddr>() {
+                // Bare IP (no prefix) — exact match.
+                Ok(ip) => ip == peer,
+                Err(_) => {
+                    tracing::warn!("Invalid proxy_protocol_trusted_cidrs entry '{}'", c);
+                    false
+                }
+            },
+        }
+    })
 }
 
 // Helper function to send error responses
@@ -695,5 +726,36 @@ async fn async_handle_client_with_target(
             tracing::warn!("[{}]: Tunnel error: {}", &protocol, e);
             Err((e, ErrorType::Tunnel))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::peer_is_trusted_proxy;
+    use std::net::IpAddr;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn empty_list_trusts_nobody() {
+        assert!(!peer_is_trusted_proxy(ip("10.0.0.1"), &[]));
+    }
+
+    #[test]
+    fn cidr_match() {
+        let cidrs = vec!["10.0.0.0/8".to_string(), "192.168.1.5".to_string()];
+        assert!(peer_is_trusted_proxy(ip("10.1.2.3"), &cidrs));
+        assert!(peer_is_trusted_proxy(ip("192.168.1.5"), &cidrs)); // bare IP
+        assert!(!peer_is_trusted_proxy(ip("192.168.1.6"), &cidrs));
+        assert!(!peer_is_trusted_proxy(ip("8.8.8.8"), &cidrs));
+    }
+
+    #[test]
+    fn invalid_entry_skipped() {
+        let cidrs = vec!["not-a-cidr".to_string(), "172.16.0.0/12".to_string()];
+        assert!(peer_is_trusted_proxy(ip("172.16.5.5"), &cidrs));
+        assert!(!peer_is_trusted_proxy(ip("10.0.0.1"), &cidrs));
     }
 }
