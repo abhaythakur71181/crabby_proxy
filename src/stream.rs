@@ -1,13 +1,58 @@
 use std::{
     io,
     pin::Pin,
+    sync::atomic::{AtomicU64, Ordering},
+    sync::Arc,
     task::{Context, Poll},
+    time::Duration,
 };
 
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
+    time::Instant,
 };
+
+/// Shared bidirectional idle clock for a single tunnel. Both relay directions
+/// hold a clone; every transferred chunk stamps `last_activity`. A direction
+/// that blocks on `read()` past the window checks this shared clock: if the
+/// *sibling* direction moved data recently the tunnel is still live, so it
+/// keeps waiting; only when neither direction has moved a byte for the whole
+/// window is the tunnel declared dead and torn down.
+///
+/// This is what reaps half-open CONNECT tunnels (e.g. a mobile FCM client that
+/// vanishes without sending TCP FIN/RST): otherwise both `read()` futures block
+/// forever, the relay future never returns, and the connection record, tokio
+/// task, semaphore permit, and socket FDs leak permanently.
+#[derive(Clone)]
+struct IdleClock {
+    base: Instant,
+    last_activity_ms: Arc<AtomicU64>,
+    window: Duration,
+}
+
+impl IdleClock {
+    fn new(window: Duration) -> Self {
+        Self {
+            base: Instant::now(),
+            last_activity_ms: Arc::new(AtomicU64::new(0)),
+            window,
+        }
+    }
+
+    /// Stamp "bytes just flowed" — called by either direction on every chunk.
+    fn touch(&self) {
+        self.last_activity_ms
+            .store(self.base.elapsed().as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// Time since either direction last moved a byte.
+    fn idle_for(&self) -> Duration {
+        let now = self.base.elapsed().as_millis() as u64;
+        let last = self.last_activity_ms.load(Ordering::Relaxed);
+        Duration::from_millis(now.saturating_sub(last))
+    }
+}
 
 // The Tls variant is large; boxing it (to shrink the enum copied per
 // connection) is a tracked perf follow-up that touches the pin/poll impls.
@@ -274,6 +319,12 @@ where
 /// to the shared per-user atomic counter. The first direction whose chunk
 /// causes the user to cross their limit returns `ErrorKind::QuotaExceeded` and
 /// the `try_join!` tears down both halves.
+///
+/// If `idle_timeout` is `Some`, the tunnel is torn down once neither direction
+/// has transferred a byte for that duration — the reaper for half-open peers
+/// that never send FIN/RST. `None` disables the idle timeout (relay blocks
+/// until EOF/error, the legacy behavior).
+#[allow(clippy::too_many_arguments)]
 pub async fn create_throttled_tunnel<R1, W1, R2, W2>(
     stream1: (R1, W1),
     stream2: (R2, W2),
@@ -282,6 +333,7 @@ pub async fn create_throttled_tunnel<R1, W1, R2, W2>(
     throttler: Option<crate::bandwidth::BandwidthThrottler>,
     quota: Option<std::sync::Arc<crate::quota_tracker::UserQuotaTracker>>,
     enforce_quota: bool,
+    idle_timeout: Option<Duration>,
 ) -> tokio::io::Result<(u64, u64)>
 where
     R1: AsyncRead + AsyncReadExt + Unpin,
@@ -292,12 +344,15 @@ where
     let tunnel1 = TunnelStream::new(stream1.0, stream2.1);
     let tunnel2 = TunnelStream::new(stream2.0, stream1.1);
 
-    // Shared abort flag — when one direction trips the quota limit it sets
-    // this and the other side breaks on the next loop iteration. Both halves
-    // still return Ok(bytes_so_far) so the caller can record the partial
-    // transfer in the `usage` table (otherwise the DB SUM and the dashboard
-    // would never see those bytes).
+    // Shared abort flag — when one direction trips the quota limit (or the idle
+    // timeout) it sets this and the other side breaks on the next loop
+    // iteration. Both halves still return Ok(bytes_so_far) so the caller can
+    // record the partial transfer in the `usage` table (otherwise the DB SUM
+    // and the dashboard would never see those bytes).
     let aborted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    // One idle clock shared by both directions (None = idle timeout disabled).
+    let idle = idle_timeout.map(IdleClock::new);
 
     let t1 = throttler.clone();
     let t2 = throttler;
@@ -305,8 +360,10 @@ where
     let q2 = quota;
     let a1 = aborted.clone();
     let a2 = aborted;
-    let relay1 = relay_with_throttle(tunnel1, label1, t1, q1, enforce_quota, a1);
-    let relay2 = relay_with_throttle(tunnel2, label2, t2, q2, enforce_quota, a2);
+    let i1 = idle.clone();
+    let i2 = idle;
+    let relay1 = relay_with_throttle(tunnel1, label1, t1, q1, enforce_quota, a1, i1);
+    let relay2 = relay_with_throttle(tunnel2, label2, t2, q2, enforce_quota, a2, i2);
 
     // join! (not try_join!) so a partial count from one side is preserved
     // even if the other side errors.
@@ -321,6 +378,7 @@ where
 /// Never returns `Err` for the quota-exceeded case — instead it sets the
 /// shared `aborted` flag and returns `Ok(bytes_transferred_so_far)` so the
 /// caller can persist the partial transfer.
+#[allow(clippy::too_many_arguments)]
 async fn relay_with_throttle<R, W>(
     mut tunnel: TunnelStream<R, W>,
     label: &str,
@@ -328,25 +386,55 @@ async fn relay_with_throttle<R, W>(
     quota: Option<std::sync::Arc<crate::quota_tracker::UserQuotaTracker>>,
     enforce_quota: bool,
     aborted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    idle: Option<IdleClock>,
 ) -> tokio::io::Result<u64>
 where
     R: AsyncReadExt + Unpin,
     W: AsyncWriteExt + Unpin,
 {
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::Ordering as AtomicOrdering;
 
     let mut buf = [0u8; 65536];
     let mut total = 0u64;
 
     loop {
         // Check sibling-initiated abort before blocking on read.
-        if aborted.load(Ordering::Relaxed) {
+        if aborted.load(AtomicOrdering::Relaxed) {
             break;
         }
 
-        let n = tunnel.read.read(&mut buf).await?;
+        // Read, optionally bounded by the idle window. On timeout we consult
+        // the *shared* clock: if the sibling direction moved data recently the
+        // tunnel is still live and we simply wait again; only a fully-idle
+        // tunnel (neither direction active for the window) is torn down.
+        let n = match idle {
+            Some(ref clock) => {
+                match tokio::time::timeout(clock.window, tunnel.read.read(&mut buf)).await {
+                    Ok(res) => res?,
+                    Err(_elapsed) => {
+                        if clock.idle_for() >= clock.window {
+                            tracing::info!(
+                                "{} - tunnel idle for {:?}, closing (half-open peer reaped)",
+                                label,
+                                clock.window
+                            );
+                            aborted.store(true, AtomicOrdering::Relaxed);
+                            break;
+                        }
+                        // Sibling still active — keep the tunnel open.
+                        continue;
+                    }
+                }
+            }
+            None => tunnel.read.read(&mut buf).await?,
+        };
         if n == 0 {
             break;
+        }
+
+        // Bytes flowed — stamp the shared idle clock for both directions.
+        if let Some(ref clock) = idle {
+            clock.touch();
         }
 
         // Throttle if configured
@@ -371,7 +459,7 @@ where
                     q.used(),
                     q.limit()
                 );
-                aborted.store(true, Ordering::Relaxed);
+                aborted.store(true, AtomicOrdering::Relaxed);
                 break;
             }
         }
@@ -437,7 +525,7 @@ mod tests {
         let (ur, uw) = split(upstream_proxy);
 
         let task = tokio::spawn(async move {
-            create_throttled_tunnel((cr, cw), (ur, uw), "c2u", "u2c", None, None, false).await
+            create_throttled_tunnel((cr, cw), (ur, uw), "c2u", "u2c", None, None, false, None).await
         });
 
         client.write_all(b"ping").await.unwrap();
@@ -475,8 +563,17 @@ mod tests {
         let _upstream = upstream;
 
         let task = tokio::spawn(async move {
-            create_throttled_tunnel((cr, cw), (ur, uw), "c2u", "u2c", None, Some(tracker), true)
-                .await
+            create_throttled_tunnel(
+                (cr, cw),
+                (ur, uw),
+                "c2u",
+                "u2c",
+                None,
+                Some(tracker),
+                true,
+                None,
+            )
+            .await
         });
 
         // Send well beyond the 8-byte limit.
@@ -489,6 +586,87 @@ mod tests {
         let (_a, b) = task.await.unwrap().unwrap();
         assert!(tracker_probe.is_over(), "quota should have tripped");
         assert_eq!(b, 0);
+    }
+
+    // An idle tunnel (both peers alive but sending nothing — the half-open
+    // FCM-client scenario) must be reaped within the idle window instead of
+    // blocking forever. Without the idle timeout this hangs and the test's
+    // outer timeout fires.
+    #[tokio::test]
+    async fn idle_tunnel_is_reaped_within_window() {
+        let (_client, client_proxy) = duplex(4096);
+        let (_upstream, upstream_proxy) = duplex(4096);
+        let (cr, cw) = split(client_proxy);
+        let (ur, uw) = split(upstream_proxy);
+
+        // Keep both client ends alive and send NOTHING: reads block forever
+        // unless the idle timeout tears the tunnel down.
+        let window = std::time::Duration::from_millis(150);
+        let task = tokio::spawn(async move {
+            create_throttled_tunnel(
+                (cr, cw),
+                (ur, uw),
+                "c2u",
+                "u2c",
+                None,
+                None,
+                false,
+                Some(window),
+            )
+            .await
+        });
+
+        let res = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
+        let (a, b) = res
+            .expect("idle tunnel must return, not hang")
+            .unwrap()
+            .unwrap();
+        assert_eq!((a, b), (0, 0), "no bytes should have transferred");
+    }
+
+    // A tunnel that stays active in one direction only (e.g. a long download —
+    // client sends nothing, server streams) must NOT be reaped: the shared
+    // idle clock is kept fresh by the active direction.
+    #[tokio::test]
+    async fn one_way_active_tunnel_not_reaped() {
+        let (mut client, client_proxy) = duplex(64 * 1024);
+        let (mut upstream, upstream_proxy) = duplex(64 * 1024);
+        let (cr, cw) = split(client_proxy);
+        let (ur, uw) = split(upstream_proxy);
+
+        let window = std::time::Duration::from_millis(120);
+        let task = tokio::spawn(async move {
+            create_throttled_tunnel(
+                (cr, cw),
+                (ur, uw),
+                "c2u",
+                "u2c",
+                None,
+                None,
+                false,
+                Some(window),
+            )
+            .await
+        });
+
+        // Upstream dribbles data for ~4 windows while the client stays silent.
+        for _ in 0..4 {
+            tokio::time::sleep(window / 2).await;
+            upstream.write_all(b"chunk").await.unwrap();
+        }
+        // Now stop; the tunnel should reap shortly after (both idle).
+        client.shutdown().await.unwrap();
+        upstream.shutdown().await.unwrap();
+
+        let (_a, b) = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("tunnel must return")
+            .unwrap()
+            .unwrap();
+        assert!(
+            b >= 20,
+            "active direction bytes should have flowed, got {b}"
+        );
     }
 
     #[test]

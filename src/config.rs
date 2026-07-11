@@ -1,6 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// Default idle timeout for relay tunnels (seconds). See
+/// [`ServerConfig::idle_timeout_secs`].
+fn default_idle_timeout_secs() -> u64 {
+    900
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub server: ServerConfig,
@@ -23,6 +29,15 @@ pub struct ServerConfig {
     pub admin_bind: String,
     pub max_connections: usize,
     pub connection_timeout: u64,
+    /// Idle timeout (seconds) for established relay tunnels. A tunnel is torn
+    /// down once neither direction has transferred a byte for this long — this
+    /// reaps half-open connections whose peer vanished without sending TCP
+    /// FIN/RST (common for mobile clients behind NAT). `0` disables the idle
+    /// timeout (tunnels then live until EOF/error — the pre-fix behavior).
+    /// Default 900s (15 min): long enough for legit idle push/long-poll
+    /// channels, short enough to prevent connection/permit/FD leaks.
+    #[serde(default = "default_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
     pub tls_enabled: bool,
     pub tls_cert_path: String,
     pub tls_key_path: String,
@@ -215,6 +230,7 @@ impl Default for Config {
                 admin_bind: "127.0.0.1:8081".to_string(),
                 max_connections: 10000,
                 connection_timeout: 30,
+                idle_timeout_secs: default_idle_timeout_secs(),
                 tls_enabled: false,
                 tls_cert_path: String::new(),
                 tls_key_path: String::new(),

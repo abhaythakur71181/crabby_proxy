@@ -12,6 +12,22 @@ use tokio_rustls::{
 
 use crate::{error::ProxyError, stream::ClientStream};
 
+/// Enable TCP keepalive on a socket so the kernel detects a peer that has
+/// vanished without sending FIN/RST (dead mobile client, NAT drop). This is the
+/// TCP-layer backstop to the application idle timeout in the relay: even a
+/// tunnel the app considers "not yet idle" gets its dead socket surfaced as a
+/// read error, letting the relay return and release its tracked record, tokio
+/// task, semaphore permit, and FDs. Best-effort — failures are logged, not fatal.
+pub fn enable_tcp_keepalive(stream: &TcpStream) {
+    let ka = socket2::TcpKeepalive::new()
+        .with_time(std::time::Duration::from_secs(60))
+        .with_interval(std::time::Duration::from_secs(20));
+    let sock = socket2::SockRef::from(stream);
+    if let Err(e) = sock.set_tcp_keepalive(&ka) {
+        tracing::debug!("failed to set TCP keepalive: {}", e);
+    }
+}
+
 // write from tcp stream
 pub async fn write_to_stream(stream: &mut TcpStream, buf: &[u8]) -> Result<(), ProxyError> {
     stream

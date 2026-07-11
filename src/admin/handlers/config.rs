@@ -83,7 +83,9 @@ pub async fn update_config(
     let current_user =
         crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
     if current_user.role != "root_admin" {
-        return Err(ApiError::forbidden("Only root_admin can edit configuration"));
+        return Err(ApiError::forbidden(
+            "Only root_admin can edit configuration",
+        ));
     }
 
     let path = state
