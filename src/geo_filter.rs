@@ -35,7 +35,13 @@ impl GeoFilter {
     ) -> (bool, Option<String>) {
         let country = self.lookup_country(ip);
         match &country {
-            None => (true, None), // Unknown country → allow (fail-open)
+            None => {
+                // Unknown country (DB miss, private IP, parse failure).
+                // Fail OPEN only when there is no allowlist; in allowlist mode an
+                // unclassifiable IP must be denied, otherwise the allowlist is
+                // trivially bypassed by any IP the DB cannot map.
+                (allowed_countries.is_empty(), None)
+            }
             Some(code) => {
                 // Check blocklist first
                 if blocked_countries.iter().any(|c| c.to_uppercase() == *code) {
