@@ -1,0 +1,216 @@
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/jetbrains-mono";
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ─────────────────────────────────────────────────────────────────
+   Design tokens — light is :root, dark overrides on .dark.
+   Ink surfaces with a cool undertone; teal accent (instrument feel);
+   crab-coral reserved for brand moments. Semantic colors are
+   theme-tuned but hue-stable so status reads identically anywhere.
+   ───────────────────────────────────────────────────────────────── */
+:root {
+  --bg: oklch(0.977 0.003 250);
+  --bg-glow: oklch(0.94 0.02 190 / 0.5);
+  --surface-1: oklch(1 0 0);
+  --surface-2: oklch(0.965 0.004 250);
+  --surface-3: oklch(0.94 0.006 250);
+  --overlay: oklch(1 0 0 / 0.85);
+  --border: oklch(0.2 0.02 250 / 0.1);
+  --border-strong: oklch(0.2 0.02 250 / 0.18);
+  --text: oklch(0.22 0.015 255);
+  --text-muted: oklch(0.45 0.015 255);
+  --text-faint: oklch(0.62 0.012 255);
+  --accent: oklch(0.52 0.11 185);
+  --accent-strong: oklch(0.44 0.1 185);
+  --accent-soft: oklch(0.52 0.11 185 / 0.12);
+  --brand: oklch(0.66 0.18 40);
+  --brand-soft: oklch(0.66 0.18 40 / 0.12);
+  --success: oklch(0.55 0.15 155);
+  --success-soft: oklch(0.55 0.15 155 / 0.13);
+  --warning: oklch(0.6 0.13 75);
+  --warning-soft: oklch(0.6 0.13 75 / 0.15);
+  --danger: oklch(0.55 0.19 20);
+  --danger-soft: oklch(0.55 0.19 20 / 0.12);
+  --info: oklch(0.55 0.13 245);
+  --info-soft: oklch(0.55 0.13 245 / 0.12);
+  --ring: oklch(0.52 0.11 185 / 0.5);
+  --chart-grid: oklch(0.2 0.02 250 / 0.07);
+  --shadow-panel: 0 1px 2px oklch(0.2 0.02 250 / 0.05), 0 8px 24px -12px oklch(0.2 0.02 250 / 0.12);
+  --shadow-pop: 0 4px 12px -2px oklch(0.2 0.02 250 / 0.12), 0 24px 48px -12px oklch(0.2 0.02 250 / 0.22);
+  color-scheme: light;
+}
+
+.dark {
+  --bg: oklch(0.145 0.012 260);
+  --bg-glow: oklch(0.35 0.06 190 / 0.16);
+  --surface-1: oklch(0.175 0.013 260);
+  --surface-2: oklch(0.205 0.015 260);
+  --surface-3: oklch(0.245 0.017 260);
+  --overlay: oklch(0.175 0.013 260 / 0.82);
+  --border: oklch(0.95 0.01 250 / 0.08);
+  --border-strong: oklch(0.95 0.01 250 / 0.16);
+  --text: oklch(0.93 0.008 250);
+  --text-muted: oklch(0.71 0.015 250);
+  --text-faint: oklch(0.53 0.015 250);
+  --accent: oklch(0.8 0.13 185);
+  --accent-strong: oklch(0.86 0.14 185);
+  --accent-soft: oklch(0.8 0.13 185 / 0.13);
+  --brand: oklch(0.73 0.17 40);
+  --brand-soft: oklch(0.73 0.17 40 / 0.14);
+  --success: oklch(0.78 0.16 155);
+  --success-soft: oklch(0.78 0.16 155 / 0.13);
+  --warning: oklch(0.82 0.14 80);
+  --warning-soft: oklch(0.82 0.14 80 / 0.13);
+  --danger: oklch(0.7 0.18 20);
+  --danger-soft: oklch(0.7 0.18 20 / 0.14);
+  --info: oklch(0.74 0.12 245);
+  --info-soft: oklch(0.74 0.12 245 / 0.13);
+  --ring: oklch(0.8 0.13 185 / 0.45);
+  --chart-grid: oklch(0.95 0.01 250 / 0.06);
+  --shadow-panel: 0 1px 2px oklch(0 0 0 / 0.3), 0 8px 24px -12px oklch(0 0 0 / 0.5);
+  --shadow-pop: 0 4px 16px -2px oklch(0 0 0 / 0.4), 0 32px 64px -16px oklch(0 0 0 / 0.6);
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-overlay: var(--overlay);
+  --color-line: var(--border);
+  --color-line-strong: var(--border-strong);
+  --color-fg: var(--text);
+  --color-fg-muted: var(--text-muted);
+  --color-fg-faint: var(--text-faint);
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-soft: var(--accent-soft);
+  --color-brand: var(--brand);
+  --color-brand-soft: var(--brand-soft);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-ring: var(--ring);
+  --color-chart-grid: var(--chart-grid);
+
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, "SF Mono", monospace;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+
+  --shadow-panel: var(--shadow-panel);
+  --shadow-pop: var(--shadow-pop);
+
+  --animate-shimmer: shimmer 1.8s linear infinite;
+  --animate-pulse-dot: pulse-dot 2.2s ease-in-out infinite;
+  --animate-enter: row-enter 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+@keyframes pulse-dot {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklch, currentColor 45%, transparent); }
+  50% { box-shadow: 0 0 0 5px transparent; }
+}
+@keyframes row-enter {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Base ── */
+html, body, #root { height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  font-feature-settings: "cv11", "ss01", "ss03";
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow-x: hidden;
+}
+
+/* Ambient glow — one fixed, ultra-subtle radial wash so large panels never
+   sit on a flat void. Cheap (no repaint on scroll). */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(1100px 500px at 85% -10%, var(--bg-glow), transparent 60%),
+    radial-gradient(900px 500px at -10% 110%, var(--brand-soft), transparent 55%);
+  opacity: 0.6;
+}
+
+::selection { background: var(--accent-soft); }
+
+/* Scrollbars that match the surface */
+* { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+/* ── Utility classes ── */
+@utility hairline {
+  border: 1px solid var(--border);
+}
+@utility glass {
+  background: color-mix(in oklch, var(--surface-1) 78%, transparent);
+  backdrop-filter: blur(14px) saturate(1.4);
+  -webkit-backdrop-filter: blur(14px) saturate(1.4);
+}
+@utility num {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+@utility eyebrow {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+@utility skeleton {
+  border-radius: var(--radius-sm);
+  background: linear-gradient(
+    100deg,
+    var(--surface-2) 40%,
+    var(--surface-3) 50%,
+    var(--surface-2) 60%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.8s linear infinite;
+}
+
+/* Focus ring — visible, accent-tinted, keyboard-only via :focus-visible */
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Respect users who opt out of motion — kill transforms/animations app-wide */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
