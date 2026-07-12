@@ -17,6 +17,7 @@ mod error;
 mod event_bus;
 mod geo_filter;
 mod ip_filter;
+mod ip_pattern;
 mod metrics;
 pub mod middleware;
 mod proxy;
