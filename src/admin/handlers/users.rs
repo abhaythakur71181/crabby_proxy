@@ -424,6 +424,56 @@ pub async fn change_own_password(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// POST /api/users/:id/password — admin resets another user's password (no
+/// current password). root_admin may target anyone; admin may target only
+/// regular users.
+pub async fn admin_reset_password(
+    State(state): State<Arc<AppState>>,
+    Extension(current_user_id): Extension<i64>,
+    Path(user_id): Path<i64>,
+    Json(request): Json<super::models::AdminResetPasswordRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
+        .await?
+        .ok_or_else(|| ApiError::unauthorized("Invalid session"))?;
+    let target = users::get_user_by_id(&state.db_pool, user_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("User not found"))?;
+
+    authorize_admin_reset(&current_user.get_role(), &target.get_role())
+        .map_err(ApiError::forbidden)?;
+
+    crate::validation::validate_password(&request.new_password).map_err(ApiError::bad_request)?;
+
+    let updated = users::update_user(
+        &state.db_pool,
+        user_id,
+        Some(&request.new_password),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    state
+        .invalidate_all_for_user(user_id, Some(&updated.username))
+        .await;
+
+    let _ = crate::db::audit_log::log_action(
+        &state.db_pool,
+        current_user_id,
+        "password_admin_reset",
+        Some("user"),
+        Some(&user_id.to_string()),
+        None,
+        None,
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[cfg(test)]
 mod authz_tests {
     use super::{authorize_admin_reset, authorize_create_user, self_reset_allowed};

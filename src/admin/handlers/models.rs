@@ -186,6 +186,11 @@ pub struct ChangeOwnPasswordRequest {
     pub new_password: String,
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct AdminResetPasswordRequest {
+    pub new_password: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -75,6 +75,10 @@ pub async fn run_admin_server(
             "/api/users/me/password",
             post(handlers::users::change_own_password),
         )
+        .route(
+            "/api/users/:id/password",
+            post(handlers::users::admin_reset_password),
+        )
         // Usage tracking routes
         .route(
             "/api/users/:id/usage",
