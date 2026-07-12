@@ -71,6 +71,10 @@ pub async fn run_admin_server(
             axum::routing::put(handlers::users::update_user),
         )
         .route("/api/users/:id", delete(handlers::users::delete_user))
+        .route(
+            "/api/users/me/password",
+            post(handlers::users::change_own_password),
+        )
         // Usage tracking routes
         .route(
             "/api/users/:id/usage",

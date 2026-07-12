@@ -175,6 +175,14 @@ pub async fn update_user(
         return Err(ApiError::forbidden("Cannot modify other users"));
     }
 
+    // Self password changes must go through the current-password-verified
+    // endpoint (POST /api/users/me/password), not this profile update.
+    if request.password.is_some() && is_self && !is_root_admin {
+        return Err(ApiError::forbidden(
+            "Use the change-password endpoint to change your own password",
+        ));
+    }
+
     // Non-root users can't change role, quotas, or active status
     if !is_root_admin
         && (request.role.is_some()
@@ -351,6 +359,67 @@ pub async fn revoke_api_key(
 
     // Invalidate cached API key verifications for this user
     state.invalidate_api_key_cache(user_id).await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST /api/users/me/password — self-service password change.
+/// Requires the caller's current password. root_admin is not allowed here
+/// (it resets via the admin endpoint); available to `user` and `admin`.
+pub async fn change_own_password(
+    State(state): State<Arc<AppState>>,
+    Extension(current_user_id): Extension<i64>,
+    Json(request): Json<super::models::ChangeOwnPasswordRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
+        .await?
+        .ok_or_else(|| ApiError::unauthorized("Invalid session"))?;
+
+    if !self_reset_allowed(&current_user.get_role()) {
+        return Err(ApiError::forbidden(
+            "root_admin changes password via the admin reset flow",
+        ));
+    }
+
+    // Authenticate with the current password.
+    let ok = users::verify_password(
+        &state.db_pool,
+        &current_user.username,
+        &request.current_password,
+    )
+    .await?
+    .is_some();
+    if !ok {
+        return Err(ApiError::unauthorized("Current password is incorrect"));
+    }
+
+    crate::validation::validate_password(&request.new_password).map_err(ApiError::bad_request)?;
+
+    let updated = users::update_user(
+        &state.db_pool,
+        current_user_id,
+        Some(&request.new_password),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    state
+        .invalidate_all_for_user(current_user_id, Some(&updated.username))
+        .await;
+
+    let _ = crate::db::audit_log::log_action(
+        &state.db_pool,
+        current_user_id,
+        "password_self_reset",
+        Some("user"),
+        Some(&current_user_id.to_string()),
+        None,
+        None,
+    )
+    .await;
 
     Ok(StatusCode::NO_CONTENT)
 }

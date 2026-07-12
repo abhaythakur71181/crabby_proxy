@@ -180,6 +180,12 @@ pub struct CreateApiKeyRequest {
     pub expires_in_days: i64,
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct ChangeOwnPasswordRequest {
+    pub current_password: String,
+    pub new_password: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
