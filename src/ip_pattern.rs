@@ -124,6 +124,20 @@ impl IpPattern {
     }
 }
 
+/// Validate a client-IP pattern submitted for an approval request or grant.
+/// Returns `Ok(Some(warning))` when the pattern is broad (approves a very large
+/// address space — surfaced to the operator but still allowed), `Ok(None)` when
+/// the pattern is fine, and `Err` when the pattern is syntactically invalid.
+pub fn validate_approval_pattern(client_ip: &str) -> Result<Option<String>, IpPatternError> {
+    let pat = IpPattern::parse(client_ip)?;
+    Ok(pat.is_broad().then(|| {
+        format!(
+            "pattern '{}' approves this user from a very large IP range",
+            client_ip.trim()
+        )
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,5 +236,24 @@ mod tests {
         assert!(!IpPattern::parse("10.0.0.0/9").unwrap().is_broad());
         assert!(IpPattern::parse("2401::/32").unwrap().is_broad());
         assert!(!IpPattern::parse("2401::/33").unwrap().is_broad());
+    }
+
+    #[test]
+    fn validate_returns_warning_for_broad() {
+        let w = validate_approval_pattern("*").unwrap();
+        assert!(w.is_some());
+        let w = validate_approval_pattern("140.*.*.*").unwrap();
+        assert!(w.is_some());
+    }
+
+    #[test]
+    fn validate_no_warning_for_narrow() {
+        assert_eq!(validate_approval_pattern("140.11.11.5").unwrap(), None);
+        assert_eq!(validate_approval_pattern("140.11.11.*").unwrap(), None);
+    }
+
+    #[test]
+    fn validate_errors_on_invalid() {
+        assert!(validate_approval_pattern("not-an-ip").is_err());
     }
 }

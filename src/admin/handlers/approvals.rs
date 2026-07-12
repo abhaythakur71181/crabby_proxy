@@ -28,6 +28,8 @@ pub struct ApprovalResponse {
     pub expires_at: i64,
     pub reason: Option<String>,
     pub duration_hours: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -44,6 +46,10 @@ pub async fn create_approval(
     let current_user =
         crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
     current_user.require_admin()?;
+
+    // Validate the client-IP pattern; reject invalid, warn (but allow) broad.
+    let warning = crate::ip_pattern::validate_approval_pattern(&payload.client_ip)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     let id = approvals::create_approval(
         &state.db_pool,
@@ -70,8 +76,10 @@ pub async fn create_approval(
         Some("approval"),
         Some(&id.to_string()),
         Some(&format!(
-            "User {}, duration: {}h",
-            payload.user_id, payload.duration_hours
+            "User {}, duration: {}h{}",
+            payload.user_id,
+            payload.duration_hours,
+            if warning.is_some() { ", broad_pattern=true" } else { "" }
         )),
         Some(&payload.client_ip),
     )
@@ -89,6 +97,7 @@ pub async fn create_approval(
             expires_at: now + (payload.duration_hours as i64 * 3600),
             reason: payload.reason,
             duration_hours: payload.duration_hours,
+            warning,
         }),
     ))
 }
@@ -121,6 +130,7 @@ pub async fn list_approvals(
                 expires_at: r.expires_at,
                 reason: r.reason,
                 duration_hours: r.approval_duration_hours,
+                warning: None,
             })
             .collect(),
     ))
@@ -157,6 +167,7 @@ pub async fn list_user_approvals(
                 expires_at: r.expires_at,
                 reason: r.reason,
                 duration_hours: r.approval_duration_hours,
+                warning: None,
             })
             .collect(),
     ))

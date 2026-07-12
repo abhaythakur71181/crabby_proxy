@@ -82,6 +82,10 @@ pub async fn create_request(
     axum::Extension(current_user_id): axum::Extension<i64>,
     Json(payload): Json<CreateRequestPayload>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // Validate the client-IP pattern; reject invalid, warn (but allow) broad.
+    let warning = crate::ip_pattern::validate_approval_pattern(&payload.client_ip)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
     // User always requests for themselves
     let id = approval_requests::create_request(
         &state.db_pool,
@@ -97,13 +101,18 @@ pub async fn create_request(
     })?;
 
     // Audit log
+    let detail = format!(
+        "duration: {}h{}",
+        payload.duration_hours,
+        if warning.is_some() { ", broad_pattern=true" } else { "" }
+    );
     let _ = crate::db::audit_log::log_action(
         &state.db_pool,
         current_user_id,
         "approval_request_created",
         Some("approval_request"),
         Some(&id.to_string()),
-        Some(&format!("duration: {}h", payload.duration_hours)),
+        Some(&detail),
         Some(&payload.client_ip),
     )
     .await;
@@ -116,6 +125,7 @@ pub async fn create_request(
             "user_id": current_user_id,
             "status": "pending",
             "requested_at": now,
+            "warning": warning,
         })),
     ))
 }
