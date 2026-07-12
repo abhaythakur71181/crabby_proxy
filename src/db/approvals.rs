@@ -1,4 +1,4 @@
-use sqlx::{Row, SqlitePool};
+use sqlx::SqlitePool;
 
 /// Create a new approval
 pub async fn create_approval(
@@ -28,23 +28,45 @@ pub async fn create_approval(
     Ok(result.last_insert_rowid())
 }
 
-/// Check if an IP is approved for a user (active, non-expired, non-terminated)
+/// Check if an IP is approved for a user (active, non-expired, non-terminated).
+///
+/// Fetches the user's active approval patterns and matches the concrete IP in
+/// Rust, so wildcard / CIDR / IPv6 patterns are honored — not just exact IPs.
+/// A stored pattern that fails to parse (corrupt row) is skipped and logged,
+/// so one bad row cannot fail-closed the whole check.
 pub async fn is_ip_approved(
     pool: &SqlitePool,
     user_id: i64,
     client_ip: &str,
 ) -> Result<bool, sqlx::Error> {
     let now = chrono::Utc::now().timestamp();
-    let row = sqlx::query(
-        "SELECT COUNT(*) as cnt FROM approvals WHERE user_id = ? AND client_ip = ? AND expires_at > ? AND is_expired = 0 AND is_terminated = 0",
+    let patterns = sqlx::query_scalar::<_, String>(
+        "SELECT client_ip FROM approvals WHERE user_id = ? AND expires_at > ? AND is_expired = 0 AND is_terminated = 0",
     )
     .bind(user_id)
-    .bind(client_ip)
     .bind(now)
-    .fetch_one(pool)
+    .fetch_all(pool)
     .await?;
 
-    Ok(row.get::<i64, _>("cnt") > 0)
+    let ip: std::net::IpAddr = match client_ip.parse() {
+        Ok(ip) => ip,
+        // Not a concrete IP (shouldn't happen from the proxy path) — nothing to match.
+        Err(_) => return Ok(false),
+    };
+
+    for pat_str in patterns {
+        match crate::ip_pattern::IpPattern::parse(&pat_str) {
+            Ok(pat) if pat.matches(ip) => return Ok(true),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                "skipping unparseable approval pattern '{}' for user {}: {}",
+                pat_str,
+                user_id,
+                e
+            ),
+        }
+    }
+    Ok(false)
 }
 
 /// List active approvals for a user
@@ -128,4 +150,91 @@ pub struct ApprovalRecord {
     pub termination_reason: Option<String>,
     pub reason: Option<String>,
     pub approval_duration_hours: i32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::SqlitePool;
+
+    async fn setup() -> SqlitePool {
+        let pool = SqlitePool::connect(":memory:").await.unwrap();
+        sqlx::query(
+            r#"
+            CREATE TABLE approvals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                client_ip TEXT NOT NULL,
+                approved_by INTEGER NOT NULL,
+                approved_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                is_expired BOOLEAN DEFAULT 0,
+                is_terminated BOOLEAN DEFAULT 0,
+                terminated_by INTEGER,
+                terminated_at INTEGER,
+                termination_reason TEXT,
+                reason TEXT,
+                approval_duration_hours INTEGER NOT NULL
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn wildcard_pattern_matches_concrete_ip() {
+        let pool = setup().await;
+        create_approval(&pool, 1, "140.11.11.*", 99, 24, None)
+            .await
+            .unwrap();
+        assert!(is_ip_approved(&pool, 1, "140.11.11.5").await.unwrap());
+        assert!(!is_ip_approved(&pool, 1, "140.11.12.5").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn exact_pattern_still_matches() {
+        let pool = setup().await;
+        create_approval(&pool, 1, "8.8.8.8", 99, 24, None)
+            .await
+            .unwrap();
+        assert!(is_ip_approved(&pool, 1, "8.8.8.8").await.unwrap());
+        assert!(!is_ip_approved(&pool, 1, "8.8.4.4").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn expired_and_terminated_never_match() {
+        let pool = setup().await;
+        let past = chrono::Utc::now().timestamp() - 10;
+        // expired '*' grant
+        sqlx::query(
+            "INSERT INTO approvals (user_id, client_ip, approved_by, approved_at, expires_at, approval_duration_hours) VALUES (1,'*',9,0,?,1)",
+        )
+        .bind(past)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // active-but-terminated '*' grant
+        let fut = chrono::Utc::now().timestamp() + 3600;
+        sqlx::query(
+            "INSERT INTO approvals (user_id, client_ip, approved_by, approved_at, expires_at, is_terminated, approval_duration_hours) VALUES (1,'*',9,0,?,1,1)",
+        )
+        .bind(fut)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(!is_ip_approved(&pool, 1, "8.8.8.8").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn corrupt_pattern_is_skipped_not_fatal() {
+        let pool = setup().await;
+        create_approval(&pool, 1, "not-an-ip", 9, 24, None)
+            .await
+            .unwrap();
+        // Skipped without error; no match.
+        assert!(!is_ip_approved(&pool, 1, "8.8.8.8").await.unwrap());
+    }
 }
