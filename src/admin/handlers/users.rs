@@ -19,6 +19,46 @@ pub struct PaginationQuery {
     pub offset: Option<i32>,
 }
 
+/// Authorize creating a user with `requested` role, for a caller of `caller` role.
+/// root_admin may create any role; admin may create only regular users; a plain
+/// user may not create users.
+fn authorize_create_user(caller: &Role, requested: &Role) -> Result<(), String> {
+    match caller {
+        Role::RootAdmin => Ok(()),
+        Role::Admin => {
+            if *requested == Role::User {
+                Ok(())
+            } else {
+                Err("Admins can only create regular users".to_string())
+            }
+        }
+        Role::User => Err("Only admins can create users".to_string()),
+    }
+}
+
+/// Authorize an admin resetting `target`'s password (no current password needed).
+/// root_admin may reset anyone; admin may reset only regular users; a plain user
+/// may not reset others.
+fn authorize_admin_reset(caller: &Role, target: &Role) -> Result<(), String> {
+    match caller {
+        Role::RootAdmin => Ok(()),
+        Role::Admin => {
+            if *target == Role::User {
+                Ok(())
+            } else {
+                Err("Admins can only reset regular users' passwords".to_string())
+            }
+        }
+        Role::User => Err("Only admins can reset other users' passwords".to_string()),
+    }
+}
+
+/// Whether `caller` may use the self-service (current-password) reset. root_admin
+/// is excluded — it changes its own password via the admin-reset endpoint.
+fn self_reset_allowed(caller: &Role) -> bool {
+    !matches!(caller, Role::RootAdmin)
+}
+
 /// Create a new user (root_admin only)
 pub async fn create_user(
     State(state): State<Arc<AppState>>,
@@ -28,9 +68,8 @@ pub async fn create_user(
     let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
         .await?
         .ok_or_else(|| ApiError::unauthorized("Invalid session"))?;
-    if current_user.get_role() != Role::RootAdmin {
-        return Err(ApiError::forbidden("Only root_admin can create users"));
-    }
+    authorize_create_user(&current_user.get_role(), &request.role)
+        .map_err(ApiError::forbidden)?;
     crate::validation::validate_username(&request.username).map_err(ApiError::bad_request)?;
     crate::validation::validate_password(&request.password).map_err(ApiError::bad_request)?;
     if let Ok(Some(_)) = users::get_user_by_username(&state.db_pool, &request.username).await {
@@ -314,4 +353,45 @@ pub async fn revoke_api_key(
     state.invalidate_api_key_cache(user_id).await;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod authz_tests {
+    use super::{authorize_admin_reset, authorize_create_user, self_reset_allowed};
+    use crate::db::models::Role;
+
+    #[test]
+    fn create_user_matrix() {
+        // root_admin can create anything
+        assert!(authorize_create_user(&Role::RootAdmin, &Role::User).is_ok());
+        assert!(authorize_create_user(&Role::RootAdmin, &Role::Admin).is_ok());
+        assert!(authorize_create_user(&Role::RootAdmin, &Role::RootAdmin).is_ok());
+        // admin can create only regular users
+        assert!(authorize_create_user(&Role::Admin, &Role::User).is_ok());
+        assert!(authorize_create_user(&Role::Admin, &Role::Admin).is_err());
+        assert!(authorize_create_user(&Role::Admin, &Role::RootAdmin).is_err());
+        // plain user cannot create
+        assert!(authorize_create_user(&Role::User, &Role::User).is_err());
+    }
+
+    #[test]
+    fn admin_reset_matrix() {
+        // root_admin can reset anyone
+        assert!(authorize_admin_reset(&Role::RootAdmin, &Role::User).is_ok());
+        assert!(authorize_admin_reset(&Role::RootAdmin, &Role::Admin).is_ok());
+        assert!(authorize_admin_reset(&Role::RootAdmin, &Role::RootAdmin).is_ok());
+        // admin can reset only regular users
+        assert!(authorize_admin_reset(&Role::Admin, &Role::User).is_ok());
+        assert!(authorize_admin_reset(&Role::Admin, &Role::Admin).is_err());
+        assert!(authorize_admin_reset(&Role::Admin, &Role::RootAdmin).is_err());
+        // plain user cannot reset others
+        assert!(authorize_admin_reset(&Role::User, &Role::User).is_err());
+    }
+
+    #[test]
+    fn self_reset_excludes_root_admin() {
+        assert!(self_reset_allowed(&Role::User));
+        assert!(self_reset_allowed(&Role::Admin));
+        assert!(!self_reset_allowed(&Role::RootAdmin));
+    }
 }
