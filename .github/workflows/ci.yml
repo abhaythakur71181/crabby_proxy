@@ -84,9 +84,10 @@ jobs:
       - name: Build image
         run: docker build -t crabby-proxy:ci .
       - name: Trivy scan
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: crabby-proxy:ci
           format: table
-          exit-code: "0" # report only for now; set to 1 to gate on findings
+          exit-code: "1" # gate: fail the build on findings
+          ignore-unfixed: true # don't block on base-image CVEs with no fix available
           severity: CRITICAL,HIGH

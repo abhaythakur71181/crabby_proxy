@@ -73,12 +73,17 @@ pub async fn deep_health_check(State(state): State<Arc<AppState>>) -> Json<DeepH
             latency_ms: t.elapsed().as_micros() as f64 / 1000.0,
             checked_at: now,
         },
-        Err(e) => ComponentHealth {
-            status: "error".to_string(),
-            detail: Some(e.to_string()),
-            latency_ms: t.elapsed().as_micros() as f64 / 1000.0,
-            checked_at: now,
-        },
+        Err(e) => {
+            // Log the backend error server-side; never expose driver/host/path
+            // internals to this unauthenticated endpoint.
+            tracing::error!("deep health: SQLite probe failed: {}", e);
+            ComponentHealth {
+                status: "error".to_string(),
+                detail: None,
+                latency_ms: t.elapsed().as_micros() as f64 / 1000.0,
+                checked_at: now,
+            }
+        }
     };
 
     // Check state backend (memory or Redis) (timed)
@@ -90,12 +95,15 @@ pub async fn deep_health_check(State(state): State<Arc<AppState>>) -> Json<DeepH
             latency_ms: t.elapsed().as_micros() as f64 / 1000.0,
             checked_at: now,
         },
-        Err(e) => ComponentHealth {
-            status: "error".to_string(),
-            detail: Some(e.to_string()),
-            latency_ms: t.elapsed().as_micros() as f64 / 1000.0,
-            checked_at: now,
-        },
+        Err(e) => {
+            tracing::error!("deep health: state-backend probe failed: {}", e);
+            ComponentHealth {
+                status: "error".to_string(),
+                detail: None,
+                latency_ms: t.elapsed().as_micros() as f64 / 1000.0,
+                checked_at: now,
+            }
+        }
     };
 
     // Check DNS cache (in-process, effectively instant)

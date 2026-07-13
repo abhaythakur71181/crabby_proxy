@@ -97,6 +97,11 @@ pub async fn update_user_quota(
     let current_user =
         crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
     current_user.require_admin()?;
+    // A negative quota is meaningless and breaks remaining/percentage math; reject it.
+    // `None` means "no quota" (unlimited) and is allowed.
+    if payload.quota_bytes.is_some_and(|q| q < 0) {
+        return Err(ApiError::bad_request("quota_bytes must be >= 0"));
+    }
     let user = crate::db::users::get_user_by_id(&state.db_pool, user_id)
         .await
         .map_err(|e| {

@@ -9,7 +9,14 @@ function normalizeBase(raw: string | undefined): string {
   const v = (raw ?? "").trim().replace(/\/+$/, "");
   if (!v) return "";
   if (/^https?:\/\//i.test(v)) return v;
-  return `http://${v}`;
+  // Default a scheme-less base to https:// — never downgrade the Bearer token to
+  // cleartext. Warn in dev so the missing scheme is caught before deploy.
+  if (import.meta.env.DEV) {
+    console.warn(
+      `VITE_API_BASE_URL "${v}" has no scheme; defaulting to https://. Set an explicit scheme.`,
+    );
+  }
+  return `https://${v}`;
 }
 
 export const API_BASE = normalizeBase(import.meta.env.VITE_API_BASE_URL as string | undefined);
