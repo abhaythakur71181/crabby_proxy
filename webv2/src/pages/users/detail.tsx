@@ -122,12 +122,11 @@ export function UserDetailPage() {
                   <Pencil className="size-3.5" /> Edit
                 </Button>
               )}
-              {!isSelf &&
-                (isRoot || (session?.role === "admin" && u.role === "user")) && (
-                  <Button variant="outline" size="sm" onClick={() => setResetOpen(true)}>
-                    <KeyRound className="size-3.5" /> Reset password
-                  </Button>
-                )}
+              {(isRoot || (session?.role === "admin" && u.role === "user")) && (
+                <Button variant="outline" size="sm" onClick={() => setResetOpen(true)}>
+                  <KeyRound className="size-3.5" /> Reset password
+                </Button>
+              )}
               {isRoot && !isSelf && (
                 <Button
                   variant={u.is_active ? "danger" : "primary"}
