@@ -2,14 +2,16 @@
 // ephemeral drawer). Self-or-admin: regular users can open their own page.
 // Edit (root_admin), deactivate/reactivate, quota, keys, usage, approvals,
 // groups (admin-only endpoint).
-import { ArrowLeft, Pencil, ShieldOff, ShieldCheck as ShieldOn } from "lucide-react";
-import { useState } from "react";
+import { ArrowLeft, KeyRound, Pencil, ShieldOff, ShieldCheck as ShieldOn } from "lucide-react";
+import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { deleteUser, updateUser } from "@/api/endpoints";
+import { adminResetPassword, deleteUser, updateUser } from "@/api/endpoints";
 import type { Role } from "@/api/types";
+import { downloadCsv } from "@/lib/download";
 import { formatDateTime, formatRelative } from "@/lib/format";
+import { generatePassword } from "@/lib/password";
 import {
   keys,
   useInvalidate,
@@ -23,7 +25,7 @@ import { ConfirmDialog, Modal } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Panel, PanelHeader } from "@/components/ui/card";
 import { Field, Input, Select } from "@/components/ui/input";
-import { Mono } from "@/components/ui/misc";
+import { CopyButton, Mono } from "@/components/ui/misc";
 import { Pill, RoleBadge, StatusPill } from "@/components/ui/badge";
 import { EmptyState, ErrorState, Skeleton } from "@/components/ui/states";
 import {
@@ -47,6 +49,7 @@ export function UserDetailPage() {
   const invalidate = useInvalidate();
   const [editOpen, setEditOpen] = useState(false);
   const [confirmToggle, setConfirmToggle] = useState(false);
+  const [resetOpen, setResetOpen] = useState(false);
 
   const toggleActive = useMutation({
     mutationFn: async () => {
@@ -119,6 +122,12 @@ export function UserDetailPage() {
                   <Pencil className="size-3.5" /> Edit
                 </Button>
               )}
+              {!isSelf &&
+                (isRoot || (session?.role === "admin" && u.role === "user")) && (
+                  <Button variant="outline" size="sm" onClick={() => setResetOpen(true)}>
+                    <KeyRound className="size-3.5" /> Reset password
+                  </Button>
+                )}
               {isRoot && !isSelf && (
                 <Button
                   variant={u.is_active ? "danger" : "primary"}
@@ -222,6 +231,15 @@ export function UserDetailPage() {
           isRoot={isRoot}
           isSelf={isSelf}
           onSaved={() => invalidate(keys.usersAll, keys.user(id))}
+        />
+      )}
+
+      {u && (
+        <ResetPasswordDialog
+          userId={u.id}
+          username={u.username}
+          open={resetOpen}
+          onOpenChange={setResetOpen}
         />
       )}
 
@@ -361,6 +379,106 @@ function EditUserDialog({
           </div>
         )}
       </div>
+    </Modal>
+  );
+}
+
+function ResetPasswordDialog({
+  userId,
+  username,
+  open,
+  onOpenChange,
+}: {
+  userId: number;
+  username: string;
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+}) {
+  const [password, setPassword] = useState(() => generatePassword());
+  const [done, setDone] = useState(false);
+
+  useEffect(() => {
+    if (open) {
+      setPassword(generatePassword());
+      setDone(false);
+    }
+  }, [open]);
+
+  const reset = useMutation({
+    mutationFn: () => adminResetPassword(userId, { new_password: password }),
+    onSuccess: () => {
+      toast.success(`Password reset for ${username}`);
+      setDone(true);
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  return (
+    <Modal
+      open={open}
+      onOpenChange={onOpenChange}
+      title={done ? "New password" : `Reset password — ${username}`}
+    >
+      {!done ? (
+        <div className="grid gap-3">
+          <Field label="New password">
+            {(id) => (
+              <div className="flex gap-2">
+                <Input
+                  id={id}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                />
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setPassword(generatePassword())}
+                >
+                  Regenerate
+                </Button>
+              </div>
+            )}
+          </Field>
+          <div>
+            <Button
+              variant="primary"
+              size="sm"
+              loading={reset.isPending}
+              disabled={password.length < 8}
+              onClick={() => reset.mutate()}
+            >
+              Reset password
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="grid gap-3">
+          <p className="text-[13px] text-fg-muted">
+            Password reset. Shown once — copy or download it now.
+          </p>
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-[13px]">{password}</span>
+            <CopyButton value={password} />
+          </div>
+          <div className="flex gap-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() =>
+                downloadCsv(`user-${username}.csv`, [
+                  ["username", "password"],
+                  [username, password],
+                ])
+              }
+            >
+              Download CSV
+            </Button>
+            <Button variant="primary" size="sm" onClick={() => onOpenChange(false)}>
+              Done
+            </Button>
+          </div>
+        </div>
+      )}
     </Modal>
   );
 }
