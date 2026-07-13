@@ -1,10 +1,10 @@
 // Approvals — request workflow + active grants, for both roles.
 // Users: request access, watch their own requests. Admins: decide with a
 // reason, create grants directly, terminate with a required reason.
-// No external IP-detection service (the old UI called api.ipify.org from
-// an internal control plane) — the IP field is manual with a hint.
+// The request dialog best-effort auto-fills the client IP via api.ipify.org;
+// the field stays editable and accepts wildcard/CIDR patterns.
 import { CheckCircle2, Plus, ShieldCheck, XCircle } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -17,6 +17,7 @@ import {
 } from "@/api/endpoints";
 import type { ApprovalRequestResponse, ApprovalResponse } from "@/api/types";
 import { formatRelative } from "@/lib/format";
+import { isIpv4 } from "@/lib/ip";
 import {
   keys,
   useApprovalRequests,
@@ -300,6 +301,23 @@ function RequestAccessDialog({
   const [hours, setHours] = useState("24");
   const [reason, setReason] = useState("");
 
+  useEffect(() => {
+    if (!open) return;
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), 3000);
+    fetch("https://api.ipify.org?format=json", { signal: ac.signal })
+      .then((r) => r.json())
+      .then((d: { ip?: string }) => {
+        if (d.ip && isIpv4(d.ip)) setIp((cur) => (cur.trim() ? cur : d.ip!));
+      })
+      .catch(() => {}) // best-effort; leave field empty on failure
+      .finally(() => clearTimeout(t));
+    return () => {
+      clearTimeout(t);
+      ac.abort();
+    };
+  }, [open]);
+
   const create = useMutation({
     mutationFn: () =>
       createApprovalRequest({
@@ -307,8 +325,9 @@ function RequestAccessDialog({
         duration_hours: Number(hours) || 24,
         reason: reason.trim() || undefined,
       }),
-    onSuccess: () => {
+    onSuccess: (data) => {
       toast.success("Access request submitted");
+      if (data?.warning) toast.warning(data.warning);
       onOpenChange(false);
       setIp("");
       setReason("");
@@ -335,7 +354,10 @@ function RequestAccessDialog({
       }
     >
       <div className="space-y-4">
-        <Field label="Client IP" hint="The IP your proxy traffic originates from">
+        <Field
+          label="Client IP"
+          hint="Exact IP, or a pattern: * (any), 140.11.11.* , 140.*.*.* , CIDR 140.11.0.0/16, or IPv6."
+        >
           {(id) => (
             <Input id={id} autoFocus value={ip} onChange={(e) => setIp(e.target.value)} placeholder="203.0.113.7" />
           )}
@@ -378,8 +400,9 @@ function CreateGrantDialog({
         duration_hours: Number(hours) || 24,
         reason: reason.trim() || undefined,
       }),
-    onSuccess: () => {
+    onSuccess: (data) => {
       toast.success("Grant created");
+      if (data?.warning) toast.warning(data.warning);
       onOpenChange(false);
       setIp("");
       setReason("");
@@ -425,7 +448,10 @@ function CreateGrantDialog({
             </Select>
           )}
         </Field>
-        <Field label="Client IP">
+        <Field
+          label="Client IP"
+          hint="Exact IP, or a pattern: * (any), 140.11.11.* , 140.*.*.* , CIDR 140.11.0.0/16, or IPv6."
+        >
           {(id) => <Input id={id} value={ip} onChange={(e) => setIp(e.target.value)} placeholder="203.0.113.7" />}
         </Field>
         <Field label="Duration (hours)">
