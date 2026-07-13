@@ -1,19 +1,22 @@
 // Users directory — server-side pagination, search, role filter, create
 // dialog (root_admin). ?new=1 from the command palette opens the dialog.
 import { Plus, UsersRound } from "lucide-react";
-import { useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { createUser } from "@/api/endpoints";
 import type { Role } from "@/api/types";
+import { isAdminRole } from "@/lib/auth";
+import { downloadCsv } from "@/lib/download";
 import { formatRelative } from "@/lib/format";
+import { generatePassword } from "@/lib/password";
 import { useInvalidate, useSession, useUsers, keys } from "@/hooks/queries";
 import { Modal } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/card";
 import { Field, Input, Select } from "@/components/ui/input";
-import { Mono, Pagination, SearchInput } from "@/components/ui/misc";
+import { CopyButton, Mono, Pagination, SearchInput } from "@/components/ui/misc";
 import { RoleBadge, StatusPill } from "@/components/ui/badge";
 import { TableShell, THead, Th, Td, TRow, TableSkeleton } from "@/components/ui/table";
 import { EmptyState, ErrorState } from "@/components/ui/states";
@@ -28,7 +31,7 @@ export function UsersPage() {
   const [query, setQuery] = useState("");
   const [roleFilter, setRoleFilter] = useState<"all" | Role>("all");
   const users = useUsers(PAGE_SIZE, offset);
-  const isRoot = session?.role === "root_admin";
+  const canCreate = isAdminRole(session?.role);
   const createOpen = params.get("new") === "1";
   const setCreateOpen = (open: boolean) => {
     const next = new URLSearchParams(params);
@@ -71,7 +74,7 @@ export function UsersPage() {
             <option value="admin">Admin</option>
             <option value="user">User</option>
           </Select>
-          {isRoot && (
+          {canCreate && (
             <Button variant="primary" onClick={() => setCreateOpen(true)}>
               <Plus className="size-3.5" /> New user
             </Button>
@@ -150,7 +153,7 @@ export function UsersPage() {
                     : "Create the first account to hand out proxy access."
                 }
                 action={
-                  isRoot && !query && roleFilter === "all" ? (
+                  canCreate && !query && roleFilter === "all" ? (
                     <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}>
                       <Plus className="size-3.5" /> Create user
                     </Button>
@@ -185,11 +188,25 @@ function CreateUserDialog({
 }) {
   const invalidate = useInvalidate();
   const navigate = useNavigate();
+  const session = useSession();
+  const canGrantAdmin = session?.role === "root_admin";
   const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
+  const [password, setPassword] = useState(() => generatePassword());
   const [role, setRole] = useState<Role>("user");
   const [maxConns, setMaxConns] = useState("10");
   const [bwLimit, setBwLimit] = useState("0");
+  const [created, setCreated] = useState<{ id: number; username: string; password: string } | null>(
+    null,
+  );
+
+  // Re-roll the password (and reset the role to what the caller may grant)
+  // each time the dialog is opened.
+  useEffect(() => {
+    if (open) {
+      setPassword(generatePassword());
+      if (!canGrantAdmin) setRole("user");
+    }
+  }, [open, canGrantAdmin]);
 
   // Mirror backend rules so errors surface before the request.
   const usernameError =
@@ -214,11 +231,11 @@ function CreateUserDialog({
       }),
     onSuccess: (u) => {
       toast.success(`User ${u.username} created`);
+      setCreated({ id: u.id, username: username.trim(), password });
       invalidate(keys.usersAll);
       onOpenChange(false);
       setUsername("");
-      setPassword("");
-      navigate(`/users/${u.id}`);
+      setPassword(generatePassword());
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -229,86 +246,158 @@ function CreateUserDialog({
   };
 
   return (
-    <Modal
-      open={open}
-      onOpenChange={onOpenChange}
-      title="Create user"
-      description="Only root admins can create accounts."
-      footer={
-        <>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
-          <Button
-            variant="primary"
-            loading={create.isPending}
-            disabled={!username || !password || !!usernameError || !!passwordError}
-            onClick={() => create.mutate()}
-          >
-            Create user
-          </Button>
-        </>
-      }
-    >
-      <form onSubmit={submit} className="space-y-4">
-        <Field label="Username" error={usernameError}>
-          {(id) => (
-            <Input
-              id={id}
-              autoFocus
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              placeholder="alice"
-              autoComplete="off"
-            />
-          )}
-        </Field>
-        <Field label="Password" error={passwordError} hint="Min 8 chars, one letter + one digit">
-          {(id) => (
-            <Input
-              id={id}
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete="new-password"
-            />
-          )}
-        </Field>
-        <div className="grid grid-cols-3 gap-3">
-          <Field label="Role">
-            {(id) => (
-              <Select id={id} value={role} onChange={(e) => setRole(e.target.value as Role)}>
-                <option value="user">User</option>
-                <option value="admin">Admin</option>
-              </Select>
-            )}
-          </Field>
-          <Field label="Max conns">
+    <>
+      <Modal
+        open={open}
+        onOpenChange={onOpenChange}
+        title="Create user"
+        description="Only admins and root admins can create accounts."
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              loading={create.isPending}
+              disabled={!username || !password || !!usernameError || !!passwordError}
+              onClick={() => create.mutate()}
+            >
+              Create user
+            </Button>
+          </>
+        }
+      >
+        <form onSubmit={submit} className="space-y-4">
+          <Field label="Username" error={usernameError}>
             {(id) => (
               <Input
                 id={id}
-                type="number"
-                min={1}
-                value={maxConns}
-                onChange={(e) => setMaxConns(e.target.value)}
+                autoFocus
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder="alice"
+                autoComplete="off"
               />
             )}
           </Field>
-          <Field label="BW limit (MB)" hint="0 = unlimited">
+          <Field label="Password" error={passwordError} hint="Min 8 chars, one letter + one digit">
             {(id) => (
-              <Input
-                id={id}
-                type="number"
-                min={0}
-                value={bwLimit}
-                onChange={(e) => setBwLimit(e.target.value)}
-              />
+              <div className="flex items-center gap-1.5">
+                <Input
+                  id={id}
+                  className="flex-1"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  autoComplete="new-password"
+                  spellCheck={false}
+                />
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setPassword(generatePassword())}
+                >
+                  Regenerate
+                </Button>
+                <CopyButton value={password} label="Copy password" />
+              </div>
             )}
           </Field>
-        </div>
-        {/* Allow Enter-to-submit */}
-        <button type="submit" className="hidden" aria-hidden />
-      </form>
-    </Modal>
+          <div className="grid grid-cols-3 gap-3">
+            <Field label="Role">
+              {(id) => (
+                <Select
+                  id={id}
+                  value={role}
+                  onChange={(e) => setRole(e.target.value as Role)}
+                  disabled={!canGrantAdmin}
+                >
+                  <option value="user">User</option>
+                  {canGrantAdmin && <option value="admin">Admin</option>}
+                </Select>
+              )}
+            </Field>
+            <Field label="Max conns">
+              {(id) => (
+                <Input
+                  id={id}
+                  type="number"
+                  min={1}
+                  value={maxConns}
+                  onChange={(e) => setMaxConns(e.target.value)}
+                />
+              )}
+            </Field>
+            <Field label="BW limit (MB)" hint="0 = unlimited">
+              {(id) => (
+                <Input
+                  id={id}
+                  type="number"
+                  min={0}
+                  value={bwLimit}
+                  onChange={(e) => setBwLimit(e.target.value)}
+                />
+              )}
+            </Field>
+          </div>
+          {/* Allow Enter-to-submit */}
+          <button type="submit" className="hidden" aria-hidden />
+        </form>
+      </Modal>
+
+      <Modal
+        open={created !== null}
+        onOpenChange={(o) => {
+          if (!o) setCreated(null);
+        }}
+        title="User created"
+        description="This password is shown once. Copy or download it now."
+        footer={
+          created && (
+            <>
+              <Button
+                variant="secondary"
+                onClick={() =>
+                  downloadCsv(`user-${created.username}.csv`, [
+                    ["username", "password"],
+                    [created.username, created.password],
+                  ])
+                }
+              >
+                Download CSV
+              </Button>
+              <Button
+                variant="primary"
+                onClick={() => {
+                  const id = created.id;
+                  setCreated(null);
+                  navigate(`/users/${id}`);
+                }}
+              >
+                Done
+              </Button>
+            </>
+          )
+        }
+      >
+        {created && (
+          <div className="space-y-3">
+            <Field label="Username">
+              <div className="flex items-center gap-1.5">
+                <Input readOnly value={created.username} className="flex-1" />
+                <CopyButton value={created.username} label="Copy username" />
+              </div>
+            </Field>
+            <Field label="Password">
+              <div className="flex items-center gap-1.5">
+                <Input readOnly value={created.password} className="flex-1 font-mono" />
+                <CopyButton value={created.password} label="Copy password" />
+              </div>
+            </Field>
+          </div>
+        )}
+      </Modal>
+    </>
   );
 }
