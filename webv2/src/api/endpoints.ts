@@ -8,6 +8,7 @@ import type {
   ConfigResponse,
   ConnectionInfo,
   CreateApiKeyResponse,
+  CreateApprovalRequestResult,
   CreateUserBody,
   DashboardResponse,
   DeepHealthResponse,
@@ -50,6 +51,14 @@ export const createUser = (body: CreateUserBody) => post<UserResponse>("/api/use
 export const updateUser = (id: number, body: UpdateUserBody) =>
   put<UserResponse>(`/api/users/${id}`, body);
 export const deleteUser = (id: number) => del<void>(`/api/users/${id}`);
+export const changeOwnPassword = (body: {
+  current_password: string;
+  new_password: string;
+}) => post<void>("/api/users/me/password", body);
+export const adminResetPassword = (
+  userId: number,
+  body: { new_password: string },
+) => post<void>(`/api/users/${userId}/password`, body);
 
 // ── API keys ──
 export const listApiKeys = (userId: number) =>
@@ -114,10 +123,7 @@ export const createApprovalRequest = (body: {
   client_ip: string;
   duration_hours: number;
   reason?: string;
-}) => post<{ id: number; user_id: number; status: string; requested_at: number }>(
-  "/api/approval-requests",
-  body,
-);
+}) => post<CreateApprovalRequestResult>("/api/approval-requests", body);
 export const approveRequest = (id: number, reason?: string) =>
   post<{ id: number; status: string; user_id: number }>(
     `/api/approval-requests/${id}/approve`,

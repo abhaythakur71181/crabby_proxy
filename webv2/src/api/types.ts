@@ -188,6 +188,15 @@ export interface ApprovalResponse {
   expires_at: number;
   reason: string | null;
   duration_hours: number;
+  warning?: string | null;
+}
+
+export interface CreateApprovalRequestResult {
+  id: number;
+  user_id: number;
+  status: string;
+  requested_at: number;
+  warning?: string | null;
 }
 
 export type RequestStatus = "pending" | "approved" | "rejected";
