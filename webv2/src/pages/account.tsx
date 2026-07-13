@@ -1,15 +1,20 @@
 // My account — self-service home for every role. Identity comes from the
 // JWT (no admin endpoints needed), which fixes the old UI's API-keys page
 // that was dead for regular users. ?new-key=1 (from ⌘K) opens key creation.
+import { useState } from "react";
 import { KeyRound, ShieldCheck } from "lucide-react";
 import { Link, useSearchParams } from "react-router";
+import { useMutation } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { formatDateTime } from "@/lib/format";
 import { useSession } from "@/hooks/queries";
 import { Stagger, StaggerItem } from "@/components/motion";
 import { Panel, PanelHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Field, Input } from "@/components/ui/input";
 import { Mono } from "@/components/ui/misc";
 import { RoleBadge } from "@/components/ui/badge";
+import { changeOwnPassword } from "@/api/endpoints";
 import {
   ApiKeysSection,
   QuotaSection,
@@ -69,6 +74,12 @@ export function AccountPage() {
         />
       </StaggerItem>
 
+      {session.role !== "root_admin" && (
+        <StaggerItem>
+          <ChangePasswordCard />
+        </StaggerItem>
+      )}
+
       <StaggerItem className="grid gap-4 lg:grid-cols-[2fr_1fr]">
         <RecentUsageSection userId={session.userId} />
         <div className="space-y-4">
@@ -91,5 +102,87 @@ export function AccountPage() {
         </div>
       </StaggerItem>
     </Stagger>
+  );
+}
+
+function ChangePasswordCard() {
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [confirm, setConfirm] = useState("");
+
+  const mismatch = confirm.length > 0 && next !== confirm;
+  const tooShort = next.length > 0 && next.length < 8;
+  const canSubmit =
+    current.length > 0 && next.length >= 8 && next === confirm;
+
+  const change = useMutation({
+    mutationFn: () =>
+      changeOwnPassword({ current_password: current, new_password: next }),
+    onSuccess: () => {
+      toast.success("Password changed");
+      setCurrent("");
+      setNext("");
+      setConfirm("");
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  return (
+    <Panel className="px-5 py-4">
+      <PanelHeader title="Change password" />
+      <div className="mt-3 grid max-w-sm gap-3">
+        <Field label="Current password">
+          {(id) => (
+            <Input
+              id={id}
+              type="password"
+              value={current}
+              onChange={(e) => setCurrent(e.target.value)}
+              autoComplete="current-password"
+            />
+          )}
+        </Field>
+        <Field
+          label="New password"
+          hint="At least 8 characters, with a letter and a digit."
+          error={tooShort ? "Too short (min 8)" : undefined}
+        >
+          {(id) => (
+            <Input
+              id={id}
+              type="password"
+              value={next}
+              onChange={(e) => setNext(e.target.value)}
+              autoComplete="new-password"
+            />
+          )}
+        </Field>
+        <Field
+          label="Confirm new password"
+          error={mismatch ? "Passwords do not match" : undefined}
+        >
+          {(id) => (
+            <Input
+              id={id}
+              type="password"
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value)}
+              autoComplete="new-password"
+            />
+          )}
+        </Field>
+        <div>
+          <Button
+            variant="primary"
+            size="sm"
+            loading={change.isPending}
+            disabled={!canSubmit}
+            onClick={() => change.mutate()}
+          >
+            Change password
+          </Button>
+        </div>
+      </div>
+    </Panel>
   );
 }
