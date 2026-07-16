@@ -47,6 +47,14 @@ pub async fn create_approval(
         crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
     current_user.require_admin()?;
 
+    // Bound the grant duration: negative -> expires in the past; huge -> effectively
+    // permanent. Cap at 1..=8760 hours (1 year).
+    if !(1..=8760).contains(&payload.duration_hours) {
+        return Err(ApiError::bad_request(
+            "duration_hours must be between 1 and 8760",
+        ));
+    }
+
     // Validate the client-IP pattern; reject invalid, warn (but allow) broad.
     let warning = crate::ip_pattern::validate_approval_pattern(&payload.client_ip)
         .map_err(|e| ApiError::bad_request(e.to_string()))?;

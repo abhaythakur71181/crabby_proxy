@@ -159,7 +159,7 @@ async fn send_error_response(
         }
         (ProxyProtocol::HTTP, ErrorType::QuotaExceeded) => stream
             .write_all(
-                b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 18\r\n\r\nQuota exceeded\r\n",
+                b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 16\r\n\r\nQuota exceeded\r\n",
             )
             .await,
         (ProxyProtocol::SOCKS4, _) => utils::send_socks4_response(stream, false).await,

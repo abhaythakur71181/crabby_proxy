@@ -3,6 +3,10 @@ use std::path::Path;
 
 /// Default idle timeout for relay tunnels (seconds). See
 /// [`ServerConfig::idle_timeout_secs`].
+fn default_true() -> bool {
+    true
+}
+
 fn default_idle_timeout_secs() -> u64 {
     900
 }
@@ -152,9 +156,9 @@ pub struct FilterConfig {
     // SSRF egress guard. When true, the proxy refuses to connect to a resolved
     // target IP that is private / loopback / link-local / ULA / unspecified /
     // multicast — blocking SSRF into internal services and cloud metadata.
-    // Defaults to false so same-machine / internal targets work out of the box;
-    // set true to harden a deployment that only proxies to the public internet.
-    #[serde(default)]
+    // Defaults to true (secure by default): explicitly set false only for a
+    // deployment that intentionally proxies to same-machine / internal targets.
+    #[serde(default = "default_true")]
     pub block_private_targets: bool,
 }
 
@@ -292,7 +296,7 @@ impl Default for Config {
                 global_allowed_targets: vec![],
                 global_blocked_targets: vec![],
                 default_access_schedule: None,
-                block_private_targets: false,
+                block_private_targets: true,
             },
             logging: LoggingConfig {
                 level: "info".to_string(),

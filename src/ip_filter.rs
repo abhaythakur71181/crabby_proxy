@@ -51,13 +51,11 @@ impl IpFilter {
                 !self.block_list.iter().any(|net| net.contains(&ip))
             }
             FilterMode::AllowList => {
-                // Allow mode: allow only if in allow_list
-                if self.allow_list.is_empty() {
-                    // If allow list is empty in allow mode, allow all
-                    true
-                } else {
-                    self.allow_list.iter().any(|net| net.contains(&ip))
-                }
+                // Allow mode: allow only if in allow_list.
+                // An empty allow-list denies all (fail-closed): allowlist mode
+                // means deny-by-default, so an unpopulated / wiped list must not
+                // silently allow every client.
+                self.allow_list.iter().any(|net| net.contains(&ip))
             }
         }
     }
@@ -185,11 +183,11 @@ mod tests {
     // --- AllowList edge cases ---
 
     #[test]
-    fn test_allow_list_empty_allows_all() {
+    fn test_allow_list_empty_denies_all() {
         let filter = IpFilter::new(FilterMode::AllowList, vec![], vec![]).unwrap();
-        // Empty allowlist in allow mode should allow all
-        assert!(filter.is_allowed("1.2.3.4".parse().unwrap()));
-        assert!(filter.is_allowed("10.0.0.1".parse().unwrap()));
+        // Empty allowlist in allow mode is fail-closed: deny-by-default.
+        assert!(!filter.is_allowed("1.2.3.4".parse().unwrap()));
+        assert!(!filter.is_allowed("10.0.0.1".parse().unwrap()));
     }
 
     #[test]

@@ -53,7 +53,7 @@ pub async fn get_user_usage_stats(
     if !current_user.can_access_user(user_id) {
         return Err(ApiError::forbidden("Cannot access other users' usage data"));
     }
-    let days = params.days.unwrap_or(30);
+    let days = params.days.unwrap_or(30).clamp(1, 365);
     let stats = usage::get_user_usage(&state.db_pool, user_id, days)
         .await
         .map_err(|e| {
@@ -83,7 +83,7 @@ pub async fn get_recent_usage(
     if !current_user.can_access_user(user_id) {
         return Err(ApiError::forbidden("Cannot access other users' usage data"));
     }
-    let limit = params.limit.unwrap_or(100);
+    let limit = params.limit.unwrap_or(100).clamp(1, 500);
 
     let records = usage::get_recent_usage_records(&state.db_pool, user_id, limit)
         .await
@@ -170,8 +170,8 @@ pub async fn get_system_usage_summary(
         crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
     current_user.require_admin()?;
 
-    let days = params.days.unwrap_or(30);
-    let top_limit = params.limit.unwrap_or(10);
+    let days = params.days.unwrap_or(30).clamp(1, 365);
+    let top_limit = params.limit.unwrap_or(10).clamp(1, 100);
 
     let stats = usage::get_system_usage_stats(&state.db_pool, days)
         .await

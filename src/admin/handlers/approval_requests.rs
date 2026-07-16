@@ -82,6 +82,14 @@ pub async fn create_request(
     axum::Extension(current_user_id): axum::Extension<i64>,
     Json(payload): Json<CreateRequestPayload>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // Bound the requested duration (1..=8760 hours); a user-supplied value must
+    // not create a past-dated or effectively permanent grant.
+    if !(1..=8760).contains(&payload.duration_hours) {
+        return Err(ApiError::bad_request(
+            "duration_hours must be between 1 and 8760",
+        ));
+    }
+
     // Validate the client-IP pattern; reject invalid, warn (but allow) broad.
     let warning = crate::ip_pattern::validate_approval_pattern(&payload.client_ip)
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
