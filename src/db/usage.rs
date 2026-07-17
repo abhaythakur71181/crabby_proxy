@@ -104,6 +104,22 @@ pub async fn record_usage(
     Ok(result.last_insert_rowid())
 }
 
+/// Delete `usage` rows older than `retention_days` (based on `started_at`).
+/// Returns the number of rows removed. A `retention_days` of 0 is a no-op
+/// (retention disabled). This bounds the unbounded growth of per-user
+/// destination history (sensitive PII) — see #29.
+pub async fn purge_old_usage(pool: &SqlitePool, retention_days: u32) -> Result<u64, sqlx::Error> {
+    if retention_days == 0 {
+        return Ok(0);
+    }
+    let cutoff = chrono::Utc::now().timestamp() - (retention_days as i64 * 86400);
+    let result = sqlx::query("DELETE FROM usage WHERE started_at < ?")
+        .bind(cutoff)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
+}
+
 /// User usage statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserUsageStats {
@@ -418,6 +434,43 @@ mod tests {
         .execute(&pool)
         .await;
         assert!(bogus.is_err(), "CHECK must reject a non-enum status value");
+    }
+
+    /// #29: retention purge removes rows past the window and keeps recent ones;
+    /// retention_days == 0 is a no-op.
+    #[tokio::test]
+    async fn test_purge_old_usage() {
+        let pool = setup_test_db().await;
+        let now = chrono::Utc::now().timestamp();
+        let old = now - 100 * 86400; // 100 days ago
+        let recent = now - 86400; // 1 day ago
+        for (i, ts) in [old, recent].into_iter().enumerate() {
+            record_usage(
+                &pool,
+                1,
+                &Uuid::from_u128(i as u128 + 1),
+                "127.0.0.1",
+                "example.com",
+                "http",
+                ts,
+                ts,
+                0,
+                0,
+                ConnectionStatus::Success,
+            )
+            .await
+            .unwrap();
+        }
+
+        // Disabled retention removes nothing.
+        assert_eq!(purge_old_usage(&pool, 0).await.unwrap(), 0);
+
+        // 30-day retention removes only the 100-day-old row.
+        let removed = purge_old_usage(&pool, 30).await.unwrap();
+        assert_eq!(removed, 1);
+
+        let remaining = get_all_time_usage(&pool, 1).await.unwrap();
+        assert_eq!(remaining.connection_count, 1);
     }
 
     #[tokio::test]

@@ -7,6 +7,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_usage_retention_days() -> u32 {
+    90
+}
+
 fn default_idle_timeout_secs() -> u64 {
     900
 }
@@ -67,6 +71,10 @@ pub struct ServerConfig {
 pub struct DatabaseConfig {
     pub path: String,
     pub max_connections: u32,
+    /// Delete `usage` rows older than this many days (per-user destination
+    /// history is sensitive PII and grows without bound). 0 disables purging.
+    #[serde(default = "default_usage_retention_days")]
+    pub usage_retention_days: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -245,6 +253,7 @@ impl Default for Config {
             database: DatabaseConfig {
                 path: "sqlite:proxy.db".to_string(),
                 max_connections: 10,
+                usage_retention_days: default_usage_retention_days(),
             },
             authentication: AuthConfig {
                 enabled: true,

@@ -10,6 +10,8 @@ tls_key_path = ""
 [database]
 path = "sqlite://proxy.db"
 max_connections = 10
+# Delete usage rows older than this many days (PII retention). 0 disables.
+usage_retention_days = 90
 
 [authentication]
 enabled = true
