@@ -453,7 +453,7 @@ async fn handle_client(
                         ended_at,
                         bytes_sent: bytes_sent as i64,
                         bytes_received: bytes_received as i64,
-                        status: "success".to_string(),
+                        status: crate::db::usage::ConnectionStatus::Success,
                     })
                     .await;
                 // Persistence is the single source of truth for cumulative
@@ -480,14 +480,18 @@ async fn handle_client(
             );
         }
         Err((e, error_type)) => {
-            let error_label = match error_type {
-                ErrorType::Handshake => "handshake",
-                ErrorType::Connection => "connection",
-                ErrorType::Response => "response",
-                ErrorType::Timeout => "timeout",
-                ErrorType::Tunnel => "tunnel",
-                ErrorType::QuotaExceeded => "quota_exceeded",
+            // Map the failure to the canonical ConnectionStatus (single source
+            // of truth); the access-log label is derived from it so the two can
+            // never drift.
+            let status = match error_type {
+                ErrorType::Handshake => crate::db::usage::ConnectionStatus::Handshake,
+                ErrorType::Connection => crate::db::usage::ConnectionStatus::Connection,
+                ErrorType::Response => crate::db::usage::ConnectionStatus::Response,
+                ErrorType::Timeout => crate::db::usage::ConnectionStatus::Timeout,
+                ErrorType::Tunnel => crate::db::usage::ConnectionStatus::Tunnel,
+                ErrorType::QuotaExceeded => crate::db::usage::ConnectionStatus::QuotaExceeded,
             };
+            let error_label = status.as_str();
             crate::metrics::REQUESTS_TOTAL
                 .with_label_values(&[proto_label, "failed"])
                 .inc();
@@ -518,7 +522,7 @@ async fn handle_client(
                         ended_at,
                         bytes_sent: 0,
                         bytes_received: 0,
-                        status: error_label.to_string(),
+                        status,
                     })
                     .await;
             }
