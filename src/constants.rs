@@ -25,6 +25,9 @@ pub const POOL_CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
 /// DNS cache cleanup interval.
 pub const DNS_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
+/// How often the background task purges usage rows past the retention window.
+pub const USAGE_PURGE_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+
 // ── Buffer sizes ──────────────────────────────────────────────────────
 
 /// Initial buffer for HTTP header parsing.

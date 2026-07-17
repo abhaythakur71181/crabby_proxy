@@ -193,6 +193,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Background: purge usage rows past the retention window (bounds PII growth).
+    // Runs once shortly after boot, then on a fixed interval.
+    {
+        let retention_state = state.clone();
+        let retention_days = retention_state.config.load().database.usage_retention_days;
+        if retention_days > 0 {
+            tracing::info!(
+                "Usage retention: purging rows older than {} days",
+                retention_days
+            );
+            tokio::spawn(async move {
+                // Small initial delay so startup isn't competing for the write lock.
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                loop {
+                    // Re-read in case config was reloaded.
+                    let days = retention_state.config.load().database.usage_retention_days;
+                    if days > 0 {
+                        match crate::db::usage::purge_old_usage(&retention_state.db_pool, days)
+                            .await
+                        {
+                            Ok(n) if n > 0 => {
+                                tracing::info!(
+                                    "Usage retention: purged {} rows older than {} days",
+                                    n,
+                                    days
+                                )
+                            }
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!("Usage retention purge failed: {}", e),
+                        }
+                    }
+                    tokio::time::sleep(constants::USAGE_PURGE_INTERVAL).await;
+                }
+            });
+        }
+    }
+
     // Wait for EITHER shutdown signal OR server crash
     tokio::select! {
         _ = shutdown_signal() => {

@@ -17,6 +17,9 @@ tls_key_path = ""
 # Single-colon form so the Dockerfile can rewrite it to the /app/data volume.
 path = "sqlite:proxy.db"
 max_connections = 10
+# Delete usage rows older than this many days (per-user destination history is
+# sensitive PII and grows without bound). 0 disables purging.
+usage_retention_days = 90
 
 [authentication]
 enabled = true
