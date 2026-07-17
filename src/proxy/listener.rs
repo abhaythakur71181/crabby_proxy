@@ -246,17 +246,28 @@ async fn handle_client(
     let mut buffered_stream = BufferedClientStream::new(stream);
     // ── Processing: Authentication ──────────────────────────────────────
     let user_id = if ctx.config.auth_required {
-        match protocol.authenticate(&mut buffered_stream, state).await {
-            Ok((true, uid)) => {
+        // Bound the auth read so a slowloris client can't hold the connection
+        // (and its global permit) open indefinitely.
+        let auth = timeout(
+            crate::constants::HANDSHAKE_TIMEOUT,
+            protocol.authenticate(&mut buffered_stream, state),
+        )
+        .await;
+        match auth {
+            Ok(Ok((true, uid))) => {
                 tracing::debug!("{} authenticated via {}", client_addr, protocol);
                 uid
             }
-            Ok((false, _)) => {
+            Ok(Ok((false, _))) => {
                 tracing::error!("Auth required for {} via {}", client_addr, protocol);
                 return;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::error!("Auth failed for {} via {}: {}", client_addr, protocol, e);
+                return;
+            }
+            Err(_) => {
+                tracing::warn!("{}: handshake/auth timed out via {}", client_addr, protocol);
                 return;
             }
         }
@@ -294,12 +305,15 @@ async fn handle_client(
     }
     // ── Processing: Parse target ────────────────────────────────────────
     let (target, mut stream) = if matches!(protocol, ProxyProtocol::HTTP | ProxyProtocol::HTTPS) {
-        match protocol
-            .parse_target_from_buffered(&mut buffered_stream)
-            .await
+        // Bound the CONNECT/target-header read (slowloris protection).
+        match timeout(
+            crate::constants::HANDSHAKE_TIMEOUT,
+            protocol.parse_target_from_buffered(&mut buffered_stream),
+        )
+        .await
         {
-            Ok(t) => (t, buffered_stream.into_inner()),
-            Err(e) => {
+            Ok(Ok(t)) => (t, buffered_stream.into_inner()),
+            Ok(Err(e)) => {
                 tracing::error!("Failed to parse target: {}", e);
                 let _ = send_error_response(
                     &protocol,
@@ -309,10 +323,30 @@ async fn handle_client(
                 .await;
                 return;
             }
+            Err(_) => {
+                tracing::warn!("{}: target-parse timed out via {}", client_addr, protocol);
+                let _ = send_error_response(
+                    &protocol,
+                    &mut buffered_stream.into_inner(),
+                    ErrorType::Timeout,
+                )
+                .await;
+                return;
+            }
         }
     } else {
         let mut stream = buffered_stream.into_inner();
-        match protocol.parse_target_from_stream(&mut stream).await {
+        match timeout(
+            crate::constants::HANDSHAKE_TIMEOUT,
+            protocol.parse_target_from_stream(&mut stream),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "target parse timed out",
+            ))
+        }) {
             Ok(t) => (t, stream),
             Err(e) => {
                 tracing::error!("Failed to parse target: {}", e);
