@@ -655,11 +655,25 @@ async fn handle_h2_tunnel(
     let sent_c = sent_counter.clone();
     let recv_c = recv_counter.clone();
 
+    // Idle teardown: if a peer vanishes without FIN/RST (common for mobile/push
+    // clients), a plain read here would block forever, leaking the task, the
+    // upstream FD, the connection record, and the ACTIVE_CONNECTIONS gauge (#40).
+    // Bound each direction's read by the configured idle window; 0 disables.
+    let idle_secs = state.config.load().server.idle_timeout_secs;
+    let idle = std::time::Duration::from_secs(if idle_secs == 0 { u64::MAX } else { idle_secs });
+
     // Bridge: h2 recv_stream -> upstream writer
     let q_send = quota_tracker.clone();
     let h2_to_upstream = async {
         loop {
-            match recv_stream.data().await {
+            let data = match tokio::time::timeout(idle, recv_stream.data()).await {
+                Ok(inner) => inner,
+                Err(_) => {
+                    tracing::debug!("[HTTP2] idle timeout (client->upstream), closing tunnel");
+                    break;
+                }
+            };
+            match data {
                 Some(Ok(data)) => {
                     if data.is_empty() {
                         break;
@@ -698,7 +712,14 @@ async fn handle_h2_tunnel(
     let upstream_to_h2 = async {
         let mut buf = vec![0u8; crate::constants::H2_RELAY_BUFFER_SIZE];
         loop {
-            match upstream_reader.read(&mut buf).await {
+            let read = match tokio::time::timeout(idle, upstream_reader.read(&mut buf)).await {
+                Ok(inner) => inner,
+                Err(_) => {
+                    tracing::debug!("[HTTP2] idle timeout (upstream->client), closing tunnel");
+                    break;
+                }
+            };
+            match read {
                 Ok(0) => break,
                 Ok(n) => {
                     recv_c.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
