@@ -83,6 +83,26 @@ pub async fn handle_h2_connection(
         let method = request.method().clone();
         let uri = request.uri().clone();
 
+        // Count every stream against the global connection cap (#41): one
+        // permit per stream, held for the stream's lifetime. Otherwise a single
+        // h2 connection's accept-permit would cover up to 256 concurrent
+        // upstreams, defeating max_connections by ~256x.
+        let permit = match state_arc.global_conn_semaphore.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::warn!(
+                    "[HTTP2] global connection limit reached, rejecting stream from {}",
+                    client_addr
+                );
+                let response = http::Response::builder()
+                    .status(http::StatusCode::SERVICE_UNAVAILABLE)
+                    .body(())
+                    .unwrap_or_else(|_| http::Response::new(()));
+                let _ = respond.send_response(response, true);
+                continue;
+            }
+        };
+
         // Non-CONNECT requests: forward as HTTP proxy (GET, POST, etc.)
         if method != http::Method::CONNECT {
             // Extract auth header before moving request
@@ -93,6 +113,7 @@ pub async fn handle_h2_connection(
                 .map(|s| s.to_string());
             let state_ref = state_arc.clone();
             tokio::spawn(async move {
+                let _permit = permit; // held for the stream's lifetime
                 handle_h2_forward_validated(request, respond, client_addr, auth_header, &state_ref)
                     .await;
             });
@@ -126,6 +147,7 @@ pub async fn handle_h2_connection(
         // Each stream gets its own validation pipeline
         let state_ref = state_arc.clone();
         tokio::spawn(async move {
+            let _permit = permit; // held for the stream's lifetime
             handle_h2_connect_validated(authority, addr, auth_header, request, respond, &state_ref)
                 .await;
         });

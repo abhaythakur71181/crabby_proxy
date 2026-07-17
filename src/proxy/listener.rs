@@ -31,15 +31,13 @@ pub async fn run_proxy_server(state: Arc<AppState>, addr: SocketAddr) {
     };
 
     let mut shutdown_rx = state.shutdown_tx.subscribe();
-    let max_global_conns = {
-        let config = state.config.load();
-        config.server.max_connections
-    };
-    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_global_conns));
+    // Shared with the HTTP/2 handler so multiplexed h2 streams are counted
+    // against the same global cap (#41), not just the per-TCP-accept permit.
+    let semaphore = state.global_conn_semaphore.clone();
     tracing::info!(
         "Proxy server listening on {} (max {} connections)",
         addr,
-        max_global_conns
+        semaphore.available_permits()
     );
     loop {
         tokio::select! {
