@@ -36,7 +36,7 @@ pub struct UsageRecord {
     pub ended_at: i64,
     pub bytes_sent: i64,
     pub bytes_received: i64,
-    pub status: String,
+    pub status: crate::db::usage::ConnectionStatus,
 }
 
 #[derive(Clone)]
@@ -118,7 +118,7 @@ async fn write_batch(pool: &SqlitePool, batch: &mut Vec<UsageRecord>) {
                 rec.ended_at,
                 rec.bytes_sent,
                 rec.bytes_received,
-                &rec.status,
+                rec.status,
             )
             .await
             {
@@ -160,7 +160,7 @@ async fn insert_usage(
     .bind(duration)
     .bind(rec.bytes_sent)
     .bind(rec.bytes_received)
-    .bind(&rec.status)
+    .bind(rec.status.as_str())
     .execute(&mut **tx)
     .await?;
     Ok(())

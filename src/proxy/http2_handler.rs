@@ -360,7 +360,7 @@ async fn handle_h2_connect_validated(
                         ended_at,
                         bytes_sent: bytes_sent as i64,
                         bytes_received: bytes_received as i64,
-                        status: "success".to_string(),
+                        status: crate::db::usage::ConnectionStatus::Success,
                     })
                     .await;
             }
@@ -388,7 +388,7 @@ async fn handle_h2_connect_validated(
                         ended_at,
                         bytes_sent: 0,
                         bytes_received: 0,
-                        status: "failed".to_string(),
+                        status: crate::db::usage::ConnectionStatus::Failed,
                     })
                     .await;
             }
