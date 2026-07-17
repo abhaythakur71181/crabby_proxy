@@ -140,6 +140,13 @@ pub struct AppState {
     // by ticket string → issue time. Browsers can't send a bearer on the WS
     // handshake, so an authed admin mints a ticket and opens the WS with it.
     pub ws_tickets: Arc<dashmap::DashMap<String, std::time::Instant>>,
+
+    // Global cap on concurrent proxied connections, shared by the TCP accept
+    // loop (one permit per accepted connection) and the HTTP/2 handler (one
+    // permit per multiplexed stream). Without per-stream accounting an h2
+    // connection's single accept-permit covers up to 256 streams, defeating the
+    // global limit by ~256x (#41).
+    pub global_conn_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl AppState {
@@ -276,6 +283,9 @@ impl AppState {
         };
 
         Ok(Self {
+            global_conn_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                config.server.max_connections,
+            )),
             config: Arc::new(ArcSwap::from_pointee(config.clone())),
             state,
             db_pool: db_pool.clone(),
