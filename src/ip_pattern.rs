@@ -57,9 +57,7 @@ impl IpPattern {
         // IPv4: exactly 4 dotted parts, each "*" or 0..=255.
         let parts: Vec<&str> = s.split('.').collect();
         if parts.len() != 4 {
-            return Err(IpPatternError(format!(
-                "expected 4 octets or '*' in '{s}'"
-            )));
+            return Err(IpPatternError(format!("expected 4 octets or '*' in '{s}'")));
         }
         let mut octets: [Option<u8>; 4] = [None; 4];
         let mut fixed = 0;
@@ -96,12 +94,10 @@ impl IpPattern {
             IpPattern::V4Octets(pat) => match ip {
                 IpAddr::V4(v4) => {
                     let actual = v4.octets();
-                    pat.iter()
-                        .zip(actual.iter())
-                        .all(|(p, a)| match p {
-                            Some(v) => v == a,
-                            None => true,
-                        })
+                    pat.iter().zip(actual.iter()).all(|(p, a)| match p {
+                        Some(v) => v == a,
+                        None => true,
+                    })
                 }
                 IpAddr::V6(_) => false,
             },

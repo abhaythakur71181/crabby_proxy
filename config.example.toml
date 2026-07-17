@@ -1,0 +1,91 @@
+# Example configuration baked into the Docker image as /app/config.toml.
+# Secrets here are PLACEHOLDERS — the boot guard (src/config_env.rs) refuses to
+# start on default credentials, so supply real values at runtime via env vars
+# (CRABBY_ADMIN_PASSWORD, CRABBY_JWT_SECRET, ...) or CLI flags. Never commit real
+# secrets to this file.
+
+[server]
+proxy_bind = "0.0.0.0:8080"
+admin_bind = "127.0.0.1:8081"
+max_connections = 10000
+connection_timeout = 30
+tls_enabled = false
+tls_cert_path = ""
+tls_key_path = ""
+
+[database]
+# Single-colon form so the Dockerfile can rewrite it to the /app/data volume.
+path = "sqlite:proxy.db"
+max_connections = 10
+
+[authentication]
+enabled = true
+method = "basic"
+username = "admin"
+password = "REPLACE_ME"
+jwt_secret = "REPLACE_ME_WITH_A_32_BYTE_RANDOM_SECRET"
+jwt_expiration = 86400
+
+[protocols]
+enable_http = true
+enable_https = true
+enable_socks4 = true
+enable_socks5 = true
+auto_detect = true
+
+[features]
+connection_approval = false
+approval_timeout = 300
+reverse_tunnels = false
+tunnel_port_start = 10000
+tunnel_port_end = 10999
+
+[state]
+backend = "memory"
+redis_url = "redis://localhost:6379"
+redis_pool_size = 10
+redis_key_prefix = "crabby_proxy:"
+redis_connection_timeout = 5
+
+[rate_limiting]
+enabled = true
+requests_per_second = 100
+burst_size = 200
+ban_duration = 300
+
+[filtering]
+ip_allowlist = []
+ip_blocklist = []
+geo_blocking_enabled = false
+blocked_countries = []
+# SSRF egress guard is ON by default in code (block_private_targets); leave it on
+# unless this instance intentionally proxies to internal/same-machine targets.
+
+[logging]
+level = "info"
+format = "pretty"
+file_enabled = false
+file_path = "proxy.log"
+access_log_enabled = true
+access_log_path = "access.log"
+
+[metrics]
+enabled = true
+prometheus_path = "/metrics"
+update_interval = 10
+
+[admin]
+enabled = true
+auth_enabled = true
+admin_username = "admin"
+admin_password = "REPLACE_ME"
+websocket_enabled = true
+cors_enabled = true
+cors_origins = ["http://localhost:3000"]
+
+[advanced]
+buffer_size = 8192
+connection_pooling = false
+pool_max_idle_per_host = 10
+http2_enabled = false
+dns_cache_ttl = 300

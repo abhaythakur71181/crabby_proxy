@@ -51,7 +51,10 @@ RUN set -eux; \
 WORKDIR /app
 
 COPY --from=builder /out/crabby_proxy /usr/local/bin/crabby_proxy
-COPY --chown=crabby:crabby config.toml /app/config.toml
+# Bake the tracked template (not the gitignored local config.toml, which is
+# absent on a clean checkout / CI and also carries local dev credentials).
+# Real secrets are supplied at runtime via env vars / CLI flags.
+COPY --chown=crabby:crabby config.example.toml /app/config.toml
 
 # Point SQLite at the mountable data volume rather than cwd.
 RUN sed -i 's|sqlite:proxy\.db|sqlite:/app/data/proxy.db|' /app/config.toml
