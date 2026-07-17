@@ -507,8 +507,7 @@ impl ProxyProtocol {
                 loop {
                     stream.read_exact(&mut buf).await?;
                     request_line.push(buf[0]);
-                    if request_line.len() >= 2
-                        && request_line[request_line.len() - 2..] == [b'\r', b'\n']
+                    if request_line.len() >= 2 && request_line[request_line.len() - 2..] == *b"\r\n"
                     {
                         break;
                     }
@@ -555,7 +554,7 @@ impl ProxyProtocol {
                         }
 
                         // Check if we've seen \r\n\r\n
-                        if header_buf.len() >= 4 && last_four == [b'\r', b'\n', b'\r', b'\n'] {
+                        if header_buf.len() >= 4 && last_four == *b"\r\n\r\n" {
                             break;
                         }
                     }
@@ -1070,42 +1069,42 @@ mod tests {
 
     #[test]
     fn test_detect_http_get() {
-        let buf = [b'G', b'E', b'T', b' '];
+        let buf = *b"GET ";
         let protocol = ProxyProtocol::detect_from_peek(&buf).unwrap();
         assert_eq!(protocol, ProxyProtocol::HTTP);
     }
 
     #[test]
     fn test_detect_http_post() {
-        let buf = [b'P', b'O', b'S', b'T'];
+        let buf = *b"POST";
         let protocol = ProxyProtocol::detect_from_peek(&buf).unwrap();
         assert_eq!(protocol, ProxyProtocol::HTTP);
     }
 
     #[test]
     fn test_detect_http_put() {
-        let buf = [b'P', b'U', b'T', b' '];
+        let buf = *b"PUT ";
         let protocol = ProxyProtocol::detect_from_peek(&buf).unwrap();
         assert_eq!(protocol, ProxyProtocol::HTTP);
     }
 
     #[test]
     fn test_detect_http_head() {
-        let buf = [b'H', b'E', b'A', b'D'];
+        let buf = *b"HEAD";
         let protocol = ProxyProtocol::detect_from_peek(&buf).unwrap();
         assert_eq!(protocol, ProxyProtocol::HTTP);
     }
 
     #[test]
     fn test_detect_http_delete() {
-        let buf = [b'D', b'E', b'L', b'E'];
+        let buf = *b"DELE";
         let protocol = ProxyProtocol::detect_from_peek(&buf).unwrap();
         assert_eq!(protocol, ProxyProtocol::HTTP);
     }
 
     #[test]
     fn test_detect_http_connect() {
-        let buf = [b'C', b'O', b'N', b'N'];
+        let buf = *b"CONN";
         let protocol = ProxyProtocol::detect_from_peek(&buf).unwrap();
         assert_eq!(protocol, ProxyProtocol::HTTP);
     }
