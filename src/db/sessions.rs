@@ -154,7 +154,11 @@ mod tests {
         assert_eq!(a.len(), 64, "SHA-256 hex is 64 chars");
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, "super-secret-bearer", "must not store the raw token");
-        assert_ne!(a, hash_token("different"), "distinct tokens hash distinctly");
+        assert_ne!(
+            a,
+            hash_token("different"),
+            "distinct tokens hash distinctly"
+        );
     }
 
     async fn migrated_pool() -> SqlitePool {
@@ -189,7 +193,10 @@ mod tests {
         // Lookup by the raw token still works (hashes internally).
         let found = get_session_by_token(&pool, raw).await.unwrap();
         assert!(found.is_some());
-        assert!(get_session_by_token(&pool, "wrong").await.unwrap().is_none());
+        assert!(get_session_by_token(&pool, "wrong")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
