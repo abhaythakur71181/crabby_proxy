@@ -112,7 +112,11 @@ pub async fn create_request(
     let detail = format!(
         "duration: {}h{}",
         payload.duration_hours,
-        if warning.is_some() { ", broad_pattern=true" } else { "" }
+        if warning.is_some() {
+            ", broad_pattern=true"
+        } else {
+            ""
+        }
     );
     let _ = crate::db::audit_log::log_action(
         &state.db_pool,

@@ -87,7 +87,11 @@ pub async fn create_approval(
             "User {}, duration: {}h{}",
             payload.user_id,
             payload.duration_hours,
-            if warning.is_some() { ", broad_pattern=true" } else { "" }
+            if warning.is_some() {
+                ", broad_pattern=true"
+            } else {
+                ""
+            }
         )),
         Some(&payload.client_ip),
     )

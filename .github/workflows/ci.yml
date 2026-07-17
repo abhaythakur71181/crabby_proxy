@@ -44,6 +44,17 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # Justified, non-applicable-to-us advisories with no reachable fix.
+          # Revisit on the dependency-bump pass (#11).
+          #  RUSTSEC-2023-0071 (rsa/Marvin): only HS256 (HMAC) is used via
+          #    jsonwebtoken; the RSA code path is never exercised, and no fixed
+          #    rsa release exists.
+          #  RUSTSEC-2025-0132 (maxminddb): unsound `open_mmap`; we call
+          #    `Reader::open_readfile`, not the mmap path.
+          #  RUSTSEC-2024-0437 (protobuf via prometheus): recursion crash when
+          #    parsing untrusted protobuf; we only emit the text exposition
+          #    format and never parse protobuf input.
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0132,RUSTSEC-2024-0437
 
   secrets:
     name: Secret scan — gitleaks
@@ -56,25 +67,25 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  web:
-    name: Web — lint, build, test
+  webv2:
+    name: Web (v2) — typecheck, test, build
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: web
+        working-directory: webv2
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: oven-sh/setup-bun@v2
         with:
-          node-version: 20
+          bun-version: latest
       - name: Install
-        run: npm ci
-      - name: Lint
-        run: npm run lint || true
+        run: bun install --frozen-lockfile
+      - name: Typecheck
+        run: bun run typecheck
       - name: Test
-        run: npm run test
+        run: bun test
       - name: Build
-        run: npm run build
+        run: bun run build
 
   docker:
     name: Docker — build & scan

@@ -68,8 +68,7 @@ pub async fn create_user(
     let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
         .await?
         .ok_or_else(|| ApiError::unauthorized("Invalid session"))?;
-    authorize_create_user(&current_user.get_role(), &request.role)
-        .map_err(ApiError::forbidden)?;
+    authorize_create_user(&current_user.get_role(), &request.role).map_err(ApiError::forbidden)?;
     crate::validation::validate_username(&request.username).map_err(ApiError::bad_request)?;
     crate::validation::validate_password(&request.password).map_err(ApiError::bad_request)?;
     if let Ok(Some(_)) = users::get_user_by_username(&state.db_pool, &request.username).await {
