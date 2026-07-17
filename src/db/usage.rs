@@ -3,7 +3,66 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
-/// Record connection usage in the database
+/// Terminal state of a proxied connection, recorded in `usage.status`.
+///
+/// This enum is the single source of truth for the set of legal status values:
+/// the DB CHECK constraint (migration 015) mirrors exactly these `as_str()`
+/// values, and every write goes through the enum, so a new/typo'd status can no
+/// longer silently fail every INSERT the way a raw string did (see #28/#25).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionStatus {
+    /// Default for an in-progress row (schema default).
+    Active,
+    /// Connection completed successfully.
+    Success,
+    /// Generic failure (used by the HTTP/2 path).
+    Failed,
+    /// Failed during protocol/auth handshake.
+    Handshake,
+    /// Failed establishing the upstream connection.
+    Connection,
+    /// Failed reading/forwarding the response.
+    Response,
+    /// Timed out.
+    Timeout,
+    /// Reverse-tunnel error.
+    Tunnel,
+    /// Rejected because the user's quota was exceeded.
+    QuotaExceeded,
+}
+
+impl ConnectionStatus {
+    /// Every variant — used by the schema-conformance test.
+    pub const ALL: [ConnectionStatus; 9] = [
+        ConnectionStatus::Active,
+        ConnectionStatus::Success,
+        ConnectionStatus::Failed,
+        ConnectionStatus::Handshake,
+        ConnectionStatus::Connection,
+        ConnectionStatus::Response,
+        ConnectionStatus::Timeout,
+        ConnectionStatus::Tunnel,
+        ConnectionStatus::QuotaExceeded,
+    ];
+
+    /// Canonical string persisted to the DB. MUST stay in sync with the
+    /// CHECK constraint in migrations/015_readd_usage_status_check.sql.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ConnectionStatus::Active => "active",
+            ConnectionStatus::Success => "success",
+            ConnectionStatus::Failed => "failed",
+            ConnectionStatus::Handshake => "handshake",
+            ConnectionStatus::Connection => "connection",
+            ConnectionStatus::Response => "response",
+            ConnectionStatus::Timeout => "timeout",
+            ConnectionStatus::Tunnel => "tunnel",
+            ConnectionStatus::QuotaExceeded => "quota_exceeded",
+        }
+    }
+}
+
+/// Record connection usage in the database.
 #[allow(clippy::too_many_arguments)] // one row's worth of columns; a struct would just move the noise
 pub async fn record_usage(
     pool: &SqlitePool,
@@ -16,7 +75,7 @@ pub async fn record_usage(
     ended_at: i64,
     bytes_sent: i64,
     bytes_received: i64,
-    status: &str,
+    status: ConnectionStatus,
 ) -> Result<i64, sqlx::Error> {
     let duration = (ended_at - started_at) as i32;
     let result = sqlx::query(
@@ -39,7 +98,7 @@ pub async fn record_usage(
     .bind(duration)
     .bind(bytes_sent)
     .bind(bytes_received)
-    .bind(status)
+    .bind(status.as_str())
     .execute(pool)
     .await?;
     Ok(result.last_insert_rowid())
@@ -312,12 +371,53 @@ mod tests {
             2000,
             1024,
             2048,
-            "success",
+            ConnectionStatus::Success,
         )
         .await
         .unwrap();
 
         assert!(id > 0);
+    }
+
+    /// Guards #28: the CHECK constraint (migration 015) must accept every
+    /// ConnectionStatus variant and reject anything else. This runs the REAL
+    /// migrations so the constraint and the enum can never silently drift.
+    #[tokio::test]
+    async fn test_migration_check_matches_status_enum() {
+        let pool = crate::db::create_pool("sqlite::memory:", 1).await.unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, role, created_at, updated_at) VALUES (1,'u','h','user',0,0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        for (i, st) in ConnectionStatus::ALL.iter().enumerate() {
+            record_usage(
+                &pool,
+                1,
+                &Uuid::from_u128(i as u128 + 1),
+                "127.0.0.1",
+                "example.com",
+                "http",
+                0,
+                0,
+                0,
+                0,
+                *st,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("status {:?} rejected by CHECK: {}", st, e));
+        }
+
+        // A non-enum status must be rejected by the CHECK constraint.
+        let bogus = sqlx::query(
+            "INSERT INTO usage (user_id, connection_id, client_ip, target_host, protocol, started_at, status) VALUES (1,'x','1.1.1.1','h','http',0,'garbage')",
+        )
+        .execute(&pool)
+        .await;
+        assert!(bogus.is_err(), "CHECK must reject a non-enum status value");
     }
 
     #[tokio::test]
@@ -349,7 +449,7 @@ mod tests {
             now,
             1000,
             2000,
-            "success",
+            ConnectionStatus::Success,
         )
         .await
         .unwrap();
@@ -364,7 +464,7 @@ mod tests {
             now,
             500,
             1500,
-            "success",
+            ConnectionStatus::Success,
         )
         .await
         .unwrap();
@@ -395,7 +495,7 @@ mod tests {
                 now - (90 * i),
                 100,
                 200,
-                "success",
+                ConnectionStatus::Success,
             )
             .await
             .unwrap();
@@ -428,7 +528,7 @@ mod tests {
             now - 86400 * 99,
             1000,
             2000,
-            "success",
+            ConnectionStatus::Success,
         )
         .await
         .unwrap();
@@ -443,7 +543,7 @@ mod tests {
             now,
             500,
             1500,
-            "success",
+            ConnectionStatus::Success,
         )
         .await
         .unwrap();
@@ -473,7 +573,7 @@ mod tests {
             now + 10,
             1000,
             2000,
-            "success",
+            ConnectionStatus::Success,
         )
         .await
         .unwrap();
@@ -488,7 +588,7 @@ mod tests {
             now + 10,
             500,
             1500,
-            "success",
+            ConnectionStatus::Success,
         )
         .await
         .unwrap();
@@ -520,7 +620,7 @@ mod tests {
             now,
             1000,
             2000,
-            "success",
+            ConnectionStatus::Success,
         )
         .await
         .unwrap();
@@ -535,7 +635,7 @@ mod tests {
             now,
             500,
             1500,
-            "success",
+            ConnectionStatus::Success,
         )
         .await
         .unwrap();
@@ -566,7 +666,7 @@ mod tests {
             now,
             1000,
             2000,
-            "success",
+            ConnectionStatus::Success,
         )
         .await
         .unwrap();
@@ -582,7 +682,7 @@ mod tests {
             now,
             3000,
             5000,
-            "success",
+            ConnectionStatus::Success,
         )
         .await
         .unwrap();

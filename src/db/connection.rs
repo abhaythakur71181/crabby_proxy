@@ -1,38 +1,34 @@
-use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use sqlx::sqlite::{
+    SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous,
+};
+use std::str::FromStr;
 use std::time::Duration;
 
 pub async fn create_pool(
     database_url: &str,
     max_connections: u32,
 ) -> Result<SqlitePool, sqlx::Error> {
-    // Ensure database file can be created by adding mode=rwc (read-write-create)
-    let url = if !database_url.contains('?') {
-        format!("{}?mode=rwc", database_url)
-    } else {
-        database_url.to_string()
-    };
+    // Configure PRAGMAs on the *connect options* so EVERY pooled connection gets
+    // them. `foreign_keys` and `busy_timeout` are per-connection state in SQLite
+    // (foreign_keys defaults OFF), so setting them via `.execute(&pool)` only
+    // configured whichever single connection happened to run the query — leaving
+    // FK enforcement effectively off and writers hitting immediate SQLITE_BUSY on
+    // every other connection. `create_if_missing` replaces the old `?mode=rwc`.
+    let connect_opts = SqliteConnectOptions::from_str(database_url)?
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .foreign_keys(true)
+        .busy_timeout(Duration::from_secs(5));
 
     let pool = SqlitePoolOptions::new()
         .max_connections(max_connections)
         .acquire_timeout(Duration::from_secs(5))
-        .connect(&url)
+        .connect_with(connect_opts)
         .await?;
 
-    // Set critical SQLite pragmas
-    sqlx::query("PRAGMA journal_mode = WAL")
-        .execute(&pool)
-        .await?;
-    sqlx::query("PRAGMA busy_timeout = 5000")
-        .execute(&pool)
-        .await?;
-    sqlx::query("PRAGMA synchronous = NORMAL")
-        .execute(&pool)
-        .await?;
-    sqlx::query("PRAGMA foreign_keys = ON")
-        .execute(&pool)
-        .await?;
     tracing::info!(
-        "SQLite pragmas set: WAL, busy_timeout=5000, synchronous=NORMAL, foreign_keys=ON"
+        "SQLite pool ready (per-connection): WAL, busy_timeout=5s, synchronous=NORMAL, foreign_keys=ON"
     );
 
     Ok(pool)
