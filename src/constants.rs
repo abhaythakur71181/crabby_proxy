@@ -10,6 +10,12 @@ use std::time::Duration;
 /// Timeout for initial protocol detection peek.
 pub const PEEK_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Upper bound on the whole pre-relay handshake (auth + target parse). Without
+/// it a client can dribble handshake/CONNECT bytes indefinitely, pinning a
+/// connection and its global semaphore permit — a slowloris DoS. Generous
+/// enough for legitimately slow clients, short enough to bound the attack.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Timeout for upstream TCP connection establishment.
 pub const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
