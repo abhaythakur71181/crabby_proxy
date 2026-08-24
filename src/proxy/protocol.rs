@@ -497,7 +497,15 @@ impl ProxyProtocol {
         stream: &mut BufferedClientStream,
     ) -> io::Result<ProxyTarget> {
         match self {
-            ProxyProtocol::HTTP => {
+            // Plain HTTP and outer-TLS HTTPS are parsed identically here. By the
+            // time this runs, `handle_client` has already terminated the
+            // client↔proxy TLS, so an HTTPS connection carries a *decrypted*
+            // HTTP proxy request (CONNECT to tunnel, or absolute-form to
+            // forward). The target therefore comes from that request line — not
+            // from SNI, which would only apply to a non-terminating transparent
+            // proxy. The old HTTPS arm ran SNI extraction on the decrypted HTTP
+            // bytes and always failed, breaking `-x https://proxy`.
+            ProxyProtocol::HTTP | ProxyProtocol::HTTPS => {
                 // Read request line and consume all headers up to \r\n\r\n
                 // This is important because after CONNECT, we switch to raw TCP tunneling
                 let mut request_line = Vec::new();
@@ -561,22 +569,6 @@ impl ProxyProtocol {
                     Self::parse_connect_target(url)
                 } else {
                     Self::parse_http_target(url)
-                }
-            }
-            ProxyProtocol::HTTPS => {
-                // For HTTPS, read from the buffered stream to extract SNI
-                let mut buf = vec![0u8; 512];
-                let n = stream.read(&mut buf).await?;
-                if let Some(sni) = Self::extract_sni_from_tls(&buf[..n]) {
-                    Ok(ProxyTarget {
-                        host: sni,
-                        port: 443,
-                    })
-                } else {
-                    Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "Failed to extract SNI from TLS handshake",
-                    ))
                 }
             }
             _ => Err(io::Error::new(
@@ -1445,5 +1437,72 @@ mod tests {
             let deserialized: ProxyProtocol = serde_json::from_str(&json).unwrap();
             assert_eq!(proto, deserialized);
         }
+    }
+
+    // === parse_target_from_buffered (outer-TLS HTTPS) ===
+
+    /// Build a `BufferedClientStream` over a loopback TCP pair and feed it the
+    /// given inner bytes, returning the server-side buffered stream. This mimics
+    /// the *decrypted* stream the proxy sees after terminating the client TLS on
+    /// an `-x https://proxy` connection.
+    async fn buffered_with(inner: &'static [u8]) -> crate::stream::BufferedClientStream {
+        use crate::stream::{BufferedClientStream, ClientStream};
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            client.write_all(inner).await.unwrap();
+            // Keep the socket open so the server side can drain the request.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        });
+        let (server, _) = listener.accept().await.unwrap();
+        BufferedClientStream::new(ClientStream::Plain(server))
+    }
+
+    // Regression: after the proxy terminates the client TLS, an HTTPS
+    // connection carries a *decrypted* HTTP CONNECT request. The target must be
+    // taken from that request line, not from SNI extraction (which used to run
+    // on the decrypted bytes and always failed, breaking `-x https://proxy`).
+    #[tokio::test]
+    async fn https_parses_decrypted_connect_target_not_sni() {
+        let mut buffered = buffered_with(
+            b"CONNECT api.ipify.org:443 HTTP/1.1\r\n\
+              Host: api.ipify.org:443\r\n\
+              Proxy-Authorization: Basic ZmFsY29uOmFhYmJBQUJCNzE=\r\n\r\n",
+        )
+        .await;
+
+        let target = ProxyProtocol::HTTPS
+            .parse_target_from_buffered(&mut buffered)
+            .await
+            .expect("HTTPS must parse the decrypted CONNECT target");
+        assert_eq!(target.host, "api.ipify.org");
+        assert_eq!(target.port, 443);
+    }
+
+    // HTTP and HTTPS must resolve the same CONNECT target identically (the two
+    // arms now share one parser).
+    #[tokio::test]
+    async fn http_and_https_connect_targets_match() {
+        const REQ: &[u8] = b"CONNECT example.com:8443 HTTP/1.1\r\nHost: example.com:8443\r\n\r\n";
+        let mut http = buffered_with(REQ).await;
+        let http_target = ProxyProtocol::HTTP
+            .parse_target_from_buffered(&mut http)
+            .await
+            .unwrap();
+
+        let mut https = buffered_with(REQ).await;
+        let https_target = ProxyProtocol::HTTPS
+            .parse_target_from_buffered(&mut https)
+            .await
+            .unwrap();
+
+        assert_eq!(http_target.host, https_target.host);
+        assert_eq!(http_target.port, https_target.port);
+        assert_eq!(https_target.host, "example.com");
+        assert_eq!(https_target.port, 8443);
     }
 }

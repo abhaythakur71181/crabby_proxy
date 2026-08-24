@@ -79,25 +79,22 @@ impl BufferedClientStream {
         }
     }
 
-    /// Read data into the buffer (for TLS streams that don't support peek)
-    pub async fn read_to_buffer(&mut self, size: usize) -> io::Result<usize> {
-        let mut buf = vec![0u8; size];
-        let n = match &mut self.stream {
-            ClientStream::Plain(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "Plain streams support peek, use peek() instead",
-                ))
-            }
-            ClientStream::Tls(stream) => stream.read(&mut buf).await?,
-        };
-        self.buffer.extend_from_slice(&buf[..n]);
-        Ok(n)
-    }
-
-    /// Peek at data without consuming it
+    /// Peek at data without consuming it.
+    ///
+    /// Plain TCP streams delegate to the kernel's `recv(MSG_PEEK)`. TLS streams
+    /// cannot be peeked at the socket level (bytes are only readable after
+    /// decryption), so the plaintext is read into an internal buffer and a copy
+    /// is returned, leaving those bytes queued for the subsequent `AsyncRead`
+    /// drain — so the read is still non-consuming from the caller's view.
+    ///
+    /// A single TLS record may not carry the whole HTTP header block (records
+    /// can fragment across reads), so for TLS we keep reading until the
+    /// end-of-headers marker (`\r\n\r\n`) is present or the caller's buffer is
+    /// full. Reading only one record risked returning a request split *before*
+    /// its `Proxy-Authorization` header, which made auth over an outer-TLS
+    /// (`-x https://proxy`) connection intermittently fail.
     pub async fn peek(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // If we have buffered data, return it
+        // If we already buffered data (e.g. a prior peek), return a copy of it.
         if self.buffer_pos < self.buffer.len() {
             let available = (self.buffer.len() - self.buffer_pos).min(buf.len());
             buf[..available]
@@ -105,20 +102,26 @@ impl BufferedClientStream {
             return Ok(available);
         }
 
-        // For plain streams, use native peek
         match &mut self.stream {
             ClientStream::Plain(stream) => stream.peek(buf).await,
-            ClientStream::Tls(_) => {
-                // For TLS, we need to read into buffer first
-                if self.buffer.is_empty() {
-                    let n = self.read_to_buffer(buf.len()).await?;
-                    if n > 0 {
-                        buf[..n].copy_from_slice(&self.buffer[..n]);
+            ClientStream::Tls(stream) => {
+                let cap = buf.len();
+                let mut chunk = vec![0u8; cap];
+                while self.buffer.len() < cap {
+                    let want = cap - self.buffer.len();
+                    let n = stream.read(&mut chunk[..want]).await?;
+                    if n == 0 {
+                        break; // EOF before more data arrived
                     }
-                    Ok(n)
-                } else {
-                    Ok(0)
+                    self.buffer.extend_from_slice(&chunk[..n]);
+                    // Stop as soon as the full HTTP header block is buffered.
+                    if self.buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
                 }
+                let available = self.buffer.len().min(cap);
+                buf[..available].copy_from_slice(&self.buffer[..available]);
+                Ok(available)
             }
         }
     }
