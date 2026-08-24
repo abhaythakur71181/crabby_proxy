@@ -698,7 +698,14 @@ async fn async_handle_client_with_target(
 
     // Send success response
     match *protocol {
-        ProxyProtocol::HTTP => utils::send_http_connect_response(client_stream).await,
+        // HTTPS here is the outer-TLS proxy variant: the client issued an HTTP
+        // CONNECT *inside* the terminated TLS session and expects the same "200"
+        // acknowledgement as a plain-HTTP CONNECT before starting its
+        // end-to-end TLS handshake to the target. The old `_ => Ok(())` sent
+        // nothing for HTTPS, leaving such clients hanging.
+        ProxyProtocol::HTTP | ProxyProtocol::HTTPS => {
+            utils::send_http_connect_response(client_stream).await
+        }
         ProxyProtocol::SOCKS4 => utils::send_socks4_response(client_stream, true).await,
         ProxyProtocol::SOCKS5 => utils::send_socks5_response(client_stream, true).await,
         _ => Ok(()),
