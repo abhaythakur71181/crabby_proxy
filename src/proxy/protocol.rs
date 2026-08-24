@@ -1468,10 +1468,12 @@ mod tests {
     // on the decrypted bytes and always failed, breaking `-x https://proxy`).
     #[tokio::test]
     async fn https_parses_decrypted_connect_target_not_sni() {
+        // Placeholder auth (base64 of "user:pass"); the value is irrelevant to
+        // target parsing — never embed a real credential in a fixture.
         let mut buffered = buffered_with(
             b"CONNECT api.ipify.org:443 HTTP/1.1\r\n\
               Host: api.ipify.org:443\r\n\
-              Proxy-Authorization: Basic ZmFsY29uOmFhYmJBQUJCNzE=\r\n\r\n",
+              Proxy-Authorization: Basic dXNlcjpwYXNz\r\n\r\n",
         )
         .await;
 
