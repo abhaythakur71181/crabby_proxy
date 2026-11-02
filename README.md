@@ -11,7 +11,7 @@ A multi-protocol forward proxy server written in Rust. Supports HTTP, HTTPS, SOC
 All protocols are auto-detected on a **single listening port** via a 4-byte peek on each incoming TCP connection.
 
 - **HTTP** -- `CONNECT` tunneling and plain HTTP forward proxy
-- **HTTPS** -- TLS termination via `rustls` with SNI extraction from ClientHello
+- **HTTPS** -- Outer-TLS forward proxy: terminates the client↔proxy TLS via `rustls`, then speaks the standard HTTP proxy protocol (`CONNECT` + `Proxy-Authorization`) inside the encrypted session (`curl -x https://proxy ...`)
 - **SOCKS4 / SOCKS4a** -- Including domain name resolution support
 - **SOCKS5** -- IPv4, IPv6, domain address types; username/password authentication (RFC 1929)
 
