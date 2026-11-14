@@ -162,6 +162,13 @@ impl AppState {
         db_pool: sqlx::SqlitePool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         config.validate_access_control()?;
+        // `backend = "redis"` is the multi-replica configuration: connection
+        // state, rate limits, quotas and cache invalidation are all shared
+        // through Redis. Falling back to memory there would silently split
+        // that state between replicas, so an unreachable Redis is a startup
+        // error rather than a warning (#83). Once running, Redis outages
+        // degrade per component (see docs/RUNBOOK.md, "Redis outage").
+        let redis_required = config.state.backend == "redis";
         let state: Arc<dyn StateBackend> = match config.state.backend.as_str() {
             "redis" => {
                 match RedisBackend::new(
@@ -175,11 +182,12 @@ impl AppState {
                         Arc::new(backend)
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            "Failed to connect to Redis ({}), falling back to memory backend",
-                            e
-                        );
-                        Arc::new(MemoryBackend::new())
+                        return Err(format!(
+                            "[state] backend = \"redis\" but Redis is unreachable ({e}); \
+                             refusing to start with split state. Fix redis_url or use \
+                             backend = \"memory\" for a single instance"
+                        )
+                        .into());
                     }
                 }
             }
@@ -283,6 +291,11 @@ impl AppState {
                 tracing::info!("Redis cache layer initialized");
                 Some(layer)
             }
+            Err(e) if redis_required => {
+                return Err(
+                    format!("Redis cache layer unavailable with backend = \"redis\": {e}").into(),
+                );
+            }
             Err(e) => {
                 tracing::warn!(
                     "Failed to initialize Redis cache layer ({}), using DB-only mode",
@@ -295,30 +308,22 @@ impl AppState {
         // With the Redis state backend several instances usually sit behind a
         // load balancer; per-instance buckets would make every limit N times
         // larger. Share the buckets through Redis in that topology.
-        let (ip_rate_limiter, user_rate_limiter, login_rate_limiter) = match (
-            config.state.backend.as_str(),
-            cache.as_ref(),
-        ) {
-            ("redis", Some(layer)) => {
-                let shared = crate::rate_limit::RedisRateLimiter::new(
-                    layer.connection(),
-                    &config.state.redis_key_prefix,
-                );
-                tracing::info!("Rate limits are shared across instances via Redis");
-                (
-                    ip_rate_limiter.with_distributed(shared.clone()),
-                    user_rate_limiter.with_distributed(shared.clone()),
-                    login_rate_limiter.with_distributed(shared),
-                )
-            }
-            ("redis", None) => {
-                tracing::warn!(
-                        "State backend is redis but Redis is unreachable; rate limits are per-instance only"
+        let (ip_rate_limiter, user_rate_limiter, login_rate_limiter) =
+            match (config.state.backend.as_str(), cache.as_ref()) {
+                ("redis", Some(layer)) => {
+                    let shared = crate::rate_limit::RedisRateLimiter::new(
+                        layer.connection(),
+                        &config.state.redis_key_prefix,
                     );
-                (ip_rate_limiter, user_rate_limiter, login_rate_limiter)
-            }
-            _ => (ip_rate_limiter, user_rate_limiter, login_rate_limiter),
-        };
+                    tracing::info!("Rate limits are shared across instances via Redis");
+                    (
+                        ip_rate_limiter.with_distributed(shared.clone()),
+                        user_rate_limiter.with_distributed(shared.clone()),
+                        login_rate_limiter.with_distributed(shared),
+                    )
+                }
+                _ => (ip_rate_limiter, user_rate_limiter, login_rate_limiter),
+            };
 
         // Quotas: shared through Redis under the same condition as the rate
         // limits, otherwise per-process (#30).
@@ -333,6 +338,22 @@ impl AppState {
                 )
             }
             _ => crate::quota_tracker::QuotaTrackerRegistry::new(),
+        };
+
+        let event_bus = match crate::event_bus::EventBus::new(
+            &config.state.redis_url,
+            &config.state.redis_key_prefix,
+        )
+        .await
+        {
+            Ok(bus) => Some(bus),
+            Err(e) if redis_required => {
+                return Err(format!("Event bus unavailable with backend = \"redis\": {e}").into());
+            }
+            Err(e) => {
+                tracing::warn!("Event bus disabled: {}", e);
+                None
+            }
         };
 
         let db_writer = crate::db::connection::writer_pool(
@@ -376,18 +397,7 @@ impl AppState {
             middleware: Arc::new(crate::middleware::MiddlewareChain::new()),
             cache,
             user_arc_cache: Arc::new(dashmap::DashMap::new()),
-            event_bus: match crate::event_bus::EventBus::new(
-                &config.state.redis_url,
-                &config.state.redis_key_prefix,
-            )
-            .await
-            {
-                Ok(bus) => Some(bus),
-                Err(e) => {
-                    tracing::warn!("Event bus disabled: {}", e);
-                    None
-                }
-            },
+            event_bus,
             self_loop_guard,
             conn_cancel: Arc::new(dashmap::DashMap::new()),
             ws_tickets: Arc::new(dashmap::DashMap::new()),
@@ -648,9 +658,14 @@ impl AppState {
     /// invalidated its own caches. Not called from `invalidate_all_for_user`
     /// itself, since the event-bus subscriber calls that and would re-publish.
     pub async fn broadcast_user_invalidated(&self, user_id: i64) {
+        self.broadcast(&crate::event_bus::ProxyEvent::UserInvalidated(user_id))
+            .await;
+    }
+
+    /// Publish an event to the other instances when the event bus is up.
+    pub async fn broadcast(&self, event: &crate::event_bus::ProxyEvent) {
         if let Some(ref bus) = self.event_bus {
-            bus.publish(&crate::event_bus::ProxyEvent::UserInvalidated(user_id))
-                .await;
+            bus.publish(event).await;
         }
     }
 
@@ -671,6 +686,7 @@ impl AppState {
         self.invalidate_user_arc_cache(user_id);
         self.parsed_schedule_cache.remove(&user_id);
         self.quota_cache.remove(&user_id);
+        self.approval_cache.retain(|k, _| k.0 != user_id);
         // Drop this user's cached credential checks so a disabled account,
         // rotated password or revoked API key stops authenticating now rather
         // than at the end of the cache TTL. The negative cache is not keyed
@@ -705,6 +721,8 @@ impl AppState {
             Ok(stats) => self.quota_trackers.update_limit(user_id, stats.quota_bytes),
             Err(_) => self.quota_trackers.invalidate(user_id),
         }
+        // Other replicas hold their own trackers and Arc caches (#83).
+        self.broadcast_user_invalidated(user_id).await;
     }
 
     /// Check if IP is approved for user, with in-memory + Redis cache-aside.
@@ -787,6 +805,9 @@ impl AppState {
         }
         // Clear in-memory entries for this user
         self.approval_cache.retain(|k, _| k.0 != user_id);
+        // Other replicas keep a 2-minute in-memory approval cache; without
+        // this a revoked approval kept working there until it expired (#83).
+        self.broadcast_user_invalidated(user_id).await;
     }
 
     /// Populate user cache by both id and username after a successful DB lookup.
@@ -846,5 +867,89 @@ async fn process_events(mut rx: mpsc::Receiver<ConnectionEvent>, state: Arc<dyn 
                     .await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod scaling_tests {
+    use crate::admin::test_support::{test_config, test_state};
+
+    /// #83: `backend = "redis"` must not silently fall back to per-process
+    /// state when Redis is unreachable.
+    #[tokio::test]
+    async fn redis_backend_refuses_to_start_without_redis() {
+        let mut config = test_config();
+        config.state.backend = "redis".to_string();
+        let pool = crate::db::create_pool("sqlite::memory:", 1).await.unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        let err = match super::AppState::new(config, None, pool).await {
+            Ok(_) => panic!("must not start with an unreachable Redis"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("unreachable"), "{err}");
+    }
+
+    /// The event-bus handler for a user change also clears that user's
+    /// in-memory approval cache, so a revoked approval stops working on every
+    /// instance, not just the one that served the request.
+    #[tokio::test]
+    async fn user_invalidation_clears_approval_cache() {
+        let state = test_state().await;
+        let ip: std::net::IpAddr = "192.0.2.7".parse().unwrap();
+        state
+            .approval_cache
+            .insert((5, ip), (true, std::time::Instant::now()));
+        state
+            .approval_cache
+            .insert((6, ip), (true, std::time::Instant::now()));
+        state.invalidate_all_for_user(5, None).await;
+        assert!(!state.approval_cache.contains_key(&(5, ip)));
+        assert!(state.approval_cache.contains_key(&(6, ip)));
+    }
+
+    #[tokio::test]
+    async fn terminate_local_only_signals_known_connections() {
+        let state = test_state().await;
+        let id = uuid::Uuid::new_v4();
+        assert!(!crate::event_bus::terminate_local(&state, id));
+        let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        state.conn_cancel.insert(id, notify.clone());
+        let waiter = notify.notified();
+        tokio::pin!(waiter);
+        waiter.as_mut().enable();
+        assert!(crate::event_bus::terminate_local(&state, id));
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("relay must be signalled");
+    }
+
+    #[test]
+    fn terminate_event_round_trips() {
+        let id = uuid::Uuid::new_v4();
+        let json =
+            serde_json::to_string(&crate::event_bus::ProxyEvent::TerminateConnection(id)).unwrap();
+        match serde_json::from_str(&json).unwrap() {
+            crate::event_bus::ProxyEvent::TerminateConnection(got) => assert_eq!(got, id),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// A live-connections ticket minted on one instance redeems on another,
+    /// exactly once. Needs a live Redis (CRABBY_TEST_REDIS_URL).
+    #[tokio::test]
+    async fn ws_ticket_is_shared_and_single_use() {
+        let Ok(url) = std::env::var("CRABBY_TEST_REDIS_URL") else {
+            return;
+        };
+        let prefix = format!("crabby_test:{}:", uuid::Uuid::new_v4());
+        let a = crate::cache::CacheLayer::new(&url, prefix.clone())
+            .await
+            .unwrap();
+        let b = crate::cache::CacheLayer::new(&url, prefix).await.unwrap();
+        let ticket = uuid::Uuid::new_v4().simple().to_string();
+        a.put_ws_ticket(&ticket, 30).await;
+        assert!(b.take_ws_ticket(&ticket).await);
+        assert!(!a.take_ws_ticket(&ticket).await, "single use");
+        assert!(!b.take_ws_ticket("unknown").await);
     }
 }

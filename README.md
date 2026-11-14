@@ -107,7 +107,11 @@ Quota checks and user lookups go through a cache-aside hierarchy:
 2. **DashMap** (in-process) -- quota check results (30s TTL), rate limit configs (60s TTL)
 3. **SQLite** (source of truth)
 
-Redis is **optional** -- the proxy falls back gracefully to DB-only mode if Redis is unavailable.
+Redis is **optional** with the default `memory` state backend -- the proxy falls back gracefully to DB-only mode if Redis is unavailable. With `[state] backend = "redis"` it is required (startup fails without it).
+
+### Scaling
+
+One instance (`backend = "memory"`) is the default and needs nothing else. Several replicas are supported **on one host**: set `backend = "redis"` (shared connection state, rate limits, bandwidth quotas, cache invalidation over pub/sub), mount the same SQLite file on a local volume into every replica, and put a load balancer in front. SQLite cannot be shared across hosts, so multi-host deployments are not supported yet. Writes go through one dedicated writer connection per process. Details, limits and the Redis-outage behaviour: [RUNBOOK, Scaling](docs/RUNBOOK.md#scaling).
 
 ### Metrics (Prometheus)
 
@@ -368,7 +372,7 @@ Runtime reload is supported via `POST /api/config/reload`.
 | `[authentication]` | Enable/disable, method, credentials, JWT secret/expiration |
 | `[protocols]` | Enable/disable individual protocols, auto-detect toggle |
 | `[features]` | Connection approval, reverse tunnels, tunnel port range, webhook URL/events |
-| `[state]` | Backend (memory/redis), Redis URL/pool/prefix. Deployments are single-instance; see [RUNBOOK](docs/RUNBOOK.md#scaling-single-instance-constraint) |
+| `[state]` | Backend (memory/redis), Redis URL/pool/prefix. `redis` is required for more than one replica; see [RUNBOOK](docs/RUNBOOK.md#scaling) |
 | `[rate_limiting]` | Global enable, RPS, burst, ban duration |
 | `[filtering]` | IP allowlist/blocklist, geo-blocking, target domain allow/blocklists, access schedule |
 | `[logging]` | Level, format (json/pretty), file logging |

@@ -18,9 +18,14 @@ services:
     container_name: crabby-proxy
     restart: unless-stopped
 
-    # Single instance only: do not `--scale crabby-proxy=N`. State, rate
-    # limiting and the SQLite DB are per-process/per-volume (the baked config
-    # uses [state] backend = "memory"); see docs/RUNBOOK.md, "Scaling".
+    # One replica as shipped (the baked config uses [state] backend =
+    # "memory", and container_name / fixed host ports below prevent
+    # `--scale`). For several replicas on this host: start the `redis`
+    # profile, mount a config.toml with backend = "redis" and
+    # redis_url = "redis://crabby-redis:6379", drop container_name and the
+    # host ports in an override file, and put a TCP load balancer in front.
+    # All replicas share the crabby-data volume (same-host SQLite only). See
+    # docs/RUNBOOK.md, "Scaling".
     #
     # Secrets are loaded from .env. Required — container refuses to start
     # if CRABBY_JWT_SECRET is unset (config_env.rs panics on weak secrets).
@@ -130,6 +135,35 @@ services:
         max-size: "10m"
         max-file: "5"
 
+  # Optional Redis for the multi-replica configuration ([state] backend =
+  # "redis"). Off by default; enable with
+  #   docker compose --profile redis up -d
+  # Not published on the host. Persistence is on (AOF) so shared quota
+  # counters survive a Redis restart; the proxy also restores a lost counter
+  # to the last value it saw.
+  crabby-redis:
+    image: redis:7.4-alpine
+    profiles: ["redis"]
+    container_name: crabby-proxy-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", ""]
+    volumes:
+      - crabby-redis:/data
+    mem_limit: ${REDIS_MEM_LIMIT:-256m}
+    cpus: 0.5
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   # Optional SQLite backup sidecar. Off by default; enable with
   #   docker compose --profile backup up -d
   # Takes an online, integrity-checked `.backup` snapshot of proxy.db every
@@ -175,4 +209,6 @@ services:
 
 volumes:
   crabby-data:
+    driver: local
+  crabby-redis:
     driver: local

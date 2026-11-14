@@ -22,6 +22,9 @@ pub enum ProxyEvent {
     UserDeleted(i64),
     /// IP filter rules changed — re-read from config
     IpFilterUpdated,
+    /// An admin asked to terminate a live connection; whichever instance
+    /// relays it tears it down.
+    TerminateConnection(uuid::Uuid),
 }
 
 /// Publisher half of the event bus.
@@ -160,6 +163,18 @@ async fn run_subscriber_once(
     }
 }
 
+/// Signal the relay for `id` if it runs on this instance. Returns whether it
+/// did.
+pub fn terminate_local(state: &crate::app_state::AppState, id: uuid::Uuid) -> bool {
+    match state.conn_cancel.get(&id).map(|n| n.clone()) {
+        Some(notify) => {
+            notify.notify_waiters();
+            true
+        }
+        None => false,
+    }
+}
+
 /// Apply a received event to local state.
 async fn apply_event(event: ProxyEvent, state: &Arc<crate::app_state::AppState>) {
     match event {
@@ -184,6 +199,11 @@ async fn apply_event(event: ProxyEvent, state: &Arc<crate::app_state::AppState>)
         ProxyEvent::IpFilterUpdated => {
             tracing::info!("Event bus: IP filter update received");
             // IP filter is re-read from config on next access.
+        }
+        ProxyEvent::TerminateConnection(id) => {
+            if terminate_local(state, id) {
+                tracing::info!(target: "audit", conn_id = %id, "connection terminated on request from another instance");
+            }
         }
     }
 }

@@ -129,7 +129,14 @@ pub struct RedisBackend {
 impl RedisBackend {
     pub async fn new(redis_url: &str, prefix: String) -> Result<Self, Box<dyn std::error::Error>> {
         let client = redis::Client::open(redis_url)?;
-        let conn = ConnectionManager::new(client).await?;
+        // ConnectionManager retries with backoff internally; bound it so an
+        // unreachable Redis is reported (and startup refused) promptly.
+        let conn = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            ConnectionManager::new(client),
+        )
+        .await
+        .map_err(|_| "timed out connecting to Redis")??;
         tracing::info!("Redis state backend connected to {}", redis_url);
         Ok(Self {
             conn,
