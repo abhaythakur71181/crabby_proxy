@@ -115,8 +115,20 @@ pub async fn handle_h2_connection(
             let state_ref = state_arc.clone();
             tokio::spawn(async move {
                 let _permit = permit; // held for the stream's lifetime
-                handle_h2_forward_validated(request, respond, client_addr, auth_header, &state_ref)
-                    .await;
+                let conn_id = uuid::Uuid::new_v4();
+                handle_h2_forward_validated(
+                    request,
+                    respond,
+                    client_addr,
+                    auth_header,
+                    conn_id,
+                    &state_ref,
+                )
+                .await;
+                // Drop the tracking record however the request ended. A
+                // request rejected before it was tracked has no record; the
+                // NotFound from that delete is expected and ignored.
+                let _ = state_ref.state.delete_connection(conn_id).await;
             });
             continue;
         }
@@ -778,9 +790,9 @@ async fn handle_h2_forward_validated(
     mut respond: h2::server::SendResponse<bytes::Bytes>,
     client_addr: SocketAddr,
     auth_header: Option<String>,
+    conn_id: uuid::Uuid,
     state: &AppState,
 ) {
-    let conn_id = uuid::Uuid::new_v4();
     let mut ctx = ConnectionContext::new(client_addr, conn_id, state).await;
     ctx.protocol = Some(ProxyProtocol::HTTP2);
 
@@ -820,6 +832,9 @@ async fn handle_h2_forward_validated(
     if !ctx.is_admin {
         for result in [
             validators::validate_protocol_restriction(&ctx, state).await,
+            // Same IP-approval gate as HTTP/1, SOCKS and h2 CONNECT; it was
+            // missing here, so forward requests bypassed connection_approval.
+            validators::validate_approval(&ctx, state).await,
             validators::validate_user_rate_limit(&ctx, state).await,
         ] {
             if let Verdict::Deny(reason) = result {
@@ -878,6 +893,46 @@ async fn handle_h2_forward_validated(
 
         // ── Phase 4: Quota check ──
         if let Verdict::Deny(reason) = validators::validate_quota(&ctx, state).await {
+            tracing::warn!("[HTTP2-FWD] {} denied: {}", client_addr, reason);
+            let resp = http::Response::builder()
+                .status(http::StatusCode::TOO_MANY_REQUESTS)
+                .body(())
+                .unwrap_or_else(|_| http::Response::new(()));
+            let _ = respond.send_response(resp, true);
+            return;
+        }
+    }
+
+    // ── Connection tracking + per-user connection limit ──
+    // An in-flight forward request is a live connection like any other: track
+    // it (the caller deletes the record when the request ends) so it counts
+    // toward, and is held to, the user's max_connections.
+    let conn_info = crate::state::backend::ConnectionInfo {
+        id: conn_id,
+        client_addr,
+        target_addr: uri.authority().map(|a| a.to_string()).unwrap_or_default(),
+        protocol: ProxyProtocol::HTTP2,
+        state: crate::connection::ConnectionState::Active,
+        user_id: ctx.user_id,
+        bytes_sent: 0,
+        bytes_received: 0,
+        created_at: chrono::Utc::now().timestamp(),
+    };
+    match state.state.set_connection(conn_id, conn_info).await {
+        Ok(()) => ctx.conn_tracked = true,
+        Err(e) => {
+            tracing::warn!(
+                "[HTTP2-FWD] state backend: set_connection({}) failed: {}",
+                conn_id,
+                e
+            );
+            crate::metrics::STATE_BACKEND_ERRORS
+                .with_label_values(&["set_connection"])
+                .inc();
+        }
+    }
+    if !ctx.is_admin {
+        if let Verdict::Deny(reason) = validators::validate_connection_limit(&ctx, state).await {
             tracing::warn!("[HTTP2-FWD] {} denied: {}", client_addr, reason);
             let resp = http::Response::builder()
                 .status(http::StatusCode::TOO_MANY_REQUESTS)
