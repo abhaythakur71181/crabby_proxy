@@ -1,5 +1,11 @@
 name: crabby-proxy
 
+# Image tags: set CRABBY_IMAGE_TAG to a release version or git SHA, e.g.
+#   CRABBY_IMAGE_TAG=$(git rev-parse --short HEAD) docker compose build
+# so every build stays addressable and a previous tag is a rollback target
+# (see docs/RUNBOOK.md, "Releases & rollback"). Unset, it falls back to
+# :latest as a local convenience only.
+
 services:
   crabby-proxy:
     build:
@@ -8,7 +14,7 @@ services:
       target: runtime
       args:
         RUST_VERSION: "1.90"
-    image: crabby-proxy:latest
+    image: crabby-proxy:${CRABBY_IMAGE_TAG:-latest}
     container_name: crabby-proxy
     restart: unless-stopped
 
@@ -84,7 +90,7 @@ services:
       dockerfile: Dockerfile
       args:
         BUN_VERSION: "1"
-    image: crabby-proxy-webv2:latest
+    image: crabby-proxy-webv2:${CRABBY_IMAGE_TAG:-latest}
     container_name: crabby-proxy-webv2
     restart: unless-stopped
 

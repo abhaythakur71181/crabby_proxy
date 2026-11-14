@@ -16,6 +16,23 @@ The admin port (admin API + unauthenticated `/metrics`) binds to `127.0.0.1`
 on the host by default. To expose it, set `ADMIN_BIND_HOST=0.0.0.0` **only**
 behind a firewall / private network, ideally with a reverse proxy enforcing TLS.
 
+Copy `.env.example` to `.env` for the full list of compose variables.
+
+## Releases & rollback
+
+Tag every build with a version or git SHA instead of relying on `:latest`:
+
+```sh
+export CRABBY_IMAGE_TAG=$(git rev-parse --short HEAD)   # or v1.4.0
+docker compose build && docker compose up -d
+```
+
+Record the tag that is running (or put it in `.env`). To roll back, set
+`CRABBY_IMAGE_TAG` to the previous tag and `docker compose up -d`; the image is
+still in the local cache (or your registry). Migrations have no down path, so a
+rollback across a schema change also needs the pre-deploy DB snapshot (see
+"Backup & restore" below). `:latest` is only a local convenience alias.
+
 ## Config reload
 
 `POST /api/config/reload` (admin) re-reads the config file. Security-critical
