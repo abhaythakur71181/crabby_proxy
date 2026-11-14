@@ -48,6 +48,7 @@ use crate::config_env::ConfigEnvExt;
 use crate::proxy::listener::run_proxy_server;
 use clap::Parser;
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::Arc;
 use tokio::signal;
 
@@ -72,7 +73,7 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> ExitCode {
     let args = Args::parse();
 
     // Install the process-level rustls crypto provider before any TLS use
@@ -101,9 +102,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Startup failures (a configuration the proxy refuses to run with, an
+    // unreadable config file, a database that cannot be opened, ...) are
+    // reported as one `error: ...` line and exit status 1 — not a panic with
+    // a backtrace note, and not the `Error: "..."` Debug dump that returning
+    // the error from main would print.
+    match run(args).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            tracing::error!("{}", e);
+            eprintln!("error: {}", e);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut config = if args.config.exists() {
         tracing::info!("Loading configuration from: {}", args.config.display());
-        Config::from_file(&args.config)?
+        Config::from_file(&args.config)
+            .map_err(|e| format!("failed to load {}: {}", args.config.display(), e))?
     } else {
         tracing::warn!("Configuration file not found, using defaults");
         Config::default()
@@ -118,7 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Apply environment variable overrides for secrets
-    config.apply_env_overrides();
+    config.apply_env_overrides()?;
 
     tracing::info!("Configuration loaded successfully");
     tracing::info!("  Proxy: {}", config.server.proxy_bind);
@@ -151,8 +169,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(AppState::new(config.clone(), config_path, db_pool).await?);
 
     // Parse socket addresses
-    let proxy_addr = config.server.proxy_bind.parse()?;
-    let admin_addr = config.server.admin_bind.parse()?;
+    let proxy_addr: std::net::SocketAddr = config.server.proxy_bind.parse().map_err(|e| {
+        format!(
+            "server.proxy_bind {:?} is not a socket address: {}",
+            config.server.proxy_bind, e
+        )
+    })?;
+    let admin_addr: std::net::SocketAddr = config.server.admin_bind.parse().map_err(|e| {
+        format!(
+            "server.admin_bind {:?} is not a socket address: {}",
+            config.server.admin_bind, e
+        )
+    })?;
 
     tracing::info!("🚀 Starting Crabby Proxy");
     tracing::info!("  Proxy server: {}", proxy_addr);

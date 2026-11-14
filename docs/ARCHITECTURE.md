@@ -82,8 +82,9 @@ behind each decision.
   unless `[metrics] allow_unauthenticated = true`.
 - Secrets via env (`CRABBY_JWT_SECRET`, `CRABBY_ADMIN_PASSWORD`,
   `CRABBY_BASIC_AUTH_PASSWORD`); the process refuses to boot with a weak JWT
-  secret or default passwords (override with `CRABBY_ALLOW_DEFAULT_PASSWORDS=1`
-  for local dev only).
+  secret or weak/placeholder passwords (override with
+  `CRABBY_ALLOW_DEFAULT_PASSWORDS=1` for local dev only), printing one
+  `error: ...` line and exiting with status 1.
 - State is SQLite on a volume. **No automated backup yet** — see runbook.
 
 ## Known limitations / follow-ups

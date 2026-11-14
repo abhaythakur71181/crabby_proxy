@@ -29,6 +29,11 @@ struct ProxyOptions {
     blocked_targets: Vec<String>,
     /// PEM cert/key paths; enables outer-TLS (`-x https://proxy`) when set.
     tls: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    /// Enable proxy authentication with this (username, password).
+    proxy_auth: Option<(String, String)>,
+    /// Set `filtering.block_private_targets = false` so tests can tunnel to a
+    /// target on 127.0.0.1.
+    allow_private_targets: bool,
 }
 
 impl TestProxy {
@@ -39,6 +44,27 @@ impl TestProxy {
 
     /// Start a proxy with auth disabled and the given options.
     fn start(opts: ProxyOptions) -> Self {
+        let (mut command, proxy_addr, admin_addr) = Self::command(opts);
+        let child = command
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("Failed to start proxy");
+
+        let proxy = TestProxy {
+            child,
+            proxy_addr,
+            admin_addr,
+        };
+
+        // Wait for the proxy to be ready
+        proxy.wait_ready();
+        proxy
+    }
+
+    /// Write a temp config for `opts` on random ports and return the command
+    /// that runs the proxy binary with it.
+    fn command(opts: ProxyOptions) -> (Command, SocketAddr, SocketAddr) {
         let blocked_targets = opts
             .blocked_targets
             .iter()
@@ -49,6 +75,11 @@ impl TestProxy {
             Some((cert, key)) => (true, cert.display().to_string(), key.display().to_string()),
             None => (false, String::new(), String::new()),
         };
+        let (auth_enabled, auth_username, auth_password) = match &opts.proxy_auth {
+            Some((user, pass)) => (true, user.clone(), pass.clone()),
+            None => (false, "test".to_string(), String::new()),
+        };
+        let block_private_targets = !opts.allow_private_targets;
         let proxy_port = free_port();
         let admin_port = free_port();
         let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
@@ -72,10 +103,10 @@ path = "sqlite::memory:"
 max_connections = 5
 
 [authentication]
-enabled = false
+enabled = {auth_enabled}
 method = "basic"
-username = "test"
-password = "testpass"
+username = {auth_username:?}
+password = {auth_password:?}
 jwt_secret = "test_secret_key_at_least_32_bytes_long_xxx"
 jwt_expiration = 3600
 
@@ -117,6 +148,7 @@ ip_filter_mode = "blocklist"
 ip_filter_enabled = false
 global_allowed_targets = []
 global_blocked_targets = [{blocked_targets}]
+block_private_targets = {block_private_targets}
 
 [logging]
 level = "warn"
@@ -152,25 +184,13 @@ dns_cache_ttl = 60
 
         // Use the binary built by `cargo test`
         let binary = env!("CARGO_BIN_EXE_crabby_proxy");
-        let child = Command::new(binary)
+        let mut command = Command::new(binary);
+        command
             .args(["--config", config_path.to_str().unwrap()])
             // Fixed root password so first boot doesn't write a generated
             // one to initial_root_password.txt in the crate directory.
-            .env("CRABBY_ROOT_PASSWORD", "integration-test-root-password")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("Failed to start proxy");
-
-        let proxy = TestProxy {
-            child,
-            proxy_addr,
-            admin_addr,
-        };
-
-        // Wait for the proxy to be ready
-        proxy.wait_ready();
-        proxy
+            .env("CRABBY_ROOT_PASSWORD", "integration-test-root-password");
+        (command, proxy_addr, admin_addr)
     }
 
     /// Wait until the admin port accepts connections (up to 15s).
@@ -195,6 +215,34 @@ impl Drop for TestProxy {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+// ── Startup refusals ─────────────────────────────────────────────────
+
+#[test]
+fn test_weak_config_password_exits_cleanly_without_panic() {
+    // A 5-character proxy password with auth enabled is refused at boot. That
+    // must be a single `error: ...` line and exit status 1, not a panic.
+    let short: String = ('a'..='e').collect();
+    let (mut command, _, _) = TestProxy::command(ProxyOptions {
+        proxy_auth: Some(("test".to_string(), short)),
+        ..Default::default()
+    });
+    let output = command
+        .env_remove("CRABBY_BASIC_AUTH_PASSWORD")
+        .env_remove("CRABBY_ALLOW_DEFAULT_PASSWORDS")
+        .output()
+        .expect("failed to run proxy");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.lines().any(|l| l.starts_with(
+            "error: authentication.password is only 5 characters (minimum 12). Refusing to start"
+        )),
+        "missing error line, stderr: {stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "stderr: {stderr}");
+    assert!(!stderr.contains("RUST_BACKTRACE"), "stderr: {stderr}");
 }
 
 // ── Admin API tests ──────────────────────────────────────────────────
@@ -275,36 +323,167 @@ fn test_http_connect_gets_response() {
     // If n == 0, the proxy closed the connection (acceptable for non-routable target)
 }
 
-#[test]
-fn test_socks5_greeting_accepted() {
-    let proxy = TestProxy::start_no_auth();
-    let mut stream = TcpStream::connect_timeout(&proxy.proxy_addr, Duration::from_secs(5)).unwrap();
+/// A one-shot echo server on 127.0.0.1 used as the tunnel target.
+fn spawn_echo_target() -> SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        if let Ok((mut conn, _)) = listener.accept() {
+            let mut buf = [0u8; 1024];
+            while let Ok(n) = conn.read(&mut buf) {
+                if n == 0 || conn.write_all(&buf[..n]).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    addr
+}
+
+/// Connect to the proxy with a read timeout: any read that times out fails
+/// the test instead of being tolerated.
+fn connect_proxy(proxy: &TestProxy) -> TcpStream {
+    let stream = TcpStream::connect_timeout(&proxy.proxy_addr, Duration::from_secs(5)).unwrap();
     stream.set_nodelay(true).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
+    stream
+}
 
-    // SOCKS5 greeting: version=5, 1 method offered, NO_AUTH=0x00
+fn read_exact_or_fail(stream: &mut TcpStream, n: usize, what: &str) -> Vec<u8> {
+    let mut buf = vec![0u8; n];
+    stream
+        .read_exact(&mut buf)
+        .unwrap_or_else(|e| panic!("no {what} from proxy: {e}"));
+    buf
+}
+
+/// Send a SOCKS5 CONNECT for an IPv4 target and check the success reply.
+fn socks5_connect(stream: &mut TcpStream, target: SocketAddr) {
+    let SocketAddr::V4(v4) = target else {
+        panic!("IPv4 target expected")
+    };
+    let mut req = vec![0x05, 0x01, 0x00, 0x01];
+    req.extend_from_slice(&v4.ip().octets());
+    req.extend_from_slice(&v4.port().to_be_bytes());
+    stream.write_all(&req).unwrap();
+    let reply = read_exact_or_fail(stream, 10, "SOCKS5 CONNECT reply");
+    assert_eq!(
+        &reply[..2],
+        &[0x05, 0x00],
+        "SOCKS5 CONNECT failed: {reply:02x?}"
+    );
+}
+
+/// Round-trip a payload through an established tunnel to the echo target.
+fn assert_echo(stream: &mut TcpStream) {
+    stream.write_all(b"crabby-ping").unwrap();
+    let echoed = read_exact_or_fail(stream, 11, "echoed payload");
+    assert_eq!(echoed, b"crabby-ping");
+}
+
+/// Credentials for the auth-enabled proxy, built at runtime.
+fn test_proxy_credentials() -> (String, String) {
+    let user = "socks-user".to_string();
+    let pass = ["integration", "socks5", &std::process::id().to_string()].join("-");
+    (user, pass)
+}
+
+#[test]
+fn test_socks5_no_auth_connect_end_to_end() {
+    let target = spawn_echo_target();
+    let proxy = TestProxy::start(ProxyOptions {
+        allow_private_targets: true,
+        ..Default::default()
+    });
+    let mut stream = connect_proxy(&proxy);
+
+    // Greeting: version 5, one method, NO_AUTH. With auth off the proxy must
+    // answer `05 00` (it used to never answer, so clients hung).
     stream.write_all(&[0x05, 0x01, 0x00]).unwrap();
-    stream.flush().unwrap();
+    let choice = read_exact_or_fail(&mut stream, 2, "SOCKS5 method selection");
+    assert_eq!(choice, [0x05, 0x00]);
 
-    let mut response = [0u8; 2];
-    match stream.read_exact(&mut response) {
-        Ok(()) => {
-            assert_eq!(response[0], 0x05, "Expected SOCKS5 version byte");
-            // Method 0x00 (NO_AUTH) or 0x02 (USERNAME/PASSWORD) are valid
-            assert!(
-                response[1] == 0x00 || response[1] == 0x02,
-                "Unexpected SOCKS5 method: 0x{:02x}",
-                response[1]
-            );
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-            // Proxy didn't respond within timeout — skip (non-fatal in CI)
-            eprintln!("SOCKS5 test: read timed out (proxy may be slow to respond)");
-        }
-        Err(e) => panic!("SOCKS5 read failed: {}", e),
-    }
+    socks5_connect(&mut stream, target);
+    assert_echo(&mut stream);
+}
+
+#[test]
+fn test_socks4_no_auth_connect_end_to_end() {
+    let target = spawn_echo_target();
+    let proxy = TestProxy::start(ProxyOptions {
+        allow_private_targets: true,
+        ..Default::default()
+    });
+    let mut stream = connect_proxy(&proxy);
+
+    let SocketAddr::V4(v4) = target else {
+        panic!("IPv4 target expected")
+    };
+    let mut req = vec![0x04, 0x01];
+    req.extend_from_slice(&v4.port().to_be_bytes());
+    req.extend_from_slice(&v4.ip().octets());
+    req.push(0x00); // empty user id
+    stream.write_all(&req).unwrap();
+    let reply = read_exact_or_fail(&mut stream, 8, "SOCKS4 reply");
+    assert_eq!(reply[1], 0x5a, "SOCKS4 request not granted: {reply:02x?}");
+    assert_echo(&mut stream);
+}
+
+#[test]
+fn test_socks5_auth_required_rejects_no_auth_client() {
+    let proxy = TestProxy::start(ProxyOptions {
+        proxy_auth: Some(test_proxy_credentials()),
+        ..Default::default()
+    });
+    let mut stream = connect_proxy(&proxy);
+
+    // Only NO_AUTH offered while auth is required: "no acceptable methods".
+    stream.write_all(&[0x05, 0x01, 0x00]).unwrap();
+    let choice = read_exact_or_fail(&mut stream, 2, "SOCKS5 method selection");
+    assert_eq!(choice, [0x05, 0xFF]);
+}
+
+#[test]
+fn test_socks5_auth_required_connect_end_to_end() {
+    let target = spawn_echo_target();
+    let (user, pass) = test_proxy_credentials();
+    let proxy = TestProxy::start(ProxyOptions {
+        proxy_auth: Some((user.clone(), pass.clone())),
+        allow_private_targets: true,
+        ..Default::default()
+    });
+
+    // Wrong password: method 0x02 is chosen, then the sub-negotiation fails.
+    let mut stream = connect_proxy(&proxy);
+    stream.write_all(&[0x05, 0x02, 0x00, 0x02]).unwrap();
+    let choice = read_exact_or_fail(&mut stream, 2, "SOCKS5 method selection");
+    assert_eq!(choice, [0x05, 0x02]);
+    let wrong = format!("{pass}-wrong");
+    let mut auth = vec![0x01, user.len() as u8];
+    auth.extend_from_slice(user.as_bytes());
+    auth.push(wrong.len() as u8);
+    auth.extend_from_slice(wrong.as_bytes());
+    stream.write_all(&auth).unwrap();
+    let status = read_exact_or_fail(&mut stream, 2, "SOCKS5 auth status");
+    assert_eq!(status, [0x01, 0x01]);
+
+    // Right password: full CONNECT through to the target.
+    let mut stream = connect_proxy(&proxy);
+    stream.write_all(&[0x05, 0x02, 0x00, 0x02]).unwrap();
+    let choice = read_exact_or_fail(&mut stream, 2, "SOCKS5 method selection");
+    assert_eq!(choice, [0x05, 0x02]);
+    let mut auth = vec![0x01, user.len() as u8];
+    auth.extend_from_slice(user.as_bytes());
+    auth.push(pass.len() as u8);
+    auth.extend_from_slice(pass.as_bytes());
+    stream.write_all(&auth).unwrap();
+    let status = read_exact_or_fail(&mut stream, 2, "SOCKS5 auth status");
+    assert_eq!(status, [0x01, 0x00]);
+
+    socks5_connect(&mut stream, target);
+    assert_echo(&mut stream);
 }
 
 #[test]
@@ -439,6 +618,7 @@ fn test_https_proxy_denial_and_upstream_failure_get_status() {
     let proxy = TestProxy::start(ProxyOptions {
         blocked_targets: vec!["blocked.example".into()],
         tls: Some((cert.clone(), key.clone())),
+        ..Default::default()
     });
 
     // Policy denial over outer TLS: 403, not a silent close.

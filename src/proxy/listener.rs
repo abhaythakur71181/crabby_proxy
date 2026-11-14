@@ -369,6 +369,27 @@ async fn handle_client(
         }
     } else {
         tracing::debug!("Skipping authentication (--no-creds)");
+        // SOCKS5 still needs its method-selection exchange answered (with
+        // "no authentication") before the client sends the CONNECT request.
+        // SOCKS4 has no greeting, and HTTP needs nothing here.
+        if protocol == ProxyProtocol::SOCKS5 {
+            let negotiated = timeout(
+                crate::constants::HANDSHAKE_TIMEOUT,
+                ProxyProtocol::negotiate_socks5_without_auth(&mut buffered_stream),
+            )
+            .await;
+            match negotiated {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!("{}: SOCKS5 greeting rejected: {}", client_addr, e);
+                    return;
+                }
+                Err(_) => {
+                    tracing::warn!("{}: SOCKS5 greeting timed out", client_addr);
+                    return;
+                }
+            }
+        }
         None
     };
     // Update context with auth results
