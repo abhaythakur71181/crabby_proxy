@@ -42,6 +42,13 @@ approval_timeout = 300
 reverse_tunnels = false
 tunnel_port_start = 10000
 tunnel_port_end = 10999
+# Interface tunnel listeners bind to (tunnels relay raw TCP without auth).
+tunnel_bind_addr = "127.0.0.1"
+# Internal targets (CIDRs/IPs) tunnels may reach; loopback/private/link-local
+# targets are refused unless listed. Non-empty = strict allow-list.
+tunnel_allowed_targets = []
+# Max concurrent connections per tunnel (0 = unlimited).
+tunnel_max_connections = 100
 
 [state]
 backend = "memory"

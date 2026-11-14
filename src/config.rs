@@ -15,6 +15,14 @@ fn default_idle_timeout_secs() -> u64 {
     900
 }
 
+fn default_tunnel_bind_addr() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_tunnel_max_connections() -> usize {
+    100
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub server: ServerConfig,
@@ -110,6 +118,20 @@ pub struct FeatureConfig {
     pub reverse_tunnels: bool,
     pub tunnel_port_start: u16,
     pub tunnel_port_end: u16,
+    /// Interface reverse-tunnel listeners bind to. Defaults to loopback so a
+    /// tunnel (which relays raw TCP with no authentication) is not exposed on
+    /// every interface unless the operator opts in with e.g. "0.0.0.0".
+    #[serde(default = "default_tunnel_bind_addr")]
+    pub tunnel_bind_addr: String,
+    /// Internal targets (CIDRs or bare IPs) a reverse tunnel may point at.
+    /// Loopback, private, link-local (cloud metadata), CGNAT and other
+    /// non-routable targets are refused unless listed here. When non-empty,
+    /// it is a strict allow-list: every tunnel target must match an entry.
+    #[serde(default)]
+    pub tunnel_allowed_targets: Vec<String>,
+    /// Max concurrent relayed connections per tunnel (0 = unlimited).
+    #[serde(default = "default_tunnel_max_connections")]
+    pub tunnel_max_connections: usize,
     pub webhook_url: Option<String>,
     pub webhook_events: Vec<String>, // e.g. ["quota_exceeded", "rate_limit", "auth_failure"]
 }
@@ -283,6 +305,9 @@ impl Default for Config {
                 reverse_tunnels: false,
                 tunnel_port_start: 10000,
                 tunnel_port_end: 10999,
+                tunnel_bind_addr: default_tunnel_bind_addr(),
+                tunnel_allowed_targets: vec![],
+                tunnel_max_connections: default_tunnel_max_connections(),
                 webhook_url: None,
                 webhook_events: vec![],
             },
