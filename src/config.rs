@@ -207,6 +207,12 @@ pub struct AdminConfig {
     pub websocket_enabled: bool,
     pub cors_enabled: bool,
     pub cors_origins: Vec<String>,
+    /// Set the `Secure` attribute on the browser session cookie (webv2).
+    /// Keep this on whenever the UI is served over HTTPS; turn it off only
+    /// for a plain-HTTP deployment on a trusted network, where browsers would
+    /// otherwise drop the cookie (http://localhost is exempt either way).
+    #[serde(default = "default_true")]
+    pub session_cookie_secure: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -328,6 +334,7 @@ impl Default for Config {
                 websocket_enabled: true,
                 cors_enabled: true,
                 cors_origins: vec!["http://localhost:3000".to_string()],
+                session_cookie_secure: true,
             },
             advanced: AdvancedConfig {
                 buffer_size: 8192,

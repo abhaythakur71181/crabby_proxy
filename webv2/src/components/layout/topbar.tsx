@@ -17,7 +17,7 @@ import {
 import { useMemo } from "react";
 import { useLocation, useNavigate } from "react-router";
 import { motion } from "motion/react";
-import { clearSession } from "@/lib/auth";
+import { signOut } from "@/api/http";
 import {
   useApprovalRequests,
   useDeepHealth,
@@ -290,7 +290,7 @@ export function Topbar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
               </DropdownMenu.Item>
               <DropdownMenu.Item
                 onSelect={() => {
-                  clearSession();
+                  void signOut();
                   navigate("/login");
                 }}
                 className="flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-[12.5px] text-danger outline-none data-[highlighted]:bg-danger-soft"

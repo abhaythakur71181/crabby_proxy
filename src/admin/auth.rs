@@ -31,6 +31,36 @@ pub async fn auth_middleware(
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok());
+    // Browser (webv2) sessions: no Authorization header, HttpOnly cookie.
+    // An explicit Authorization header always wins, so API/CLI clients are
+    // unaffected by any cookie the same browser profile may also hold.
+    if auth_header.is_none() {
+        if let Some(token) = session_cookie(request.headers()) {
+            let (user_id, mut session) = authenticate_token(&state, &token, &jwt_secret).await?;
+            session.via_cookie = true;
+            // Cookies are attached by the browser automatically, so every
+            // state-changing request must also prove it came from our UI by
+            // echoing the per-session CSRF token in a header.
+            if !request.method().is_safe() {
+                let presented = request
+                    .headers()
+                    .get(CSRF_HEADER)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                if !csrf_token_matches(&jwt_secret, &session.jti, presented) {
+                    tracing::warn!("Rejecting cookie-authenticated request: bad CSRF token");
+                    return Err(StatusCode::FORBIDDEN);
+                }
+            }
+            request.extensions_mut().insert(user_id);
+            request.extensions_mut().insert(session);
+            if let Err(e) = check_user_rate_limit(&state, user_id).await {
+                tracing::warn!("Rate limit exceeded for user {}: {}", user_id, e);
+                return Err(StatusCode::TOO_MANY_REQUESTS);
+            }
+            return Ok(next.run(request).await);
+        }
+    }
     match auth_header {
         Some(auth) if auth.starts_with("Bearer ") => {
             let token = auth.trim_start_matches("Bearer ");
@@ -120,6 +150,66 @@ pub struct AuthSession {
     pub jti: String,
     /// Unix seconds when the token expires.
     pub expires_at: i64,
+    /// Authenticated via the browser session cookie (vs. Authorization header).
+    pub via_cookie: bool,
+}
+
+/// Name of the browser session cookie (HttpOnly; holds the session JWT).
+pub const SESSION_COOKIE: &str = "cbpx_session";
+/// Header carrying the CSRF token on cookie-authenticated unsafe requests.
+pub const CSRF_HEADER: &str = "x-csrf-token";
+
+/// Extract the session JWT from the `Cookie` header(s), if present.
+pub fn session_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .filter_map(|pair| pair.trim().split_once('='))
+        .find(|(name, value)| *name == SESSION_COOKIE && !value.is_empty())
+        .map(|(_, value)| value.to_string())
+}
+
+/// `Set-Cookie` value establishing the browser session.
+pub fn session_cookie_header(token: &str, max_age_secs: u64, secure: bool) -> String {
+    format!(
+        "{SESSION_COOKIE}={token}; Path=/; Max-Age={max_age_secs}; HttpOnly; SameSite=Strict{}",
+        if secure { "; Secure" } else { "" }
+    )
+}
+
+/// `Set-Cookie` value deleting the browser session cookie.
+pub fn clear_session_cookie_header(secure: bool) -> String {
+    session_cookie_header("", 0, secure)
+}
+
+/// CSRF token for a cookie session: HMAC-SHA256(jwt_secret, "csrf:" + jti),
+/// hex encoded. Bound to the session (a new login gets a new token) and
+/// stateless (recomputed per request, nothing stored). It is handed to the UI
+/// in the login / session response bodies, never in a cookie, so a cross-site
+/// page can neither read nor forge it.
+pub fn csrf_token(jwt_secret: &str, jti: &str) -> String {
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(jwt_secret.as_bytes())
+        .expect("HMAC accepts any key length");
+    mac.update(b"csrf:");
+    mac.update(jti.as_bytes());
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
+}
+
+/// Constant-time comparison of a presented CSRF token with the expected one.
+pub fn csrf_token_matches(jwt_secret: &str, jti: &str, presented: &str) -> bool {
+    let expected = csrf_token(jwt_secret, jti);
+    let (a, b) = (expected.as_bytes(), presented.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// Validate an admin JWT and its backing session.
@@ -163,6 +253,7 @@ pub(crate) async fn authenticate_token(
         AuthSession {
             jti: claims.jti,
             expires_at: claims.exp as i64,
+            via_cookie: false,
         },
     ))
 }
@@ -496,6 +587,60 @@ mod tests {
             role: "superuser".into(),
         };
         assert_eq!(odd.role_enum(), Role::User);
+    }
+
+    // === Session cookie / CSRF helpers ===
+
+    #[test]
+    fn test_session_cookie_parsing() {
+        let mut h = axum::http::HeaderMap::new();
+        assert_eq!(session_cookie(&h), None);
+        h.insert(
+            header::COOKIE,
+            "theme=dark; cbpx_session=abc.def.ghi; other=1"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(session_cookie(&h).as_deref(), Some("abc.def.ghi"));
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(header::COOKIE, "cbpx_session=".parse().unwrap());
+        assert_eq!(session_cookie(&h), None, "empty (cleared) cookie ignored");
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(header::COOKIE, "xcbpx_session=evil".parse().unwrap());
+        assert_eq!(session_cookie(&h), None, "name must match exactly");
+    }
+
+    #[test]
+    fn test_session_cookie_attributes() {
+        let c = session_cookie_header("tok", 3600, true);
+        for attr in [
+            "cbpx_session=tok",
+            "HttpOnly",
+            "SameSite=Strict",
+            "Secure",
+            "Path=/",
+            "Max-Age=3600",
+        ] {
+            assert!(c.contains(attr), "missing {attr} in {c}");
+        }
+        assert!(!session_cookie_header("tok", 1, false).contains("Secure"));
+        assert!(clear_session_cookie_header(true).contains("Max-Age=0"));
+    }
+
+    #[test]
+    fn test_csrf_token_bound_to_session_and_secret() {
+        let s = "secret_key_at_least_32_bytes_long_xxxxxx";
+        let t = csrf_token(s, "jti-1");
+        assert_eq!(t.len(), 64);
+        assert!(csrf_token_matches(s, "jti-1", &t));
+        assert!(!csrf_token_matches(s, "jti-2", &t));
+        assert!(!csrf_token_matches(
+            "another_secret_key_32_bytes_long_xxxxx",
+            "jti-1",
+            &t
+        ));
+        assert!(!csrf_token_matches(s, "jti-1", ""));
+        assert!(!csrf_token_matches(s, "jti-1", &t[..63]));
     }
 
     // === require_admin Tests ===

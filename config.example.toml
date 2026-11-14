@@ -85,6 +85,9 @@ admin_password = "REPLACE_ME"
 websocket_enabled = true
 cors_enabled = true
 cors_origins = ["http://localhost:3000"]
+# Secure attribute on the webv2 session cookie. Leave on for HTTPS (and
+# http://localhost); set false only for a plain-HTTP UI on a trusted network.
+session_cookie_secure = true
 
 [advanced]
 buffer_size = 8192

@@ -35,7 +35,7 @@ import type {
 
 // ── Auth ──
 export const login = (username: string, password: string) =>
-  post<LoginResponse>("/api/login", { username, password });
+  post<LoginResponse>("/api/login", { username, password, use_cookie: true });
 
 // ── Health / telemetry ──
 export const getHealth = () => get<HealthResponse>("/health");

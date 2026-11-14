@@ -324,3 +324,112 @@ async fn password_changes_revoke_sessions() {
     assert_eq!(get_status(&base, &a1, "/api/session").await, 401);
     assert_eq!(get_status(&base, &root, "/api/session").await, 200);
 }
+
+// ─── #64: HttpOnly cookie sessions with CSRF protection ──────────────────
+
+#[tokio::test]
+async fn cookie_login_session_csrf_and_logout() {
+    let state = test_state().await;
+    let uid = add_user(&state, "alice", Role::User).await;
+    let base = spawn(state).await;
+    let c = client();
+
+    let res = c
+        .post(format!("{base}/api/login"))
+        .json(&serde_json::json!({
+            "username": "alice", "password": TEST_PASSWORD, "use_cookie": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let set_cookie = res
+        .headers()
+        .get("set-cookie")
+        .expect("cookie mode sets a cookie")
+        .to_str()
+        .unwrap()
+        .to_string();
+    for attr in ["HttpOnly", "Secure", "SameSite=Strict", "Path=/"] {
+        assert!(set_cookie.contains(attr), "missing {attr}: {set_cookie}");
+    }
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert!(
+        body.get("token").is_none(),
+        "no bearer token in cookie mode"
+    );
+    assert_eq!(body["user_id"], uid);
+    let csrf = body["csrf_token"].as_str().unwrap().to_string();
+    let cookie = set_cookie.split(';').next().unwrap().to_string();
+
+    // Reads work with the cookie alone; /api/session hands back the CSRF token.
+    let me: serde_json::Value = c
+        .get(format!("{base}/api/session"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(me["username"], "alice");
+    assert_eq!(me["csrf_token"], csrf.as_str());
+
+    // Unsafe requests need the CSRF header.
+    let create = |csrf: Option<&str>| {
+        let mut rb = c
+            .post(format!("{base}/api/users/{uid}/api-keys"))
+            .header("cookie", &cookie)
+            .json(&serde_json::json!({"name": "k"}));
+        if let Some(t) = csrf {
+            rb = rb.header("x-csrf-token", t);
+        }
+        rb.send()
+    };
+    assert_eq!(create(None).await.unwrap().status(), 403);
+    assert_eq!(create(Some("nope")).await.unwrap().status(), 403);
+    assert_eq!(create(Some(&csrf)).await.unwrap().status(), 201);
+
+    // Logout via cookie revokes the session and clears the cookie.
+    let res = c
+        .post(format!("{base}/api/logout"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 204);
+    assert!(res
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .contains("Max-Age=0"));
+    let s = c
+        .get(format!("{base}/api/session"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(s, 401);
+}
+
+#[tokio::test]
+async fn bearer_clients_unaffected_by_cookie_mode() {
+    let state = test_state().await;
+    let uid = add_user(&state, "alice", Role::User).await;
+    let base = spawn(state).await;
+    let token = login_bearer(&base, "alice").await;
+    // Bearer wins over any cookie, and needs no CSRF header.
+    let s = client()
+        .post(format!("{base}/api/users/{uid}/api-keys"))
+        .bearer_auth(&token)
+        .header("cookie", "cbpx_session=garbage")
+        .json(&serde_json::json!({"name": "cli"}))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(s, 201);
+}

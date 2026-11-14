@@ -205,6 +205,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             .allow_headers([
                 axum::http::header::AUTHORIZATION,
                 axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderName::from_static(super::auth::CSRF_HEADER),
             ])
     } else if cors_origins.iter().any(|o| o == "*") {
         // Explicit "*" still works but only without credentials, and we
@@ -243,6 +244,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             .allow_headers([
                 axum::http::header::AUTHORIZATION,
                 axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderName::from_static(super::auth::CSRF_HEADER),
             ])
             .allow_credentials(true)
             .allow_origin(origins)
