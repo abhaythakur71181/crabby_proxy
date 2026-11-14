@@ -203,6 +203,73 @@ fn generate_secure_password(length: usize) -> String {
     String::from_utf8(password).unwrap_or_else(|_| "Fallback_P@ss1".to_string())
 }
 
+/// Default file the generated first-boot root password is written to when
+/// there is no interactive terminal. Override with CRABBY_ROOT_PASSWORD_FILE.
+#[cfg(not(test))]
+const ROOT_PASSWORD_FILE: &str = "initial_root_password.txt";
+
+/// Hand a generated root password to the operator WITHOUT going through the
+/// `tracing` pipeline: anything logged there ends up in log shippers /
+/// journald / container logs, in cleartext, for as long as logs are kept.
+///
+/// - Interactive terminal on stderr: print it there directly.
+/// - Otherwise (service, container): write it to a new file readable only by
+///   the service user (0600) and log only the file's path. The file is never
+///   overwritten; delete it after saving the password.
+/// - If the file cannot be written, fall back to raw stderr (still outside
+///   the structured log pipeline).
+#[cfg(not(test))]
+fn disclose_generated_root_password(password: &str) {
+    use std::io::{IsTerminal, Write};
+
+    let banner = format!(
+        "\n\
+         ==============================================================\n\
+         ROOT ADMIN ACCOUNT CREATED\n\
+         Username: root\n\
+         Password: {password}\n\
+         Save this password now; it will not be shown again.\n\
+         To choose it yourself, set CRABBY_ROOT_PASSWORD before first start.\n\
+         ==============================================================\n"
+    );
+    if std::io::stderr().is_terminal() {
+        eprint!("{}", banner);
+        tracing::warn!("Root admin account 'root' created; the generated password was printed to the terminal (not to the logs)");
+        return;
+    }
+
+    let path = std::env::var("CRABBY_ROOT_PASSWORD_FILE")
+        .unwrap_or_else(|_| ROOT_PASSWORD_FILE.to_string());
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    match opts
+        .open(&path)
+        .and_then(|mut f| writeln!(f, "username: root\npassword: {}", password))
+    {
+        Ok(()) => tracing::warn!(
+            "Root admin account 'root' created; the generated password was written to {} (mode 0600). Save it and delete the file.",
+            path
+        ),
+        Err(e) => {
+            tracing::warn!(
+                "Root admin account 'root' created; could not write the password file {} ({}), printing the password to stderr instead",
+                path,
+                e
+            );
+            eprint!("{}", banner);
+        }
+    }
+}
+
+/// Unit tests create many throwaway databases; don't litter files or stderr.
+#[cfg(test)]
+fn disclose_generated_root_password(_password: &str) {}
+
 /// Create root admin if none exists
 pub async fn ensure_root_admin(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
     let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE role = 'root_admin'")
@@ -210,8 +277,9 @@ pub async fn ensure_root_admin(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
         .await?;
     if count.0 == 0 {
         // Try env var first, then generate random password
-        let password =
-            std::env::var("CRABBY_ROOT_PASSWORD").unwrap_or_else(|_| generate_secure_password(16));
+        let from_env = std::env::var("CRABBY_ROOT_PASSWORD").ok();
+        let generated = from_env.is_none();
+        let password = from_env.unwrap_or_else(|| generate_secure_password(16));
 
         let request = CreateUserRequest {
             username: "root".to_string(),
@@ -226,16 +294,13 @@ pub async fn ensure_root_admin(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
         };
         create_user(pool, &request, None).await?;
 
-        tracing::warn!("╔════════════════════════════════════════════════════════════╗");
-        tracing::warn!("║          ROOT ADMIN ACCOUNT CREATED                        ║");
-        tracing::warn!("╠════════════════════════════════════════════════════════════╣");
-        tracing::warn!("║  Username: root                                            ║");
-        tracing::warn!("║  Password: {:<48}║", password);
-        tracing::warn!("╠════════════════════════════════════════════════════════════╣");
-        tracing::warn!("║  *** SAVE THIS PASSWORD - IT WON'T BE SHOWN AGAIN ***      ║");
-        tracing::warn!("║  To set a custom password, use env var:                    ║");
-        tracing::warn!("║  CRABBY_ROOT_PASSWORD=yourpassword                         ║");
-        tracing::warn!("╚════════════════════════════════════════════════════════════╝");
+        if generated {
+            disclose_generated_root_password(&password);
+        } else {
+            tracing::warn!(
+                "Root admin account 'root' created with the password from CRABBY_ROOT_PASSWORD"
+            );
+        }
 
         Ok(true)
     } else {
