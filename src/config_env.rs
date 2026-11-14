@@ -203,7 +203,7 @@ fn enforce_password_strength(field: &str, env_var: &str, password: &str, allow_w
 
 /// True if a bind address (`ip:port` or `localhost:port`) only listens on
 /// loopback. Anything unparseable counts as exposed.
-fn is_loopback_bind(bind: &str) -> bool {
+pub(crate) fn is_loopback_bind(bind: &str) -> bool {
     if let Ok(addr) = bind.parse::<std::net::SocketAddr>() {
         return addr.ip().is_loopback();
     }
