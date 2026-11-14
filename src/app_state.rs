@@ -334,7 +334,11 @@ impl AppState {
             ip_filter,
             geo_filter,
             dns_cache: Arc::new(crate::dns_cache::DnsCache::new(
-                config.advanced.dns_cache_ttl,
+                crate::dns_cache::DnsTtlPolicy::from_secs(
+                    config.advanced.dns_cache_min_ttl,
+                    config.advanced.dns_cache_ttl,
+                    config.advanced.dns_negative_cache_ttl,
+                ),
             )),
             shutdown_tx,
             usage_writer: crate::usage_writer::UsageWriter::spawn(db_pool.clone()),

@@ -341,7 +341,25 @@ pub struct AdvancedConfig {
     #[serde(default)]
     pub pool_max_idle_per_host: usize,
     pub http2_enabled: bool,
+    /// Upper bound (seconds) on how long a DNS answer is cached; the record's
+    /// own TTL is used when shorter. 0 disables DNS caching entirely.
     pub dns_cache_ttl: u64,
+    /// Lower bound (seconds) on how long a positive DNS answer is cached, so
+    /// 0-TTL records don't force a lookup per connection.
+    #[serde(default = "default_dns_cache_min_ttl")]
+    pub dns_cache_min_ttl: u64,
+    /// Upper bound (seconds) for caching NXDOMAIN / no-record answers (the
+    /// zone's negative TTL is used when shorter). 0 disables negative caching.
+    #[serde(default = "default_dns_negative_cache_ttl")]
+    pub dns_negative_cache_ttl: u64,
+}
+
+fn default_dns_cache_min_ttl() -> u64 {
+    5
+}
+
+fn default_dns_negative_cache_ttl() -> u64 {
+    5
 }
 
 impl Config {
@@ -497,6 +515,8 @@ impl Default for Config {
                 pool_max_idle_per_host: 10,
                 http2_enabled: false,
                 dns_cache_ttl: 300,
+                dns_cache_min_ttl: default_dns_cache_min_ttl(),
+                dns_negative_cache_ttl: default_dns_negative_cache_ttl(),
             },
         }
     }
