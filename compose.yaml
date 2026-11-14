@@ -18,6 +18,10 @@ services:
     container_name: crabby-proxy
     restart: unless-stopped
 
+    # Single instance only: do not `--scale crabby-proxy=N`. State, rate
+    # limiting and the SQLite DB are per-process/per-volume (the baked config
+    # uses [state] backend = "memory"); see docs/RUNBOOK.md, "Scaling".
+    #
     # Secrets are loaded from .env. Required — container refuses to start
     # if CRABBY_JWT_SECRET is unset (config_env.rs panics on weak secrets).
     environment:

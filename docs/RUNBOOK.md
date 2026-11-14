@@ -58,6 +58,28 @@ auto-reload on file change yet.
 - **Terminate an approval / revoke an API key** — effective immediately (caches
   are invalidated on the action).
 
+## Scaling (single-instance constraint)
+
+Run **exactly one** proxy process per database. This is a deliberate default,
+not an oversight; the following state is per process or per volume:
+
+- **State backend** (`[state] backend`, default `"memory"`): live connections,
+  pending approvals and counters live in process memory.
+- **Rate limiting**: always in-process (`governor`), whatever the state
+  backend. A second replica doubles every client's effective limit.
+- **Database**: SQLite is a single-writer file on a local volume. Two
+  containers must never mount the same `proxy.db` (and never over NFS/SMB).
+
+`backend = "redis"` shares the first item only, and if Redis is unreachable at
+boot the process silently falls back to memory, so two "Redis" replicas can
+still split state. Scale vertically (raise `max_connections` and the compose
+`PROXY_*` limits) instead. Before running more than one replica, the project
+needs: an atomic, tested Redis backend that fails hard instead of falling
+back; Redis-backed rate limiting wired in (`RedisRateLimiter` exists but is
+not used); and a shared database (e.g. Postgres) in place of SQLite. The
+Kubernetes design in `docs/superpowers/specs/` already pins the backend to a
+1-replica StatefulSet for this reason; the UI is stateless and can scale.
+
 ## Redis outage
 
 Optional. On failure the proxy falls back to the in-memory state backend and
