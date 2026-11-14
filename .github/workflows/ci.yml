@@ -47,15 +47,20 @@ jobs:
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          # Justified, non-applicable-to-us advisory with no reachable fix
-          # (keep in sync with deny.toml [advisories].ignore):
+          # Justified, non-applicable-to-us advisories (keep in sync with
+          # deny.toml [advisories].ignore):
           #  RUSTSEC-2023-0071 (rsa/Marvin): only HS256 (HMAC) is used via
           #    jsonwebtoken; the RSA code path is never exercised, and no fixed
           #    rsa release exists.
+          #  RUSTSEC-2026-0459 (bundled SQLite < 3.54 in libsqlite3-sys 0.30,
+          #    via sqlx 0.8): only exploitable by opening a DB + -wal pair that
+          #    a less-trusted party wrote. proxy.db lives in a private volume
+          #    written only by the proxy. Fixed by sqlx 0.9 (libsqlite3-sys
+          #    0.39); remove this ignore with that upgrade.
           # No longer ignored after the #85 bump: RUSTSEC-2025-0132 (maxminddb
           # 0.27 makes open_mmap unsafe) and RUSTSEC-2024-0437 (prometheus 0.14
           # pulls the patched protobuf 3.7.2).
-          ignore: RUSTSEC-2023-0071
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2026-0459
 
   deny:
     name: Supply-chain — cargo deny (licenses, bans, sources)
