@@ -84,7 +84,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   webv2:
-    name: Web (v2) — typecheck, test, build
+    name: Web (v2) — lint, typecheck, test, build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -96,6 +96,8 @@ jobs:
           bun-version: latest
       - name: Install
         run: bun install --frozen-lockfile
+      - name: Lint
+        run: bun run lint
       - name: Typecheck
         run: bun run typecheck
       - name: Test

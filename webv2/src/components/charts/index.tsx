@@ -15,6 +15,8 @@ export interface AreaPoint {
   value2?: number;
 }
 
+const PAD = { top: 10, right: 6, bottom: 20, left: 6 };
+
 export function AreaChart({
   points,
   height = 180,
@@ -33,7 +35,6 @@ export function AreaChart({
   const [hover, setHover] = useState<number | null>(null);
   const W = 600;
   const H = height;
-  const PAD = { top: 10, right: 6, bottom: 20, left: 6 };
 
   const { path1, path2, area1, max, xs } = useMemo(() => {
     const n = points.length;
@@ -252,16 +253,17 @@ export function Donut({
   const total = segments.reduce((s, x) => s + x.value, 0);
   const R = 42;
   const C = 2 * Math.PI * R;
-  let acc = 0;
+  // Each segment starts where the previous ones end (cumulative fraction).
+  const fracs = segments.map((seg) => (total > 0 ? seg.value / total : 0));
+  const offsets = fracs.map((_, i) => fracs.slice(0, i).reduce((s, f) => s + f, 0));
 
   return (
     <div className={cn("flex items-center gap-5", className)}>
       <svg width={size} height={size} viewBox="0 0 100 100" role="img" aria-label="Protocol mix">
         <circle cx="50" cy="50" r={R} fill="none" stroke="var(--chart-grid)" strokeWidth="10" />
         {segments.map((seg, i) => {
-          const frac = total > 0 ? seg.value / total : 0;
-          const offset = acc;
-          acc += frac;
+          const frac = fracs[i];
+          const offset = offsets[i];
           return (
             <motion.circle
               key={seg.label}

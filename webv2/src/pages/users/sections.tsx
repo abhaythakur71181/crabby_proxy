@@ -16,6 +16,7 @@ import {
   useUserUsage,
   useUserUsageRecent,
 } from "@/hooks/queries";
+import { useNow } from "@/hooks/use-now";
 import { Modal, ConfirmDialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Panel, PanelHeader } from "@/components/ui/card";
@@ -429,9 +430,10 @@ export function RecentUsageSection({ userId }: { userId: number }) {
 // ── Approvals (grants for this user) ──────────────────────────────
 export function UserApprovalsSection({ userId }: { userId: number }) {
   const approvals = useUserApprovals(userId);
-  const now = Math.floor(Date.now() / 1000);
+  const now = Math.floor(useNow(30_000) / 1000);
+  // Copy before sorting: approvals.data is the shared react-query cache entry.
   const rows = useMemo(
-    () => (approvals.data ?? []).sort((a, b) => b.approved_at - a.approved_at).slice(0, 8),
+    () => [...(approvals.data ?? [])].sort((a, b) => b.approved_at - a.approved_at).slice(0, 8),
     [approvals.data],
   );
   return (

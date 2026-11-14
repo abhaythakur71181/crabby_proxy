@@ -27,6 +27,7 @@ import {
   useUserDirectory,
   useUsers,
 } from "@/hooks/queries";
+import { useNow } from "@/hooks/use-now";
 import { Modal } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/card";
@@ -67,12 +68,13 @@ export function ApprovalsPage() {
         .sort((a, b) => (b.decided_at ?? 0) - (a.decided_at ?? 0)),
     [requests.data],
   );
-  // `now` is read inside the memo (not a dep) so the list is only re-filtered
-  // when the grants data changes — i.e. on every refetch — not every render.
+  // The clock ticks once a minute, so grants drop off the active list shortly
+  // after they expire even without a refetch.
+  const nowMs = useNow(60_000);
   const activeGrants = useMemo(() => {
-    const now = Math.floor(Date.now() / 1000);
+    const now = Math.floor(nowMs / 1000);
     return (grants.data ?? []).filter((g) => g.expires_at > now).sort((a, b) => b.approved_at - a.approved_at);
-  }, [grants.data]);
+  }, [grants.data, nowMs]);
 
   const refresh = () => invalidate(keys.approvalRequests, keys.approvals);
 
