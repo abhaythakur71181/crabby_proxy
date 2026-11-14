@@ -1,10 +1,10 @@
 use chrono::Utc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use std::{collections::HashMap, net::SocketAddr};
-use tokio::io::AsyncWriteExt;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
-use tokio::{io, net::TcpStream};
 use uuid::Uuid;
 
 use crate::connection::ServiceType;
@@ -20,6 +20,16 @@ pub struct TunnelMetrics {
     pub total_connections: AtomicU64,
     /// Connections currently being relayed.
     pub active_connections: AtomicU64,
+}
+
+/// Runtime limits applied to every connection relayed by a tunnel.
+#[derive(Debug, Clone, Copy)]
+pub struct TunnelLimits {
+    /// Tear a relayed connection down after this long with no traffic in
+    /// either direction (`None` = no idle timeout).
+    pub idle_timeout: Option<Duration>,
+    /// Max concurrent relayed connections for the tunnel (0 = unlimited).
+    pub max_connections: usize,
 }
 
 /// Public tunnel info for admin API responses
@@ -45,7 +55,6 @@ pub struct TunnelManager {
 
 struct ActiveTunnel {
     tunnel_id: Uuid,
-    client_id: Uuid,
     listen_port: u16,
     target_addr: SocketAddr,
     service_type: ServiceType,
@@ -78,48 +87,51 @@ impl TunnelManager {
         }
     }
 
-    pub async fn create_reverse_tunnel(
+    /// Reserve a listen port. Synchronous so callers can hold the manager
+    /// lock only for the reservation, then bind with the lock released.
+    pub fn reserve_port(&mut self, preferred_port: Option<u16>) -> Result<u16, TunnelError> {
+        Ok(self.port_allocator.allocate_port(preferred_port)?)
+    }
+
+    /// Give back a port reserved with [`reserve_port`] whose bind failed.
+    pub fn release_reserved_port(&mut self, port: u16) {
+        let _ = self.port_allocator.release_port(port);
+    }
+
+    /// Register a tunnel on a port reserved with [`reserve_port`] and an
+    /// already-bound listener, and start relaying.
+    pub fn register_tunnel(
         &mut self,
         service_type: ServiceType,
-        preferred_port: Option<u16>,
-        client_addr: SocketAddr,
-    ) -> Result<u16, TunnelError> {
-        // Allocate port
-        let port = self.port_allocator.allocate_port(preferred_port)?;
-
-        // INFO: Bind eagerly so we can release port on failure
-        let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await {
-            Ok(l) => l,
-            Err(e) => {
-                // Release port back since bind failed
-                let _ = self.port_allocator.release_port(port);
-                return Err(TunnelError::BindError(port, e.to_string()));
-            }
-        };
-
-        // Create tunnel
+        listener: TcpListener,
+        target_addr: SocketAddr,
+        limits: TunnelLimits,
+    ) -> Result<TunnelInfo, TunnelError> {
+        let port = listener
+            .local_addr()
+            .map_err(|e| TunnelError::AllocationError(e.to_string()))?
+            .port();
         let metrics = Arc::new(TunnelMetrics::default());
         let tunnel = ActiveTunnel {
             tunnel_id: Uuid::new_v4(),
-            client_id: Uuid::new_v4(),
             listen_port: port,
-            target_addr: client_addr,
-            service_type: service_type.clone(),
+            target_addr,
+            service_type,
             created_at: Utc::now(),
             metrics: metrics.clone(),
         };
+        let info = tunnel.to_info();
 
-        let handle = tokio::spawn(tunnel_listener_task_with_listener(
+        let handle = tokio::spawn(tunnel_listener_task(
             listener,
             port,
-            client_addr,
+            target_addr,
             metrics,
+            limits,
         ));
         self.tasks.entry(port).or_default().push(handle);
-
-        // Store tunnel
         self.active_tunnels.insert(port, tunnel);
-        Ok(port)
+        Ok(info)
     }
 
     pub async fn close_tunnel(&mut self, port: u16) -> Result<(), TunnelError> {
@@ -137,7 +149,6 @@ impl TunnelManager {
         if let Some(handles) = self.tasks.remove(&port) {
             for handle in handles {
                 handle.abort();
-                // optionally: let _ = handle.await; // would yield JoinError::is_cancelled()
             }
         }
 
@@ -166,72 +177,50 @@ impl TunnelManager {
     pub fn count_active(&self) -> usize {
         self.active_tunnels.len()
     }
-
-    /// Create a tunnel from admin API (no client connection needed)
-    pub async fn create_tunnel_admin(
-        &mut self,
-        service_type: ServiceType,
-        preferred_port: Option<u16>,
-        target_addr: SocketAddr,
-    ) -> Result<TunnelInfo, TunnelError> {
-        let port = self
-            .create_reverse_tunnel(service_type, preferred_port, target_addr)
-            .await?;
-        // Build the response from the just-inserted entry. Avoid `.unwrap()`:
-        // although the entry exists under the current `&mut self` lock, an
-        // unwrap would panic the admin request task on any future refactor that
-        // released the lock or removed the tunnel early.
-        let tunnel = self.active_tunnels.get(&port).ok_or_else(|| {
-            TunnelError::AllocationError(format!(
-                "tunnel on port {port} vanished immediately after creation"
-            ))
-        })?;
-        Ok(tunnel.to_info())
-    }
 }
 
-async fn tunnel_listener_task(port: u16, target_addr: SocketAddr) {
-    let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!("Failed to bind tunnel port {port}: {e}");
-            return;
-        }
-    };
-
-    loop {
-        match listener.accept().await {
-            Ok((inbound, _)) => {
-                tokio::spawn(handle_tunnel_connection(inbound, target_addr));
-            }
-            Err(e) => {
-                tracing::error!("Accept error on port {port}: {e}");
-            }
-        }
-    }
-}
-
-/// INFO: Tunnel listener task with pre-bound listener (bind failure handled by caller)
-async fn tunnel_listener_task_with_listener(
-    listener: tokio::net::TcpListener,
+/// Accept loop for one tunnel. Aborting the task drops the listener; relayed
+/// connections run in their own tasks and end via EOF or the idle timeout.
+async fn tunnel_listener_task(
+    listener: TcpListener,
     port: u16,
     target_addr: SocketAddr,
     metrics: Arc<TunnelMetrics>,
+    limits: TunnelLimits,
 ) {
+    let slots = (limits.max_connections > 0)
+        .then(|| Arc::new(tokio::sync::Semaphore::new(limits.max_connections)));
     loop {
         match listener.accept().await {
-            Ok((inbound, _)) => {
+            Ok((inbound, peer)) => {
+                let slot = match &slots {
+                    Some(sem) => match sem.clone().try_acquire_owned() {
+                        Ok(p) => Some(p),
+                        Err(_) => {
+                            tracing::warn!(
+                                "tunnel {port}: connection limit ({}) reached, rejecting {peer}",
+                                limits.max_connections
+                            );
+                            continue; // drops `inbound`
+                        }
+                    },
+                    None => None,
+                };
                 metrics.total_connections.fetch_add(1, Ordering::Relaxed);
                 metrics.active_connections.fetch_add(1, Ordering::Relaxed);
                 let m = metrics.clone();
                 tokio::spawn(async move {
-                    let bytes = handle_tunnel_connection(inbound, target_addr).await;
+                    let _slot = slot;
+                    let bytes =
+                        handle_tunnel_connection(inbound, target_addr, limits.idle_timeout).await;
                     m.bytes_transferred.fetch_add(bytes, Ordering::Relaxed);
                     m.active_connections.fetch_sub(1, Ordering::Relaxed);
                 });
             }
             Err(e) => {
-                tracing::error!("Accept error on port {port}: {e}");
+                // Typically EMFILE/ENFILE; back off instead of spinning.
+                tracing::error!("Accept error on tunnel port {port}: {e}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
     }
@@ -239,37 +228,133 @@ async fn tunnel_listener_task_with_listener(
 
 /// Relay one tunnel connection; returns total bytes moved in both directions.
 async fn handle_tunnel_connection(
-    mut inbound: tokio::net::TcpStream,
+    inbound: TcpStream,
     target_addr: SocketAddr,
+    idle_timeout: Option<Duration>,
 ) -> u64 {
-    let mut outbound = match TcpStream::connect(target_addr).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!("Failed to connect to client {target_addr}: {e}");
+    let outbound = match tokio::time::timeout(
+        crate::constants::UPSTREAM_CONNECT_TIMEOUT,
+        TcpStream::connect(target_addr),
+    )
+    .await
+    {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            tracing::error!("Failed to connect to tunnel target {target_addr}: {e}");
+            return 0;
+        }
+        Err(_) => {
+            tracing::error!("Timed out connecting to tunnel target {target_addr}");
             return 0;
         }
     };
+    let _ = inbound.set_nodelay(true);
+    let _ = outbound.set_nodelay(true);
+    crate::utils::enable_tcp_keepalive(&inbound);
 
-    let (mut ri, mut wi) = inbound.split();
-    let (mut ro, mut wo) = outbound.split();
-
-    let client_to_server = async {
-        let n = io::copy(&mut ri, &mut wo).await?;
-        wo.shutdown().await?;
-        io::Result::Ok(n)
-    };
-
-    let server_to_client = async {
-        let n = io::copy(&mut ro, &mut wi).await?;
-        wi.shutdown().await?;
-        io::Result::Ok(n)
-    };
-
-    match tokio::try_join!(client_to_server, server_to_client) {
+    // Same relay as the proxy paths: shared idle clock reaps half-open
+    // connections whose peer vanished without FIN/RST.
+    match crate::stream::create_throttled_tunnel(
+        inbound.into_split(),
+        outbound.into_split(),
+        "tunnel-in",
+        "tunnel-out",
+        None,
+        None,
+        false,
+        idle_timeout,
+    )
+    .await
+    {
         Ok((a, b)) => a + b,
         Err(e) => {
             tracing::error!("Tunnel error: {e}");
             0
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn echo_server() -> SocketAddr {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l.accept().await {
+                tokio::spawn(async move {
+                    let (mut r, mut w) = s.split();
+                    let _ = tokio::io::copy(&mut r, &mut w).await;
+                });
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn tunnel_relays_and_enforces_connection_limit() {
+        let target = echo_server().await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut mgr = TunnelManager::new(port, port);
+        mgr.reserve_port(Some(port)).unwrap();
+        let info = mgr
+            .register_tunnel(
+                ServiceType::WebService,
+                listener,
+                target,
+                TunnelLimits {
+                    idle_timeout: Some(Duration::from_secs(5)),
+                    max_connections: 1,
+                },
+            )
+            .unwrap();
+        assert_eq!(info.listen_port, port);
+
+        let mut first = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        first.write_all(b"hi").await.unwrap();
+        let mut buf = [0u8; 2];
+        first.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"hi");
+
+        // Second concurrent connection is over the limit and gets closed.
+        let mut second = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let mut b = [0u8; 1];
+        let n = tokio::time::timeout(Duration::from_secs(2), second.read(&mut b))
+            .await
+            .expect("over-limit connection should be closed")
+            .unwrap_or(0);
+        assert_eq!(n, 0);
+
+        mgr.close_tunnel(port).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn idle_tunnel_connection_is_reaped() {
+        let target = echo_server().await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut mgr = TunnelManager::new(port, port);
+        mgr.reserve_port(Some(port)).unwrap();
+        mgr.register_tunnel(
+            ServiceType::WebService,
+            listener,
+            target,
+            TunnelLimits {
+                idle_timeout: Some(Duration::from_millis(200)),
+                max_connections: 0,
+            },
+        )
+        .unwrap();
+
+        let mut c = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let mut b = [0u8; 1];
+        let n = tokio::time::timeout(Duration::from_secs(3), c.read(&mut b))
+            .await
+            .expect("idle tunnel connection was not reaped")
+            .unwrap_or(0);
+        assert_eq!(n, 0);
     }
 }

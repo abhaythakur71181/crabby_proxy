@@ -579,21 +579,27 @@ impl ProxyProtocol {
     }
 
     async fn parse_https_target_from_stream(stream: &mut ClientStream) -> io::Result<ProxyTarget> {
-        // For HTTPS, we need to parse SNI from TLS handshake
-        // This is a simplified version - you'd need full TLS parsing for production
-        let mut buf = vec![0u8; 512];
-        // Use peek equivalent for our stream type
-        let n = match stream {
-            ClientStream::Plain(stream) => stream.peek(&mut buf).await?,
-            ClientStream::Tls(stream) => {
-                // For TLS streams, we need to read instead of peek
-                // Note: This consumes data from the stream, but SNI extraction
-                // happens before we need to relay data, so it's acceptable
-                stream.read(&mut buf).await?
+        // SNI routing only makes sense on a raw (non-terminated) stream. On a
+        // terminated TLS stream the bytes are already-decrypted application
+        // data, and reading them here would consume bytes the relay needs
+        // (#44). The listener parses outer-TLS HTTPS via
+        // `parse_target_from_buffered` instead.
+        let tcp = match stream {
+            ClientStream::Plain(tcp) => tcp,
+            ClientStream::Tls(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "SNI cannot be read from an already-terminated TLS stream",
+                ))
             }
         };
+        let hello = timeout(crate::constants::PEEK_TIMEOUT, peek_tls_record(tcp))
+            .await
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::TimedOut, "TLS ClientHello peek timed out")
+            })??;
 
-        if let Some(sni) = Self::extract_sni_from_tls(&buf[..n]) {
+        if let Some(sni) = Self::extract_sni_from_tls(&hello) {
             Ok(ProxyTarget {
                 host: sni,
                 port: 443,
@@ -961,6 +967,51 @@ impl ProxyProtocol {
         }
 
         None
+    }
+}
+
+/// Largest TLS plaintext record: 5-byte header + 2^14 bytes of payload.
+const MAX_TLS_RECORD_LEN: usize = 5 + 16 * 1024;
+
+/// Peek (never consume) one complete TLS record from a plain TCP stream.
+///
+/// A fixed 512-byte peek truncated modern ClientHellos (ALPN, GREASE, session
+/// tickets, ECH, post-quantum key shares), so SNI extraction failed (#44).
+/// Read the record-length header and keep peeking until the whole record is
+/// in the kernel buffer, capped at the TLS maximum. Bytes stay queued for the
+/// relay. Callers bound this with a timeout.
+async fn peek_tls_record(stream: &TcpStream) -> io::Result<Vec<u8>> {
+    let mut buf = vec![0u8; MAX_TLS_RECORD_LEN];
+    loop {
+        let n = stream.peek(&mut buf).await?;
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "client closed before sending a TLS ClientHello",
+            ));
+        }
+        if n >= 5 {
+            if buf[0] != 0x16 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "not a TLS handshake record",
+                ));
+            }
+            let want = 5 + u16::from_be_bytes([buf[3], buf[4]]) as usize;
+            if want > MAX_TLS_RECORD_LEN {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "TLS record exceeds the maximum length",
+                ));
+            }
+            if n >= want {
+                buf.truncate(want);
+                return Ok(buf);
+            }
+        }
+        // Partial record: peek returns immediately while any data is queued,
+        // so back off briefly instead of spinning until the rest arrives.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
 }
 
@@ -1371,6 +1422,95 @@ mod tests {
 
         let sni = ProxyProtocol::extract_sni_from_tls(&data);
         assert_eq!(sni, Some("example.com".to_string()));
+    }
+
+    /// Build a ClientHello whose SNI sits after `pad` bytes of padding
+    /// extension, so it lands well past the old 512-byte peek window.
+    fn client_hello_with_padding(host: &str, pad: usize) -> Vec<u8> {
+        let mut ext = Vec::new();
+        // padding extension (0x0015)
+        ext.extend_from_slice(&[0x00, 0x15]);
+        ext.extend_from_slice(&(pad as u16).to_be_bytes());
+        ext.extend(std::iter::repeat_n(0u8, pad));
+        // server_name extension (0x0000)
+        let h = host.as_bytes();
+        ext.extend_from_slice(&[0x00, 0x00]);
+        ext.extend_from_slice(&((h.len() + 5) as u16).to_be_bytes());
+        ext.extend_from_slice(&((h.len() + 3) as u16).to_be_bytes());
+        ext.push(0x00);
+        ext.extend_from_slice(&(h.len() as u16).to_be_bytes());
+        ext.extend_from_slice(h);
+
+        let mut body = vec![0x03, 0x03];
+        body.extend_from_slice(&[0u8; 32]); // random
+        body.push(0); // session id
+        body.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]); // one cipher suite
+        body.extend_from_slice(&[0x01, 0x00]); // null compression
+        body.extend_from_slice(&(ext.len() as u16).to_be_bytes());
+        body.extend_from_slice(&ext);
+
+        let mut hs = vec![0x01];
+        hs.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+        hs.extend_from_slice(&body);
+
+        let mut rec = vec![0x16, 0x03, 0x01];
+        rec.extend_from_slice(&(hs.len() as u16).to_be_bytes());
+        rec.extend_from_slice(&hs);
+        rec
+    }
+
+    /// #44: a large ClientHello that arrives in two segments is fully peeked,
+    /// SNI is found, and no bytes are consumed from the stream.
+    #[tokio::test]
+    async fn https_sni_parses_large_fragmented_hello_without_consuming() {
+        let hello = client_hello_with_padding("big.example.com", 1500);
+        assert!(hello.len() > 1500);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let to_send = hello.clone();
+        let client = tokio::spawn(async move {
+            let mut c = TcpStream::connect(addr).await.unwrap();
+            c.write_all(&to_send[..300]).await.unwrap();
+            c.flush().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            c.write_all(&to_send[300..]).await.unwrap();
+            c
+        });
+        let (server, _) = listener.accept().await.unwrap();
+        let mut stream = ClientStream::Plain(server);
+
+        let target = ProxyProtocol::HTTPS
+            .parse_target_from_stream(&mut stream)
+            .await
+            .unwrap();
+        assert_eq!(target.host, "big.example.com");
+        assert_eq!(target.port, 443);
+
+        // The whole ClientHello is still there for the relay.
+        let mut relayed = vec![0u8; hello.len()];
+        stream.read_exact(&mut relayed).await.unwrap();
+        assert_eq!(relayed, hello);
+        drop(client.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn https_sni_rejects_non_tls_bytes() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            let mut c = TcpStream::connect(addr).await.unwrap();
+            c.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+            c
+        });
+        let (server, _) = listener.accept().await.unwrap();
+        let mut stream = ClientStream::Plain(server);
+        let err = ProxyProtocol::HTTPS
+            .parse_target_from_stream(&mut stream)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        drop(client.await.unwrap());
     }
 
     // === ProxyTarget Tests ===

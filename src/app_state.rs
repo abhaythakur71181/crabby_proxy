@@ -66,9 +66,6 @@ pub struct AppState {
     // DNS resolution cache (reduces upstream connect latency)
     pub dns_cache: Arc<crate::dns_cache::DnsCache>,
 
-    // Upstream connection pool (reuses idle TCP connections)
-    pub connection_pool: Option<Arc<crate::connection_pool::ConnectionPool>>,
-
     // Auth result cache: HMAC(creds) -> (user_id, cached_at).
     // Avoids DB + argon2 on every connection from the same user (60s TTL).
     // The key is an HMAC-SHA256 of (username, password) under a process-random
@@ -148,7 +145,7 @@ pub struct AppState {
     // permit per multiplexed stream). Without per-stream accounting an h2
     // connection's single accept-permit covers up to 256 streams, defeating the
     // global limit by ~256x (#41).
-    pub global_conn_semaphore: Arc<tokio::sync::Semaphore>,
+    pub global_conn_limit: crate::conn_limiter::ConnLimiter,
 }
 
 impl AppState {
@@ -157,6 +154,7 @@ impl AppState {
         config_path: Option<String>,
         db_pool: sqlx::SqlitePool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        config.validate_access_control()?;
         let state: Arc<dyn StateBackend> = match config.state.backend.as_str() {
             "redis" => {
                 match RedisBackend::new(
@@ -248,9 +246,12 @@ impl AppState {
             Arc::new(RwLock::new(filter))
         };
 
-        // Initialize GeoIP filter (optional)
-        let geo_filter =
-            crate::geo_filter::init_geo_filter(config.filtering.geoip_database_path.as_deref());
+        // Initialize GeoIP filter. Mandatory when geo blocking is enabled:
+        // refuse to start rather than silently fail open (#55).
+        let geo_filter = crate::geo_filter::init_geo_filter(
+            config.filtering.geoip_database_path.as_deref(),
+            config.filtering.geo_blocking_enabled,
+        )?;
 
         // Build self-loop guard from the proxy bind address.
         let self_loop_guard = crate::self_loop::SelfLoopGuard::from_bind(&config.server.proxy_bind);
@@ -313,9 +314,7 @@ impl AppState {
         };
 
         Ok(Self {
-            global_conn_semaphore: Arc::new(tokio::sync::Semaphore::new(
-                config.server.max_connections,
-            )),
+            global_conn_limit: crate::conn_limiter::ConnLimiter::new(config.server.max_connections),
             config: Arc::new(ArcSwap::from_pointee(config.clone())),
             state,
             db_pool: db_pool.clone(),
@@ -337,14 +336,6 @@ impl AppState {
             dns_cache: Arc::new(crate::dns_cache::DnsCache::new(
                 config.advanced.dns_cache_ttl,
             )),
-            connection_pool: if config.advanced.connection_pooling {
-                Some(Arc::new(crate::connection_pool::ConnectionPool::new(
-                    config.advanced.pool_max_idle_per_host,
-                    60, // 60s idle timeout
-                )))
-            } else {
-                None
-            },
             shutdown_tx,
             usage_writer: crate::usage_writer::UsageWriter::spawn(db_pool.clone()),
             quota_cache: Arc::new(dashmap::DashMap::new()),
@@ -405,6 +396,9 @@ impl AppState {
             .as_ref()
             .ok_or("Config path not available for reload")?;
         let mut new_config = Config::from_file(path)?;
+        new_config
+            .validate_access_control()
+            .map_err(|e| format!("config reload rejected: {}", e))?;
         let current = self.config.load();
 
         // Security-critical fields are NOT hot-reloadable: a runtime file edit
@@ -456,12 +450,26 @@ impl AppState {
             new_config.admin.auth_enabled = current.admin.auth_enabled;
         }
 
+        // The GeoIP database is loaded once at startup. A reload that turns
+        // geo blocking on without a loaded database would make every
+        // connection fail closed, so reject it with an actionable error (#55).
+        if new_config.filtering.geo_blocking_enabled && self.geo_filter.is_none() {
+            return Err(
+                "config reload rejected: filtering.geo_blocking_enabled = true but no \
+                 GeoIP database is loaded; set filtering.geoip_database_path and restart"
+                    .into(),
+            );
+        }
+
         drop(current);
+        let max_connections = new_config.server.max_connections;
         self.config.store(Arc::new(new_config));
         // Config credentials' usernames are hot-reloadable; drop cached
         // credential checks so an old username stops working immediately.
         self.auth_cache.clear();
         self.auth_negative_cache.clear();
+        // The global cap is a live semaphore, not a config read; resize it (#51).
+        self.global_conn_limit.resize(max_connections);
         tracing::info!("Configuration reloaded from {}", path);
         Ok(())
     }
@@ -679,6 +687,9 @@ impl AppState {
         user_id: i64,
         client_ip: std::net::IpAddr,
     ) -> Result<bool, sqlx::Error> {
+        // Canonicalise so the cache key / DB match never depends on whether
+        // the client arrived as `::ffff:a.b.c.d` or `a.b.c.d` (#52).
+        let client_ip = crate::ip_filter::canonical_ip(client_ip);
         let cache_key = (user_id, client_ip);
         let ttl = std::time::Duration::from_secs(crate::constants::APPROVAL_CACHE_TTL_SECS);
 

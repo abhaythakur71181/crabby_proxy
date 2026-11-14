@@ -22,6 +22,28 @@ fn matches_any(host: &str, patterns: &[String]) -> bool {
     patterns.iter().any(|p| matches_pattern(host, p))
 }
 
+/// Parse a per-user target list stored as a JSON array of strings.
+/// `None`, an empty string and JSON `null` all mean "no list". Returns `None`
+/// (after logging) when the stored value is present but malformed, so the
+/// caller can fail closed.
+fn parse_user_list(raw: Option<&str>, field: &str) -> Option<Vec<String>> {
+    let raw = match raw.map(str::trim) {
+        None | Some("") | Some("null") => return Some(Vec::new()),
+        Some(r) => r,
+    };
+    match serde_json::from_str::<Vec<String>>(raw) {
+        Ok(list) => Some(list),
+        Err(e) => {
+            tracing::error!(
+                "Malformed per-user {} JSON ({}); denying target (fail-closed)",
+                field,
+                e
+            );
+            None
+        }
+    }
+}
+
 /// Resolve effective target filtering for a connection
 /// Returns true if the target is allowed, false if blocked
 ///
@@ -30,6 +52,9 @@ fn matches_any(host: &str, patterns: &[String]) -> bool {
 /// 2. Per-user blocklist → denied for this user
 /// 3. If global allowlist OR per-user allowlist is set → target must match union
 /// 4. If both allowlists are empty → allow all
+///
+/// A per-user list that is stored but not a valid JSON array of strings
+/// denies the target (fail-closed) and logs an error.
 pub fn is_target_allowed(
     host: &str,
     global_allowed: &[String],
@@ -41,13 +66,18 @@ pub fn is_target_allowed(
     if matches_any(host, global_blocked) {
         return false;
     }
-    // Step 2: Parse per-user lists
-    let user_allowed_list: Vec<String> = user_allowed
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default();
-    let user_blocked_list: Vec<String> = user_blocked
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default();
+    // Step 2: Parse per-user lists. A list that is present but unparseable
+    // fails CLOSED (#57): silently treating a corrupt blocklist as empty
+    // would allow targets the user is meant to be denied, and a corrupt
+    // allowlist read as empty could flip the user to allow-all.
+    let user_blocked_list = match parse_user_list(user_blocked, "blocked_targets") {
+        Some(list) => list,
+        None => return false,
+    };
+    let user_allowed_list = match parse_user_list(user_allowed, "allowed_targets") {
+        Some(list) => list,
+        None => return false,
+    };
     // Step 3: Per-user blocklist
     if matches_any(host, &user_blocked_list) {
         return false;
@@ -303,5 +333,51 @@ mod tests {
         assert!(!is_within_schedule("invalid json"));
         // Empty object has default fields — days will be empty so access is denied
         assert!(!is_within_schedule("{}"));
+    }
+
+    #[test]
+    fn test_malformed_user_blocklist_fails_closed() {
+        // Previously a corrupt blocklist parsed as empty -> target allowed.
+        assert!(!is_target_allowed(
+            "evil.com",
+            &[],
+            &[],
+            None,
+            Some("[\"evil.com\""), // truncated JSON
+        ));
+        assert!(!is_target_allowed(
+            "fine.com",
+            &[],
+            &[],
+            None,
+            Some("{\"not\": \"an array\"}"),
+        ));
+    }
+
+    #[test]
+    fn test_malformed_user_allowlist_fails_closed() {
+        // Previously a corrupt allowlist parsed as empty -> allow-all.
+        assert!(!is_target_allowed(
+            "anything.com",
+            &[],
+            &[],
+            Some("not json"),
+            None,
+        ));
+        // Even a target on the global allowlist is denied: the user's intended
+        // restriction is unknown.
+        assert!(!is_target_allowed(
+            "ok.com",
+            &["ok.com".to_string()],
+            &[],
+            Some("[1, 2]"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_empty_or_null_user_lists_mean_no_list() {
+        assert!(is_target_allowed("a.com", &[], &[], Some(""), Some("null")));
+        assert!(is_target_allowed("a.com", &[], &[], Some("[]"), Some("  ")));
     }
 }

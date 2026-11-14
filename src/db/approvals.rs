@@ -229,6 +229,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mapped_v6_client_matches_v4_grant() {
+        let pool = setup().await;
+        create_approval(&pool, 1, "140.11.11.*", 99, 24, None)
+            .await
+            .unwrap();
+        assert!(is_ip_approved(&pool, 1, "::ffff:140.11.11.5")
+            .await
+            .unwrap());
+        assert!(!is_ip_approved(&pool, 1, "::ffff:140.11.12.5")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
     async fn corrupt_pattern_is_skipped_not_fatal() {
         let pool = setup().await;
         create_approval(&pool, 1, "not-an-ip", 9, 24, None)

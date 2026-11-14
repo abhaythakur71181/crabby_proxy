@@ -16,6 +16,9 @@ impl GeoFilter {
 
     /// Look up the country ISO code for an IP address
     pub fn lookup_country(&self, ip: IpAddr) -> Option<String> {
+        // Canonicalise so a dual-stack client (`::ffff:a.b.c.d`) is looked up
+        // by its IPv4 address (#52).
+        let ip = crate::ip_filter::canonical_ip(ip);
         let result = self.reader.lookup(ip).ok()?;
         let country: geoip2::Country = result.decode().ok()??;
         country.country.iso_code.map(|s| s.to_uppercase())
@@ -58,23 +61,74 @@ impl GeoFilter {
 /// Thread-safe shared GeoFilter
 pub type SharedGeoFilter = Arc<GeoFilter>;
 
-/// Initialize GeoFilter from config path (returns None if not configured or fails)
-pub fn init_geo_filter(path: Option<&str>) -> Option<SharedGeoFilter> {
-    let path = path?;
-    match GeoFilter::new(path) {
-        Ok(filter) => {
-            tracing::info!("GeoIP database loaded from: {}", path);
-            Some(Arc::new(filter))
-        }
-        Err(e) => {
-            tracing::warn!("Failed to load GeoIP database from {}: {}", path, e);
-            None
-        }
-    }
+/// Initialise the GeoFilter from config.
+///
+/// When `geo_blocking_enabled` is true the database is mandatory: a missing
+/// path or a load failure is returned as an error so the proxy refuses to
+/// start instead of silently disabling every country restriction (#55).
+/// When geo blocking is disabled a configured-but-unloadable database is only
+/// a warning (nothing depends on it).
+pub fn init_geo_filter(
+    path: Option<&str>,
+    geo_blocking_enabled: bool,
+) -> Result<Option<SharedGeoFilter>, String> {
+    let path = path.map(str::trim).filter(|p| !p.is_empty());
+    let result = match path {
+        None if geo_blocking_enabled => Err(
+            "filtering.geo_blocking_enabled = true but filtering.geoip_database_path is not set; \
+             set the path to a MaxMind GeoLite2-Country .mmdb or disable geo blocking"
+                .to_string(),
+        ),
+        None => Ok(None),
+        Some(path) => match GeoFilter::new(path) {
+            Ok(filter) => {
+                tracing::info!("GeoIP database loaded from: {}", path);
+                Ok(Some(Arc::new(filter)))
+            }
+            Err(e) if geo_blocking_enabled => Err(format!(
+                "filtering.geo_blocking_enabled = true but the GeoIP database at '{}' \
+                 could not be loaded: {}",
+                path, e
+            )),
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load GeoIP database from {} (geo blocking disabled): {}",
+                    path,
+                    e
+                );
+                Ok(None)
+            }
+        },
+    };
+    crate::metrics::GEO_FILTER_LOADED.set(matches!(result, Ok(Some(_))) as i64);
+    result
 }
 
 #[cfg(test)]
 mod tests {
+    use super::init_geo_filter;
+
+    #[test]
+    fn enabled_without_path_is_an_error() {
+        assert!(init_geo_filter(None, true).is_err());
+        assert!(init_geo_filter(Some("  "), true).is_err());
+    }
+
+    #[test]
+    fn enabled_with_unloadable_db_is_an_error() {
+        let err = init_geo_filter(Some("/nonexistent/GeoLite2-Country.mmdb"), true)
+            .err()
+            .expect("must fail closed");
+        assert!(err.contains("could not be loaded"));
+    }
+
+    #[test]
+    fn disabled_tolerates_missing_or_bad_db() {
+        assert!(init_geo_filter(None, false).unwrap().is_none());
+        assert!(init_geo_filter(Some("/nonexistent/x.mmdb"), false)
+            .unwrap()
+            .is_none());
+    }
 
     #[test]
     fn test_is_ip_allowed_no_restrictions() {
