@@ -16,13 +16,18 @@ tls_key_path = ""
 [database]
 # Single-colon form so the Dockerfile can rewrite it to the /app/data volume.
 path = "sqlite:proxy.db"
+# Size of the READ pool. Writes (usage records, sessions, last-login, API-key
+# last-used, admin changes) go through one extra, dedicated writer connection,
+# so they queue in order instead of competing for SQLite's single write lock.
+# Watch proxy_db_write_acquire_seconds and proxy_db_contention_errors_total.
 max_connections = 10
 # Delete usage rows older than this many days (per-user destination history is
 # sensitive PII and grows without bound). 0 disables purging.
 usage_retention_days = 90
-# SQLite allows one writer at a time (WAL). Writers wait up to busy_timeout_ms
-# for the write lock; requests wait up to acquire_timeout_secs for a pooled
-# connection. Keep acquire_timeout_secs * 1000 above busy_timeout_ms.
+# SQLite allows one writer at a time (WAL). A write waits up to busy_timeout_ms
+# for the lock when another process holds it; requests wait up to
+# acquire_timeout_secs for a pooled (or the writer) connection. Keep
+# acquire_timeout_secs * 1000 above busy_timeout_ms.
 busy_timeout_ms = 5000
 acquire_timeout_secs = 10
 
@@ -64,13 +69,16 @@ webhook_events = []
 
 [state]
 # Where live connection state, pending approvals and counters are kept.
-#   "memory" (default): in-process. Correct for the supported topology, ONE
-#     proxy instance per SQLite database; nothing extra to run.
-#   "redis": shares that state through redis_url. This alone does NOT make the
-#     proxy horizontally scalable: rate limiting stays in-process, SQLite is a
-#     single-writer local file, and an unreachable Redis at boot silently falls
-#     back to "memory". Do not run more than one replica. See docs/RUNBOOK.md,
-#     "Scaling (single-instance constraint)".
+#   "memory" (default): in-process, for a single proxy instance; nothing extra
+#     to run. Redis at redis_url is still used opportunistically as a cache if
+#     it happens to be reachable.
+#   "redis": the multi-replica configuration. Connection state, rate limits,
+#     bandwidth quotas, cache invalidation (pub/sub), config reloads,
+#     connection termination and live-view tickets are shared through Redis.
+#     Redis is REQUIRED: the proxy refuses to start if it is unreachable.
+#     Replicas must share one SQLite file on the SAME host (never NFS/SMB);
+#     multi-host needs a networked DB, which is not supported yet. See
+#     docs/RUNBOOK.md, "Scaling" and "Redis outage".
 backend = "memory"
 redis_url = "redis://localhost:6379"
 redis_pool_size = 10

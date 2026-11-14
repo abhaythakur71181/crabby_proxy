@@ -46,7 +46,8 @@ rollback across a schema change also needs the pre-deploy DB snapshot (see
 fields (`jwt_secret`, passwords, `admin.auth_enabled`, bind addresses) are
 **preserved from the running process** — a file edit cannot disable auth or
 rotate the signing key at runtime; those require a restart. The endpoint returns
-500 on a parse error (check logs for detail).
+500 on a parse error (check logs for detail). With an event bus (Redis), the
+reload is broadcast and every other replica re-reads its own config file.
 
 ## TLS certificate rotation
 
@@ -65,34 +66,87 @@ auto-reload on file change yet.
 - **Terminate an approval / revoke an API key** — effective immediately (caches
   are invalidated on the action).
 
-## Scaling (single-instance constraint)
+## Scaling
 
-Run **exactly one** proxy process per database. This is a deliberate default,
-not an oversight; the following state is per process or per volume:
+**Default: one proxy process per database** (`[state] backend = "memory"`).
+Nothing extra to run; connection state, rate limits and quota counters live in
+process memory. Scale vertically first: raise `[server] max_connections`,
+`[database] max_connections` (read pool) and the compose `PROXY_*` limits.
 
-- **State backend** (`[state] backend`, default `"memory"`): live connections,
-  pending approvals and counters live in process memory.
-- **Rate limiting**: always in-process (`governor`), whatever the state
-  backend. A second replica doubles every client's effective limit.
-- **Database**: SQLite is a single-writer file on a local volume. Two
-  containers must never mount the same `proxy.db` (and never over NFS/SMB).
+**Supported multi-replica configuration: several replicas on one host, sharing
+one SQLite file and one Redis.** Requirements:
 
-`backend = "redis"` shares the first item only, and if Redis is unreachable at
-boot the process silently falls back to memory, so two "Redis" replicas can
-still split state. Scale vertically (raise `max_connections` and the compose
-`PROXY_*` limits) instead. Before running more than one replica, the project
-needs: an atomic, tested Redis backend that fails hard instead of falling
-back; Redis-backed rate limiting wired in (`RedisRateLimiter` exists but is
-not used); and a shared database (e.g. Postgres) in place of SQLite. The
-Kubernetes design in `docs/superpowers/specs/` already pins the backend to a
-1-replica StatefulSet for this reason; the UI is stateless and can scale.
+1. `[state] backend = "redis"` and the same `redis_url` / `redis_key_prefix`
+   on every replica. With this backend the proxy **refuses to start** if Redis
+   (state backend, cache layer or event bus) is unreachable, instead of
+   silently running with split state.
+2. All replicas mount the **same `proxy.db` on a local filesystem of the same
+   host** (e.g. one Docker named volume). SQLite in WAL mode coordinates
+   processes on one host through a shared-memory file; it does **not** work
+   across hosts or over NFS/SMB. Running replicas on several hosts needs a
+   networked database (e.g. Postgres), which the proxy does not support yet.
+3. A TCP load balancer in front of the proxy port and an HTTP load balancer in
+   front of the admin API (no stickiness needed, see below).
+4. The same `config.toml` on every replica, ideally one shared file. `PUT
+   /api/config` writes the file of the replica that served it and broadcasts a
+   reload; other replicas re-read *their* file, so a non-shared file diverges.
+5. Upgrades: let **one** replica start first and apply migrations (and write
+   the pre-migration snapshot), then start the rest. Migrations are not locked
+   across processes.
+
+What is shared across replicas in that configuration:
+
+| Concern | Mechanism |
+|---|---|
+| Live connections, per-user connection counts, pending approvals | Redis state backend |
+| IP / user / login rate limits | Redis GCRA buckets (plus the local bucket) |
+| Monthly bandwidth quotas | Redis counter per user and window (`{prefix}quota:{user}:{window}`), synced every second and on every admission |
+| User, API-key, approval and quota cache invalidation | Redis pub/sub event bus (`{prefix}events`) |
+| Config reload (`PUT /api/config`, `POST /api/config/reload`) | event bus `ConfigReloaded` |
+| `DELETE /api/connections/:id` | handled locally, or forwarded over the event bus to the replica relaying it (202 Accepted) |
+| Live-connections WebSocket ticket | stored in Redis, redeemable on any replica, single use |
+| Users, sessions, API keys, approvals, usage, audit | the shared SQLite file |
+
+What stays per replica (by design or as a known limit):
+
+- `[server] max_connections` caps each replica, not the cluster.
+- Reverse tunnels (`/api/tunnels`) are listeners inside the replica that
+  created them; list/close them on that replica (or run tunnels on a single
+  node).
+- `/metrics` is per replica: scrape every replica.
+- In-process caches have short TTLs (user 5 s, credential checks 60 s,
+  approvals 2 min). Changes are pushed over the event bus; if the bus is
+  disconnected when a change happens, other replicas see it only when the TTL
+  expires.
+- The usage retention purge runs on every replica; it is idempotent.
+- SQLite still has one write lock for the whole file. Each replica sends its
+  writes through one dedicated writer connection, so N replicas means up to N
+  writers queueing on `busy_timeout_ms`. Watch
+  `proxy_db_write_acquire_seconds` and `proxy_db_contention_errors_total`.
+
+Quota accuracy with several replicas: each replica learns the others' traffic
+at most about one second late, so a user can exceed the quota by roughly what
+all replicas relay for them in that second (plus about one 64 KiB buffer per
+connection admitted at the same instant). See the `quota_tracker` module docs.
 
 ## Redis outage
 
-Optional. On failure the proxy falls back to the in-memory state backend and
-the distributed rate limiter **fails closed** (denies). The event-bus subscriber
-reconnects automatically with backoff — cross-instance cache invalidation
-resumes when Redis returns. Single-instance deployments are unaffected.
+With `backend = "memory"` Redis is optional: the cache layer and event bus are
+used when reachable and skipped otherwise; a single instance is unaffected.
+
+With `backend = "redis"`, Redis is **required at startup**. Once running, an
+outage degrades each component on its own, and none of them fails closed:
+
+- **Rate limits** fall back to the per-instance limit (log line at most every
+  30 s).
+- **Quotas** are enforced from each replica's last known global count plus the
+  bytes it relayed since; the unpushed bytes are kept and pushed when Redis
+  returns (`proxy_quota_sync_errors_total` rises meanwhile). During the outage
+  each replica can admit up to the remaining quota on its own.
+- **Connection tracking** errors are counted in `proxy_state_backend_errors_total`.
+- **Cache layer** reads fall through to SQLite.
+- **Event bus** subscribers reconnect with backoff; invalidations published
+  during the outage are lost, so other replicas fall back to the cache TTLs.
 
 ## Backup & restore (SQLite)
 
@@ -161,6 +215,11 @@ version. These snapshots are not pruned automatically. See ADR-0007.
     usage writer is stalled and quota/billing is under-counting.
   - `proxy_auth_failures_total{reason=...}`, `proxy_ip_rate_limit_evictions_total`,
     `proxy_state_backend_errors_total`.
+  - `proxy_db_write_acquire_seconds` (wait for the SQLite writer connection)
+    and `proxy_db_contention_errors_total{kind=busy|pool_timeout}` — rising
+    values mean writes are queueing; see "Scaling".
+  - `proxy_quota_sync_errors_total` — with the Redis backend, non-zero growth
+    means quotas are being enforced per replica only (see "Redis outage").
 - `/health` and `/health/deep` (the latter pings DB/Redis).
 
 ## Graceful shutdown

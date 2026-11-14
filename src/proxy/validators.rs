@@ -323,13 +323,15 @@ async fn check_access_schedule(ctx: &ConnectionContext, state: &AppState) -> Ver
 
 // ─── Phase 4: Post-Setup (connection tracked, metrics active) ───────────────
 
-/// Check bandwidth quota against the live in-process tracker.
+/// Check bandwidth quota against the live tracker.
 ///
 /// The tracker is the single source of truth for quota state — it is
 /// seeded once from the database (`get_quota_stats`) and then mutated
 /// atomically by the relay loop, so admission decisions and in-flight
 /// enforcement always agree. There is no per-connection SUM() and no
-/// 30s staleness window.
+/// 30s staleness window. With the Redis backend the admission check first
+/// syncs with the shared counter, so usage on other replicas counts too
+/// (see `quota_tracker` for the bounds and the Redis-down behaviour).
 pub async fn validate_quota(ctx: &ConnectionContext, state: &AppState) -> Verdict {
     ctx.apply_admin_bypass(pipeline::RULE_QUOTA, check_quota(ctx, state).await)
 }
@@ -339,7 +341,11 @@ async fn check_quota(ctx: &ConnectionContext, state: &AppState) -> Verdict {
         Some(uid) => uid,
         None => return Verdict::Allow,
     };
-    match state.quota_trackers.get_or_seed(&state.db_pool, uid).await {
+    match state
+        .quota_trackers
+        .get_for_admission(&state.db_pool, uid)
+        .await
+    {
         Ok(tracker) => {
             if tracker.is_over() {
                 return Verdict::Deny(format!(

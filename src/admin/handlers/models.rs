@@ -106,6 +106,7 @@ impl From<sqlx::Error> for ApiError {
             tracing::debug!("Unique constraint violation: {}", e);
             return Self::conflict("Resource already exists");
         }
+        crate::db::connection::note_contention(&e);
         tracing::error!("Database error: {}", e);
         Self::internal("Database error")
     }
