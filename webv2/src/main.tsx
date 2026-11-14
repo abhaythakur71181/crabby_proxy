@@ -5,6 +5,7 @@ import { BrowserRouter } from "react-router";
 import { Toaster } from "sonner";
 import { App } from "./app";
 import { TooltipProvider } from "@/components/ui/misc";
+import { RootErrorBoundary } from "@/components/ui/error-boundary";
 import "./styles.css";
 
 const queryClient = new QueryClient({
@@ -26,9 +27,11 @@ createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <TooltipProvider>
-          <App />
-        </TooltipProvider>
+        <RootErrorBoundary>
+          <TooltipProvider>
+            <App />
+          </TooltipProvider>
+        </RootErrorBoundary>
         {/* The old UI called toast() everywhere but never mounted a Toaster —
             every piece of action feedback was invisible. Never again. */}
         <Toaster
