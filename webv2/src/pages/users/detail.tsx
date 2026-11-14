@@ -3,7 +3,7 @@
 // Edit (root_admin), deactivate/reactivate, quota, keys, usage, approvals,
 // groups (admin-only endpoint).
 import { ArrowLeft, KeyRound, Pencil, ShieldOff, ShieldCheck as ShieldOn } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Link, useParams } from "react-router";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -396,12 +396,15 @@ function ResetPasswordDialog({
   const [password, setPassword] = useState(() => generatePassword());
   const [done, setDone] = useState(false);
 
-  useEffect(() => {
+  // Fresh password and state each time the dialog opens.
+  const [wasOpen, setWasOpen] = useState(open);
+  if (wasOpen !== open) {
+    setWasOpen(open);
     if (open) {
       setPassword(generatePassword());
       setDone(false);
     }
-  }, [open]);
+  }
 
   const reset = useMutation({
     mutationFn: () => adminResetPassword(userId, { new_password: password }),

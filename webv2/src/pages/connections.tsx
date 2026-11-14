@@ -32,8 +32,11 @@ export function ConnectionsPage() {
   const [selected, setSelected] = useState<LiveConnection | null>(null);
   const [confirmKill, setConfirmKill] = useState<ConnectionInfo | null>(null);
 
-  // Track ids we've seen so only genuinely new rows animate in.
+  // Track ids we've seen so only genuinely new rows animate in. The ref is a
+  // render-time cache keyed on the `connections` identity; the worst case of a
+  // re-run is that a row skips its enter animation.
   const seenIds = useRef(new Set<string>());
+  /* eslint-disable react-hooks/refs -- intentional seen-ids cache, see above */
   const newIds = useMemo(() => {
     const fresh = new Set<string>();
     for (const c of connections) {
@@ -44,6 +47,7 @@ export function ConnectionsPage() {
     }
     return fresh;
   }, [connections]);
+  /* eslint-enable react-hooks/refs */
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();

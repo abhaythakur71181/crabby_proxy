@@ -91,6 +91,12 @@ export function useLiveConnections(enabled = true) {
 
   // Merge: REST is the base truth for byte counters; WS wins for membership
   // freshness (instant add/remove between polls).
+  //
+  // The memo deliberately reads the clock and updates the per-connection rate
+  // cache (ratesRef): rates are byte deltas between successive data updates,
+  // so they must be sampled exactly when new data arrives, and the memo only
+  // re-runs when its data deps change.
+  /* eslint-disable react-hooks/purity, react-hooks/refs -- intentional sampling cache, see above */
   const connections = useMemo<LiveConnection[]>(() => {
     const rest = poll.data ?? [];
     const restById = new Map(rest.map((c) => [c.id, c]));
@@ -132,6 +138,7 @@ export function useLiveConnections(enabled = true) {
     for (const id of rates.keys()) if (!liveIds.has(id)) rates.delete(id);
     return out.sort((a, b) => b.created_at - a.created_at);
   }, [poll.data, poll.dataUpdatedAt, wsRows, lastEventAt]);
+  /* eslint-enable react-hooks/purity, react-hooks/refs */
 
   return {
     connections,

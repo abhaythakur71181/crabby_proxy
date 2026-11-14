@@ -2,7 +2,7 @@
 // page outlet with route transitions. Route guards live in app.tsx.
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { AnimatePresence, motion } from "motion/react";
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useState } from "react";
 import { Outlet, useLocation } from "react-router";
 import { cn } from "@/lib/utils";
 import { useNavChords } from "@/hooks/use-hotkeys";
@@ -23,8 +23,13 @@ export function AppShell() {
   const [mobileOpen, setMobileOpen] = useState(false);
   useNavChords(true);
 
-  // Close the mobile sheet on navigation.
-  useEffect(() => setMobileOpen(false), [location.pathname]);
+  // Close the mobile sheet on navigation (state adjusted during render rather
+  // than in an effect, so the stale sheet never paints).
+  const [navPath, setNavPath] = useState(location.pathname);
+  if (navPath !== location.pathname) {
+    setNavPath(location.pathname);
+    setMobileOpen(false);
+  }
 
   const toggleCollapse = () => {
     setCollapsed((c) => {

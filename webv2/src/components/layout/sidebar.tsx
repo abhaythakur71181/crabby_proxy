@@ -23,7 +23,7 @@ import { useIsAdmin, useSession } from "@/hooks/queries";
 import { RoleBadge } from "@/components/ui/badge";
 import { Tooltip } from "@/components/ui/misc";
 
-export const NAV_SECTIONS = [
+const NAV_SECTIONS = [
   {
     label: "Overview",
     items: [
