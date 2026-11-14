@@ -143,7 +143,7 @@ pub struct AppState {
     // permit per multiplexed stream). Without per-stream accounting an h2
     // connection's single accept-permit covers up to 256 streams, defeating the
     // global limit by ~256x (#41).
-    pub global_conn_semaphore: Arc<tokio::sync::Semaphore>,
+    pub global_conn_limit: crate::conn_limiter::ConnLimiter,
 }
 
 impl AppState {
@@ -280,9 +280,7 @@ impl AppState {
         };
 
         Ok(Self {
-            global_conn_semaphore: Arc::new(tokio::sync::Semaphore::new(
-                config.server.max_connections,
-            )),
+            global_conn_limit: crate::conn_limiter::ConnLimiter::new(config.server.max_connections),
             config: Arc::new(ArcSwap::from_pointee(config.clone())),
             state,
             db_pool: db_pool.clone(),
@@ -416,7 +414,10 @@ impl AppState {
         }
 
         drop(current);
+        let max_connections = new_config.server.max_connections;
         self.config.store(Arc::new(new_config));
+        // The global cap is a live semaphore, not a config read; resize it (#51).
+        self.global_conn_limit.resize(max_connections);
         tracing::info!("Configuration reloaded from {}", path);
         Ok(())
     }

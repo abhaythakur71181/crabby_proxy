@@ -33,7 +33,7 @@ pub async fn run_proxy_server(state: Arc<AppState>, addr: SocketAddr) {
     let mut shutdown_rx = state.shutdown_tx.subscribe();
     // Shared with the HTTP/2 handler so multiplexed h2 streams are counted
     // against the same global cap (#41), not just the per-TCP-accept permit.
-    let semaphore = state.global_conn_semaphore.clone();
+    let semaphore = state.global_conn_limit.semaphore();
     tracing::info!(
         "Proxy server listening on {} (max {} connections)",
         addr,

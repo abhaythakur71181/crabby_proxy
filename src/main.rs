@@ -5,6 +5,7 @@ mod bandwidth;
 mod cache;
 mod config;
 mod config_env;
+mod conn_limiter;
 #[allow(dead_code)]
 mod connection;
 #[allow(dead_code)]

@@ -88,7 +88,7 @@ pub async fn handle_h2_connection(
         // permit per stream, held for the stream's lifetime. Otherwise a single
         // h2 connection's accept-permit would cover up to 256 concurrent
         // upstreams, defeating max_connections by ~256x.
-        let permit = match state_arc.global_conn_semaphore.clone().try_acquire_owned() {
+        let permit = match state_arc.global_conn_limit.semaphore().try_acquire_owned() {
             Ok(p) => p,
             Err(_) => {
                 tracing::warn!(
