@@ -197,6 +197,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Background: evict idle per-user quota trackers so the registry does not
+    // grow with every user ever seen (#30).
+    {
+        let trackers = state.quota_trackers.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(crate::quota_tracker::EVICT_SWEEP_INTERVAL).await;
+                let n = trackers.evict_idle(crate::quota_tracker::IDLE_EVICT_SECS);
+                if n > 0 {
+                    tracing::debug!("quota tracker sweep: evicted {} idle entries", n);
+                }
+            }
+        });
+    }
+
     // Background: purge usage rows past the retention window (bounds PII growth).
     // Runs once shortly after boot, then on a fixed interval.
     {
