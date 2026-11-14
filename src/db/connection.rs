@@ -72,10 +72,84 @@ pub async fn create_pool_with(
     Ok(pool)
 }
 
+/// Apply pending migrations. Migrations are forward-only (see
+/// docs/adr/0007-forward-only-migrations.md), so before applying any pending
+/// migration to an existing on-disk database a consistent snapshot is taken
+/// with `VACUUM INTO`; that snapshot is the rollback path.
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    sqlx::migrate!("./migrations").run(pool).await?;
+    let migrator = sqlx::migrate!("./migrations");
+    snapshot_before_migrate(pool, &migrator).await?;
+    migrator.run(pool).await?;
 
     Ok(())
+}
+
+/// Versions of migrations already applied successfully, or `None` for a fresh
+/// database that has never been migrated.
+async fn applied_versions(pool: &SqlitePool) -> Result<Option<Vec<i64>>, sqlx::Error> {
+    let has_table: Option<(String,)> = sqlx::query_as(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_optional(pool)
+    .await?;
+    if has_table.is_none() {
+        return Ok(None);
+    }
+    let rows: Vec<(i64,)> =
+        sqlx::query_as("SELECT version FROM _sqlx_migrations WHERE success = 1")
+            .fetch_all(pool)
+            .await?;
+    Ok(Some(rows.into_iter().map(|r| r.0).collect()))
+}
+
+/// If `migrator` has migrations not yet applied to an existing file-backed
+/// database, write a snapshot next to it and return its path. Fresh and
+/// in-memory databases have nothing to lose and are skipped. A snapshot
+/// failure aborts the migration rather than running it without a way back.
+async fn snapshot_before_migrate(
+    pool: &SqlitePool,
+    migrator: &sqlx::migrate::Migrator,
+) -> Result<Option<std::path::PathBuf>, sqlx::Error> {
+    let db_path = pool.connect_options().get_filename().to_path_buf();
+    if db_path.as_os_str().is_empty() || db_path.as_os_str() == ":memory:" || !db_path.is_file() {
+        return Ok(None);
+    }
+    let Some(applied) = applied_versions(pool).await? else {
+        return Ok(None);
+    };
+    let Some(target) = migrator
+        .iter()
+        .filter(|m| m.migration_type.is_up_migration() && !applied.contains(&m.version))
+        .map(|m| m.version)
+        .max()
+    else {
+        return Ok(None);
+    };
+    let from = applied.iter().copied().max().unwrap_or(0);
+    let mut name = db_path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(
+        ".pre-migrate-{from:03}-to-{target:03}-{}.bak",
+        chrono::Utc::now().timestamp()
+    ));
+    let snapshot = db_path.with_file_name(name);
+    sqlx::query("VACUUM INTO ?")
+        .bind(snapshot.to_string_lossy().into_owned())
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Pre-migration snapshot to {} failed; refusing to migrate: {}",
+                snapshot.display(),
+                e
+            );
+            e
+        })?;
+    tracing::warn!(
+        "Applying migrations {from:03} -> {target:03}; pre-migration snapshot written to {} \
+         (restore it to roll back; see docs/adr/0007-forward-only-migrations.md)",
+        snapshot.display()
+    );
+    Ok(Some(snapshot))
 }
 
 #[cfg(test)]
@@ -96,6 +170,64 @@ mod migration_tests {
                 .collect(),
         );
         m.run(pool).await.unwrap();
+    }
+
+    /// #37: upgrading an existing file database snapshots it first; a fresh
+    /// database or one with nothing pending does not.
+    #[tokio::test]
+    async fn snapshot_taken_only_when_upgrading_existing_db() {
+        let dir = std::env::temp_dir().join(format!("crabby-snap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("proxy.db");
+        let url = format!("sqlite:{}", db.display());
+        let snapshots = || {
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.contains(".pre-migrate-"))
+                .collect::<Vec<_>>()
+        };
+
+        // Fresh database: nothing to protect.
+        {
+            let pool = create_pool(&url, 1).await.unwrap();
+            migrate_up_to(&pool, 15).await;
+            sqlx::query("INSERT INTO users (id, username, password_hash, role, created_at, updated_at) VALUES (1,'keep','h','user',0,0)")
+                .execute(&pool)
+                .await
+                .unwrap();
+            assert!(snapshots().is_empty());
+
+            // Pending migrations on an existing DB: snapshot first.
+            run_migrations(&pool).await.unwrap();
+            let snaps = snapshots();
+            assert_eq!(snaps.len(), 1, "{snaps:?}");
+            assert!(snaps[0].starts_with("proxy.db.pre-migrate-015-to-"));
+
+            // Nothing pending: no new snapshot.
+            run_migrations(&pool).await.unwrap();
+            assert_eq!(snapshots().len(), 1);
+            pool.close().await;
+        }
+
+        // The snapshot is a usable pre-migration database.
+        let snap_url = format!("sqlite:{}", dir.join(&snapshots()[0]).display());
+        let snap = create_pool(&snap_url, 1).await.unwrap();
+        let max: i64 = sqlx::query("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(&snap)
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(max, 15);
+        let name: String = sqlx::query("SELECT username FROM users WHERE id = 1")
+            .fetch_one(&snap)
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(name, "keep");
+        snap.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// #36: migration 021 rebuilds the user-owned tables with ON DELETE

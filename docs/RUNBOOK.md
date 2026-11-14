@@ -52,8 +52,11 @@ resumes when Redis returns. Single-instance deployments are unaffected.
 
 State lives in the `crabby-data` volume (`proxy.db`). **No automated backup is
 configured** — add one (e.g. `sqlite3 proxy.db ".backup"` on a schedule, or
-litestream). Migrations run automatically at boot with no down-migration path;
-snapshot the DB before deploying a new version.
+litestream). Migrations run automatically at boot and are forward-only. Before
+applying pending migrations to an existing database the proxy writes a snapshot
+(`proxy.db.pre-migrate-<from>-to-<to>-<unix>.bak`) next to it; to roll back,
+stop the proxy, restore that file (removing `-wal`/`-shm`), and run the previous
+version. Snapshots are not pruned automatically. See ADR-0007.
 
 ## Monitoring
 
