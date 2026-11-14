@@ -214,18 +214,43 @@ pub async fn validate_target_domain(ctx: &ConnectionContext, state: &AppState) -
     if ctx.is_admin {
         return Verdict::Allow;
     }
-    let uid = match ctx.effective_uid() {
-        Some(uid) => uid,
-        None => return Verdict::Allow,
-    };
     let host = match &ctx.target_host {
         Some(h) => h,
         None => return Verdict::Allow,
     };
-    // Use cached user lookup (Redis -> in-memory -> DB) instead of direct DB query
+    let uid = match ctx.effective_uid() {
+        Some(uid) => uid,
+        None => {
+            // No DB user (auth disabled, or the config-file credential): the
+            // global allow/block lists still apply.
+            if !crate::target_filter::is_target_allowed(
+                host,
+                &ctx.config.global_allowed_targets,
+                &ctx.config.global_blocked_targets,
+                None,
+                None,
+            ) {
+                return Verdict::Deny(format!("Target {} blocked by global domain filter", host));
+            }
+            return Verdict::Allow;
+        }
+    };
+    // Use cached user lookup (Redis -> in-memory -> DB) instead of direct DB query.
+    // An authenticated user whose record cannot be loaded must not skip
+    // their per-user target lists: fail closed (#57).
     let cu = match state.cached_user_by_id(uid).await {
         Some(cu) => cu,
-        None => return Verdict::Allow, // Fail-open if user fetch fails
+        None => {
+            tracing::error!(
+                "Target filter: could not load user {} - denying {} (fail-closed)",
+                uid,
+                host
+            );
+            return Verdict::Deny(format!(
+                "Target filter unavailable for user {} (fail-closed)",
+                uid
+            ));
+        }
     };
     if !crate::target_filter::is_target_allowed(
         host,
