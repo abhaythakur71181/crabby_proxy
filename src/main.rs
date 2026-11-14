@@ -5,9 +5,9 @@ mod bandwidth;
 mod cache;
 mod config;
 mod config_env;
+mod conn_limiter;
 #[allow(dead_code)]
 mod connection;
-mod connection_pool;
 #[allow(dead_code)]
 mod constants;
 mod db;
@@ -182,15 +182,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Background: Connection pool cleanup (every 30s, if pooling enabled)
-    if let Some(ref pool) = state.connection_pool {
-        let pool_ref = pool.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(constants::POOL_CLEANUP_INTERVAL).await;
-                pool_ref.cleanup_expired();
-            }
-        });
+    if state.config.load().advanced.connection_pooling {
+        tracing::warn!(
+            "advanced.connection_pooling is set but ignored: upstream pooling was \
+             removed (raw CONNECT/SOCKS tunnels cannot safely reuse sockets)"
+        );
     }
 
     // Background: purge usage rows past the retention window (bounds PII growth).

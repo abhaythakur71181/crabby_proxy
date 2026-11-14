@@ -42,6 +42,13 @@ approval_timeout = 300
 reverse_tunnels = false
 tunnel_port_start = 10000
 tunnel_port_end = 10999
+# Interface tunnel listeners bind to (tunnels relay raw TCP without auth).
+tunnel_bind_addr = "127.0.0.1"
+# Internal targets (CIDRs/IPs) tunnels may reach; loopback/private/link-local
+# targets are refused unless listed. Non-empty = strict allow-list.
+tunnel_allowed_targets = []
+# Max concurrent connections per tunnel (0 = unlimited).
+tunnel_max_connections = 100
 # Optional event webhook. Must be https; internal / non-routable targets are
 # refused (startup error) unless webhook_allow_private_targets = true. Client
 # IPs and destinations are stripped from payloads unless webhook_include_pii.
@@ -123,6 +130,7 @@ cors_origins = ["http://localhost:3000"]
 
 [advanced]
 buffer_size = 8192
+# connection_pooling / pool_max_idle_per_host are deprecated and ignored.
 connection_pooling = false
 pool_max_idle_per_host = 10
 http2_enabled = false

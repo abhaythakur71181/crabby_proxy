@@ -118,7 +118,9 @@ pub async fn update_config(
     let mut mem = (*state.config.load_full()).clone();
     apply(&mut mem);
     let resp = config_response(&mem);
+    let max_connections = mem.server.max_connections;
     state.config.store(Arc::new(mem));
+    state.global_conn_limit.resize(max_connections);
 
     tracing::info!(target: "audit", user_id = current_user_id, "configuration updated");
     Ok(Json(resp))

@@ -572,6 +572,7 @@ dependencies = [
  "h2",
  "hmac",
  "http",
+ "http-body",
  "ipnet",
  "jsonwebtoken",
  "lazy_static",

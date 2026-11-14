@@ -25,9 +25,6 @@ pub const DNS_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Graceful shutdown drain period.
 pub const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Connection pool cleanup interval.
-pub const POOL_CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
-
 /// DNS cache cleanup interval.
 pub const DNS_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 

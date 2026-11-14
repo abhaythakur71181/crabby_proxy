@@ -33,7 +33,7 @@ pub async fn run_proxy_server(state: Arc<AppState>, addr: SocketAddr) {
     let mut shutdown_rx = state.shutdown_tx.subscribe();
     // Shared with the HTTP/2 handler so multiplexed h2 streams are counted
     // against the same global cap (#41), not just the per-TCP-accept permit.
-    let semaphore = state.global_conn_semaphore.clone();
+    let semaphore = state.global_conn_limit.semaphore();
     tracing::info!(
         "Proxy server listening on {} (max {} connections)",
         addr,
@@ -396,6 +396,8 @@ async fn handle_client(
         crate::metrics::STATE_BACKEND_ERRORS
             .with_label_values(&["set_connection"])
             .inc();
+    } else {
+        ctx.conn_tracked = true;
     }
     crate::metrics::CONNECTION_SETUP_DURATION
         .with_label_values(&[proto_label])
@@ -571,6 +573,39 @@ async fn handle_client(
     }
 }
 
+/// Resolve the per-user bandwidth throttler for a relay. Shared by the TCP
+/// relay and the HTTP/2 CONNECT bridge so both enforce the same limit.
+pub(crate) async fn resolve_user_throttler(
+    state: &AppState,
+    user_id: Option<i64>,
+    quota_tracker: Option<&Arc<crate::quota_tracker::UserQuotaTracker>>,
+) -> Option<crate::bandwidth::BandwidthThrottler> {
+    match (user_id, quota_tracker) {
+        (Some(uid), Some(tracker)) => {
+            // Fast path: throttler already cached on the tracker.
+            if let Some(t) = tracker.throttler_cached() {
+                t
+            } else {
+                // Cold path: resolve once and stash on the tracker. Subsequent
+                // connections in the same quota window hit the cached arm above.
+                let resolved = if let Some(user) = state.cached_user_by_id(uid).await {
+                    if user.bandwidth_rate_bps > 0 {
+                        state
+                            .bandwidth_throttlers
+                            .get_or_create(uid, user.bandwidth_rate_bps as u64)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                tracker.throttler_or_init(|| resolved.clone())
+            }
+        }
+        _ => None,
+    }
+}
+
 async fn async_handle_client_with_target(
     client_stream: &mut ClientStream,
     client_addr: SocketAddr,
@@ -641,58 +676,27 @@ async fn async_handle_client_with_target(
         }
     }
 
-    // Try the connection pool first so pool hits aren't counted in the
-    // "new connect" histogram (R2-20). On a fresh connect failure we also
-    // drop any other pooled idle sockets for this addr — the host is most
-    // likely down (R2-15).
-    let mut from_pool = false;
-    let target_stream = if let Some(ref pool) = state.connection_pool {
-        if let Some(s) = pool.try_get_pub(&target_addr).await {
-            from_pool = true;
-            s
-        } else {
-            pool.record_miss();
-            match timeout(Duration::from_secs(10), TcpStream::connect(resolved_addr)).await {
-                Ok(Ok(s)) => {
-                    let _ = s.set_nodelay(true);
-                    s
-                }
-                Ok(Err(e)) => {
-                    state.dns_cache.invalidate(&target.host, target.port);
-                    pool.invalidate_addr(&target_addr);
-                    return Err((e, ErrorType::Connection));
-                }
-                Err(_) => {
-                    state.dns_cache.invalidate(&target.host, target.port);
-                    pool.invalidate_addr(&target_addr);
-                    return Err((
-                        io::Error::new(io::ErrorKind::TimedOut, "Connection timeout"),
-                        ErrorType::Timeout,
-                    ));
-                }
-            }
-        }
-    } else {
-        // No connection pooling — direct connect
-        timeout(Duration::from_secs(10), TcpStream::connect(resolved_addr))
-            .await
-            .map_err(|_| {
-                state.dns_cache.invalidate(&target.host, target.port);
-                (
-                    io::Error::new(io::ErrorKind::TimedOut, "Connection timeout"),
-                    ErrorType::Timeout,
-                )
-            })?
-            .map_err(|e| {
-                state.dns_cache.invalidate(&target.host, target.port);
-                (e, ErrorType::Connection)
-            })?
-    };
-    if !from_pool {
-        crate::metrics::UPSTREAM_CONNECT_DURATION
-            .with_label_values(&[protocol.as_str()])
-            .observe(upstream_start.elapsed().as_secs_f64());
-    }
+    // Always a fresh upstream socket: a raw tunnel must never reuse a socket
+    // that carried another session's bytes (#45).
+    let target_stream = timeout(
+        crate::constants::UPSTREAM_CONNECT_TIMEOUT,
+        TcpStream::connect(resolved_addr),
+    )
+    .await
+    .map_err(|_| {
+        state.dns_cache.invalidate(&target.host, target.port);
+        (
+            io::Error::new(io::ErrorKind::TimedOut, "Connection timeout"),
+            ErrorType::Timeout,
+        )
+    })?
+    .map_err(|e| {
+        state.dns_cache.invalidate(&target.host, target.port);
+        (e, ErrorType::Connection)
+    })?;
+    crate::metrics::UPSTREAM_CONNECT_DURATION
+        .with_label_values(&[protocol.as_str()])
+        .observe(upstream_start.elapsed().as_secs_f64());
     let _ = target_stream.set_nodelay(true);
     utils::enable_tcp_keepalive(&target_stream);
     // debug, not info: per-connection client+destination belongs in the
@@ -748,30 +752,7 @@ async fn async_handle_client_with_target(
     } else {
         None
     };
-    let throttler = match (user_id, quota_tracker.as_ref()) {
-        (Some(uid), Some(tracker)) => {
-            // Fast path: throttler already cached on the tracker.
-            if let Some(t) = tracker.throttler_cached() {
-                t
-            } else {
-                // Cold path: resolve once and stash on the tracker. Subsequent
-                // connections in the same quota window hit the cached arm above.
-                let resolved = if let Some(user) = state.cached_user_by_id(uid).await {
-                    if user.bandwidth_rate_bps > 0 {
-                        state
-                            .bandwidth_throttlers
-                            .get_or_create(uid, user.bandwidth_rate_bps as u64)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                tracker.throttler_or_init(|| resolved.clone())
-            }
-        }
-        _ => None,
-    };
+    let throttler = resolve_user_throttler(state, user_id, quota_tracker.as_ref()).await;
 
     // Idle timeout reaps half-open tunnels whose peer vanished without FIN/RST.
     // 0 in config disables it.

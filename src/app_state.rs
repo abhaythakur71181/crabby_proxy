@@ -66,9 +66,6 @@ pub struct AppState {
     // DNS resolution cache (reduces upstream connect latency)
     pub dns_cache: Arc<crate::dns_cache::DnsCache>,
 
-    // Upstream connection pool (reuses idle TCP connections)
-    pub connection_pool: Option<Arc<crate::connection_pool::ConnectionPool>>,
-
     // Auth result cache: HMAC(creds) -> (user_id, cached_at).
     // Avoids DB + argon2 on every connection from the same user (60s TTL).
     // The key is an HMAC-SHA256 of (username, password) under a process-random
@@ -146,7 +143,7 @@ pub struct AppState {
     // permit per multiplexed stream). Without per-stream accounting an h2
     // connection's single accept-permit covers up to 256 streams, defeating the
     // global limit by ~256x (#41).
-    pub global_conn_semaphore: Arc<tokio::sync::Semaphore>,
+    pub global_conn_limit: crate::conn_limiter::ConnLimiter,
 }
 
 impl AppState {
@@ -287,9 +284,7 @@ impl AppState {
         };
 
         Ok(Self {
-            global_conn_semaphore: Arc::new(tokio::sync::Semaphore::new(
-                config.server.max_connections,
-            )),
+            global_conn_limit: crate::conn_limiter::ConnLimiter::new(config.server.max_connections),
             config: Arc::new(ArcSwap::from_pointee(config.clone())),
             state,
             db_pool: db_pool.clone(),
@@ -311,14 +306,6 @@ impl AppState {
             dns_cache: Arc::new(crate::dns_cache::DnsCache::new(
                 config.advanced.dns_cache_ttl,
             )),
-            connection_pool: if config.advanced.connection_pooling {
-                Some(Arc::new(crate::connection_pool::ConnectionPool::new(
-                    config.advanced.pool_max_idle_per_host,
-                    60, // 60s idle timeout
-                )))
-            } else {
-                None
-            },
             shutdown_tx,
             usage_writer: crate::usage_writer::UsageWriter::spawn(db_pool.clone()),
             quota_cache: Arc::new(dashmap::DashMap::new()),
@@ -445,7 +432,10 @@ impl AppState {
         }
 
         drop(current);
+        let max_connections = new_config.server.max_connections;
         self.config.store(Arc::new(new_config));
+        // The global cap is a live semaphore, not a config read; resize it (#51).
+        self.global_conn_limit.resize(max_connections);
         tracing::info!("Configuration reloaded from {}", path);
         Ok(())
     }

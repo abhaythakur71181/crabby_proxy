@@ -99,6 +99,10 @@ pub struct ConnectionContext {
 
     // Set after target parsing
     pub target_host: Option<String>,
+
+    // True once this connection's record is in the state backend, so the
+    // per-user connection count already includes it.
+    pub conn_tracked: bool,
 }
 
 impl ConnectionContext {
@@ -112,6 +116,7 @@ impl ConnectionContext {
             protocol: None,
             is_admin: false,
             target_host: None,
+            conn_tracked: false,
         }
     }
 
@@ -189,6 +194,7 @@ mod tests {
             protocol: None,
             is_admin,
             target_host: Some("example.com".into()),
+            conn_tracked: false,
         }
     }
 
