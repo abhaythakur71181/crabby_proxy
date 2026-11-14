@@ -34,6 +34,17 @@ services:
       # Uncomment to use:
       # - ./config.toml:/app/config.toml:ro
 
+    # Resource ceilings so a connection flood or leak in the proxy cannot
+    # starve the host and every co-located service. Defaults suit a small VM;
+    # raise them via .env for high-traffic deployments (watch the container's
+    # memory against max_connections x buffer_size in config.toml). The pids
+    # ceiling leaves room for tokio's blocking pool (up to 512 threads, used
+    # for DNS lookups) plus SQLite worker threads.
+    mem_limit: ${PROXY_MEM_LIMIT:-1g}
+    memswap_limit: ${PROXY_MEM_LIMIT:-1g}
+    cpus: ${PROXY_CPUS:-2.0}
+    pids_limit: ${PROXY_PIDS_LIMIT:-4096}
+
     # File descriptor bump — proxy opens lots of sockets under load.
     ulimits:
       nofile:
@@ -83,6 +94,12 @@ services:
 
     ports:
       - "${WEBV2_PORT:-3001}:8080"
+
+    # Static files + a reverse proxy: needs very little.
+    mem_limit: ${WEBV2_MEM_LIMIT:-128m}
+    memswap_limit: ${WEBV2_MEM_LIMIT:-128m}
+    cpus: ${WEBV2_CPUS:-0.5}
+    pids_limit: ${WEBV2_PIDS_LIMIT:-512}
 
     security_opt:
       - no-new-privileges:true
