@@ -22,9 +22,33 @@ struct TestProxy {
     admin_addr: SocketAddr,
 }
 
+/// Per-test knobs layered on top of the base config.
+#[derive(Default)]
+struct ProxyOptions {
+    /// `filtering.global_blocked_targets` entries.
+    blocked_targets: Vec<String>,
+    /// PEM cert/key paths; enables outer-TLS (`-x https://proxy`) when set.
+    tls: Option<(std::path::PathBuf, std::path::PathBuf)>,
+}
+
 impl TestProxy {
     /// Start a proxy with auth disabled on random ports.
     fn start_no_auth() -> Self {
+        Self::start(ProxyOptions::default())
+    }
+
+    /// Start a proxy with auth disabled and the given options.
+    fn start(opts: ProxyOptions) -> Self {
+        let blocked_targets = opts
+            .blocked_targets
+            .iter()
+            .map(|t| format!("{:?}", t))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (tls_enabled, tls_cert_path, tls_key_path) = match &opts.tls {
+            Some((cert, key)) => (true, cert.display().to_string(), key.display().to_string()),
+            None => (false, String::new(), String::new()),
+        };
         let proxy_port = free_port();
         let admin_port = free_port();
         let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
@@ -39,9 +63,9 @@ proxy_bind = "127.0.0.1:{proxy_port}"
 admin_bind = "127.0.0.1:{admin_port}"
 max_connections = 100
 connection_timeout = 10
-tls_enabled = false
-tls_cert_path = ""
-tls_key_path = ""
+tls_enabled = {tls_enabled}
+tls_cert_path = {tls_cert_path:?}
+tls_key_path = {tls_key_path:?}
 
 [database]
 path = "sqlite::memory:"
@@ -92,7 +116,7 @@ allowed_countries = []
 ip_filter_mode = "blocklist"
 ip_filter_enabled = false
 global_allowed_targets = []
-global_blocked_targets = []
+global_blocked_targets = [{blocked_targets}]
 
 [logging]
 level = "warn"
@@ -306,4 +330,131 @@ fn test_invalid_protocol_closes_connection() {
         }
         Err(_) => {} // Connection reset — expected
     }
+}
+
+// ── Error / denial responses (#100) ──────────────────────────────────
+
+/// Read one HTTP response head (up to the blank line or EOF) as a string.
+fn read_response_head<R: Read>(stream: &mut R) -> String {
+    let mut out = Vec::new();
+    let mut byte = [0u8; 1];
+    while !out.ends_with(b"\r\n\r\n") && out.len() < 4096 {
+        match stream.read(&mut byte) {
+            Ok(1) => out.push(byte[0]),
+            _ => break,
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Assert a refusal head: given status, empty body, connection closed.
+fn assert_refusal(head: &str, status: &str) {
+    assert!(
+        head.starts_with(&format!("HTTP/1.1 {}", status)),
+        "expected {} status line, got: {:?}",
+        status,
+        head
+    );
+    assert!(head.contains("Content-Length: 0\r\n"), "head: {:?}", head);
+    assert!(head.contains("Connection: close\r\n"), "head: {:?}", head);
+}
+
+/// CONNECT request bytes for `host:port`.
+fn connect_request(authority: &str) -> Vec<u8> {
+    format!("CONNECT {0} HTTP/1.1\r\nHost: {0}\r\n\r\n", authority).into_bytes()
+}
+
+#[test]
+fn test_http_connect_to_blocked_target_gets_403() {
+    let proxy = TestProxy::start(ProxyOptions {
+        blocked_targets: vec!["blocked.example".into()],
+        ..Default::default()
+    });
+    let mut stream = TcpStream::connect_timeout(&proxy.proxy_addr, Duration::from_secs(5)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream
+        .write_all(&connect_request("blocked.example:443"))
+        .unwrap();
+    let head = read_response_head(&mut stream);
+    assert_refusal(&head, "403");
+    // The deny reason stays server-side.
+    assert!(!head.to_lowercase().contains("blocked"), "head: {:?}", head);
+}
+
+#[test]
+fn test_http_connect_upstream_failure_gets_502() {
+    let proxy = TestProxy::start_no_auth();
+    let mut stream = TcpStream::connect_timeout(&proxy.proxy_addr, Duration::from_secs(5)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    // Nothing listens on a just-released port; with the default SSRF egress
+    // guard loopback is refused outright. Either way: 502.
+    let authority = format!("127.0.0.1:{}", free_port());
+    stream.write_all(&connect_request(&authority)).unwrap();
+    assert_refusal(&read_response_head(&mut stream), "502");
+}
+
+/// Self-signed cert/key for "localhost", written to temp files.
+fn write_test_cert(tag: &str) -> (std::path::PathBuf, std::path::PathBuf, Vec<u8>) {
+    let ck = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+    let dir = std::env::temp_dir();
+    let cert_path = dir.join(format!("crabby_test_{}_{}.crt", tag, std::process::id()));
+    let key_path = dir.join(format!("crabby_test_{}_{}.pem", tag, std::process::id()));
+    std::fs::write(&cert_path, ck.cert.pem()).unwrap();
+    std::fs::write(&key_path, ck.signing_key.serialize_pem()).unwrap();
+    (cert_path, key_path, ck.cert.der().to_vec())
+}
+
+/// Open an outer-TLS (`-x https://proxy`) connection to the proxy.
+fn tls_connect(
+    addr: SocketAddr,
+    cert_der: Vec<u8>,
+) -> rustls::StreamOwned<rustls::ClientConnection, TcpStream> {
+    use std::sync::Arc;
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(rustls::pki_types::CertificateDer::from(cert_der))
+        .unwrap();
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+    let conn = rustls::ClientConnection::new(Arc::new(config), name).unwrap();
+    let sock = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).unwrap();
+    sock.set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    rustls::StreamOwned::new(conn, sock)
+}
+
+#[test]
+fn test_https_proxy_denial_and_upstream_failure_get_status() {
+    let (cert, key, der) = write_test_cert("https_deny");
+    let proxy = TestProxy::start(ProxyOptions {
+        blocked_targets: vec!["blocked.example".into()],
+        tls: Some((cert.clone(), key.clone())),
+    });
+
+    // Policy denial over outer TLS: 403, not a silent close.
+    let mut tls = tls_connect(proxy.proxy_addr, der.clone());
+    tls.write_all(&connect_request("blocked.example:443"))
+        .unwrap();
+    tls.flush().unwrap();
+    assert_refusal(&read_response_head(&mut tls), "403");
+
+    // Upstream failure over outer TLS: 502 (previously dropped silently).
+    let mut tls = tls_connect(proxy.proxy_addr, der);
+    let authority = format!("127.0.0.1:{}", free_port());
+    tls.write_all(&connect_request(&authority)).unwrap();
+    tls.flush().unwrap();
+    assert_refusal(&read_response_head(&mut tls), "502");
+
+    let _ = std::fs::remove_file(cert);
+    let _ = std::fs::remove_file(key);
 }
