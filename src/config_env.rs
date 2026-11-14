@@ -1,6 +1,35 @@
 use crate::auth::jwt::MIN_JWT_SECRET_LEN;
 use crate::config::Config;
 
+/// JWT secrets that ship in this repository's sample configs and docs. They
+/// are long enough to pass the length check, so without this list a config
+/// copied from the examples (the Dockerfile copies config.example.toml) would
+/// sign admin tokens with a publicly known key.
+const KNOWN_PLACEHOLDER_JWT_SECRETS: &[&str] = &[
+    "change_me_to_a_secure_random_string",
+    "REPLACE_ME_WITH_A_32_BYTE_RANDOM_SECRET",
+];
+
+/// True for an empty secret, a known shipped placeholder, or anything that
+/// is obviously a placeholder (starts with "replace_me" / "change_me" /
+/// "changeme", case-insensitively).
+pub fn is_placeholder_jwt_secret(secret: &str) -> bool {
+    let s = secret.trim();
+    if s.is_empty() || KNOWN_PLACEHOLDER_JWT_SECRETS.contains(&s) {
+        return true;
+    }
+    let lower = s.to_ascii_lowercase();
+    [
+        "replace_me",
+        "replace-me",
+        "change_me",
+        "change-me",
+        "changeme",
+    ]
+    .iter()
+    .any(|p| lower.starts_with(p))
+}
+
 /// Extension trait for Config to apply environment variable overrides
 pub trait ConfigEnvExt {
     fn apply_env_overrides(&mut self);
@@ -17,11 +46,16 @@ impl ConfigEnvExt for Config {
 
         // JWT Secret - prioritize env var
         if let Ok(env_secret) = env::var("CRABBY_JWT_SECRET") {
+            // An explicitly supplied placeholder is a deployment mistake, not
+            // a request for an ephemeral key: refuse rather than guess.
+            if is_placeholder_jwt_secret(&env_secret) {
+                panic!(
+                    "CRABBY_JWT_SECRET is a published placeholder value. Refusing to start with a publicly known signing key. Set it to a strong random value (e.g. `openssl rand -hex 32`)."
+                );
+            }
             tracing::info!("Using JWT secret from CRABBY_JWT_SECRET environment variable");
             self.authentication.jwt_secret = env_secret;
-        } else if self.authentication.jwt_secret == "change_me_to_a_secure_random_string"
-            || self.authentication.jwt_secret.is_empty()
-        {
+        } else if is_placeholder_jwt_secret(&self.authentication.jwt_secret) {
             // INFO: Auto-generate a random secret instead of running with default
             use rand::Rng;
             let secret: String = rand::thread_rng()
@@ -31,7 +65,7 @@ impl ConfigEnvExt for Config {
                 .collect();
             self.authentication.jwt_secret = secret;
             tracing::warn!(
-                "⚠️  JWT secret was default/empty — auto-generated a random one. Set CRABBY_JWT_SECRET for persistent sessions across restarts."
+                "⚠️  JWT secret was empty or a shipped placeholder — auto-generated a random one. Set CRABBY_JWT_SECRET for persistent sessions across restarts."
             );
         }
 
@@ -223,5 +257,80 @@ mod tests {
         std::env::remove_var("CRABBY_ALLOW_DEFAULT_PASSWORDS");
         let mut config = Config::default(); // admin_password = default
         config.apply_env_overrides(); // should panic — guessable admin credential
+    }
+
+    #[test]
+    fn test_placeholder_jwt_secret_detection() {
+        for s in [
+            "",
+            "   ",
+            "change_me_to_a_secure_random_string",
+            "REPLACE_ME_WITH_A_32_BYTE_RANDOM_SECRET",
+            "replace_me_with_something_at_least_32_bytes",
+            "CHANGEME-0123456789-0123456789-0123456789",
+        ] {
+            assert!(
+                is_placeholder_jwt_secret(s),
+                "{s:?} should be a placeholder"
+            );
+        }
+        assert!(!is_placeholder_jwt_secret(strong_secret()));
+        assert!(!is_placeholder_jwt_secret(
+            "9f2c1e7b4a6d8e0f3b5a7c9d1e3f5a7b9c1d3e5f7a9b1c3d5e7f9a1b3c5d7e9f"
+        ));
+    }
+
+    #[test]
+    fn test_shipped_example_config_secret_is_a_placeholder() {
+        // Whatever config.example.toml ships (a placeholder, or empty) must
+        // never be accepted as a real signing key.
+        let raw = include_str!("../config.example.toml");
+        let v: toml::Value = toml::from_str(raw).unwrap();
+        let secret = v["authentication"]["jwt_secret"].as_str().unwrap_or("");
+        assert!(
+            is_placeholder_jwt_secret(secret),
+            "example secret {secret:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_placeholder_jwt_secret_in_file_is_replaced() {
+        std::env::remove_var("CRABBY_JWT_SECRET");
+        std::env::set_var("CRABBY_ALLOW_DEFAULT_PASSWORDS", "1");
+        let mut config = Config::default();
+        config.authentication.jwt_secret = "REPLACE_ME_WITH_A_32_BYTE_RANDOM_SECRET".to_string();
+        config.apply_env_overrides();
+        std::env::remove_var("CRABBY_ALLOW_DEFAULT_PASSWORDS");
+        assert_ne!(
+            config.authentication.jwt_secret,
+            "REPLACE_ME_WITH_A_32_BYTE_RANDOM_SECRET"
+        );
+        assert_eq!(config.authentication.jwt_secret.len(), 64);
+        assert!(!is_placeholder_jwt_secret(
+            &config.authentication.jwt_secret
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn test_placeholder_jwt_secret_from_env_is_refused() {
+        std::env::set_var(
+            "CRABBY_JWT_SECRET",
+            "REPLACE_ME_WITH_A_32_BYTE_RANDOM_SECRET",
+        );
+        // catch_unwind so the env var is always cleaned up for other tests.
+        let result = std::panic::catch_unwind(|| {
+            let mut config = Config::default();
+            config.apply_env_overrides();
+        });
+        std::env::remove_var("CRABBY_JWT_SECRET");
+        let err = result.expect_err("placeholder from env must refuse to boot");
+        let msg = err
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default();
+        assert!(msg.contains("placeholder"), "unexpected panic: {msg}");
     }
 }
