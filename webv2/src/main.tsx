@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter } from "react-router";
+import { MotionConfig } from "motion/react";
 import { Toaster } from "sonner";
 import { App } from "./app";
 import { TooltipProvider } from "@/components/ui/misc";
@@ -27,11 +28,17 @@ createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <RootErrorBoundary>
-          <TooltipProvider>
-            <App />
-          </TooltipProvider>
-        </RootErrorBoundary>
+        {/* reducedMotion="user": when the OS asks for reduced motion, every
+            motion component drops transform/layout animation (e.g. the
+            sidebar's sliding active pill, the mobile nav sheet). CSS
+            animations are handled by the media query in styles.css. */}
+        <MotionConfig reducedMotion="user">
+          <RootErrorBoundary>
+            <TooltipProvider>
+              <App />
+            </TooltipProvider>
+          </RootErrorBoundary>
+        </MotionConfig>
         {/* The old UI called toast() everywhere but never mounted a Toaster —
             every piece of action feedback was invisible. Never again. */}
         <Toaster
