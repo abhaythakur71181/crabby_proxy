@@ -87,8 +87,17 @@ level = "info"
 format = "pretty"
 file_enabled = false
 file_path = "proxy.log"
+# Per-connection access log (target "access_log"): client IP, destination
+# host:port, user id, bytes, duration. This is effectively per-user browsing
+# history -- set access_log_enabled = false, or reduce the client IP with
+# access_log_client_ip = "truncated" (IPv4 /24, IPv6 /48) or "omit", where
+# privacy rules require it. Events go to the process log output; route or drop
+# them with RUST_LOG (e.g. "info,access_log=off") or your log collector, and
+# apply a retention period there. Security decisions are logged separately on
+# the "audit" target. access_log_path is reserved (not yet used).
 access_log_enabled = true
 access_log_path = "access.log"
+# access_log_client_ip = "full"
 
 [metrics]
 enabled = true

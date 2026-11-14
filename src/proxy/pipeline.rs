@@ -57,6 +57,8 @@ pub struct ConfigSnapshot {
     pub global_blocked_targets: Vec<String>,
     pub default_access_schedule: Option<String>,
     pub admin_bypass_rules: Vec<String>,
+    pub access_log_enabled: bool,
+    pub access_log_client_ip: crate::config::AccessLogIpMode,
 }
 
 impl ConfigSnapshot {
@@ -76,6 +78,8 @@ impl ConfigSnapshot {
             global_blocked_targets: config.filtering.global_blocked_targets.clone(),
             default_access_schedule: config.filtering.default_access_schedule.clone(),
             admin_bypass_rules: config.filtering.admin_bypass_rules.clone(),
+            access_log_enabled: config.logging.access_log_enabled,
+            access_log_client_ip: config.logging.access_log_client_ip,
         }
     }
 }
@@ -114,6 +118,13 @@ impl ConnectionContext {
     /// Effective user ID (skips config-auth sentinel -1)
     pub fn effective_uid(&self) -> Option<i64> {
         self.user_id.filter(|&uid| uid > 0)
+    }
+
+    /// Client IP as it should appear in access-log events (#59).
+    pub fn access_log_ip(&self) -> String {
+        self.config
+            .access_log_client_ip
+            .render(self.client_addr.ip())
     }
 
     /// True when this is an admin connection AND `rule` is listed in
@@ -171,6 +182,8 @@ mod tests {
                 global_blocked_targets: vec![],
                 default_access_schedule: None,
                 admin_bypass_rules: rules.iter().map(|r| r.to_string()).collect(),
+                access_log_enabled: true,
+                access_log_client_ip: crate::config::AccessLogIpMode::Full,
             },
             user_id: Some(7),
             protocol: None,

@@ -498,19 +498,22 @@ async fn handle_client(
                 .with_label_values(&[proto_label, "success"])
                 .inc();
 
-            // Structured access log
-            tracing::info!(
-                target: "access_log",
-                client_ip = %client_addr.ip(),
-                target = %target_addr_str,
-                protocol = proto_label,
-                user_id = ?ctx.effective_uid(),
-                bytes_sent = bytes_sent,
-                bytes_received = bytes_received,
-                duration_ms = relay_start.elapsed().as_millis() as u64,
-                status = "success",
-                "connection completed"
-            );
+            // Structured access log (gated by logging.access_log_enabled;
+            // client IP rendered per logging.access_log_client_ip).
+            if ctx.config.access_log_enabled {
+                tracing::info!(
+                    target: "access_log",
+                    client_ip = %ctx.access_log_ip(),
+                    target = %target_addr_str,
+                    protocol = proto_label,
+                    user_id = ?ctx.effective_uid(),
+                    bytes_sent = bytes_sent,
+                    bytes_received = bytes_received,
+                    duration_ms = relay_start.elapsed().as_millis() as u64,
+                    status = "success",
+                    "connection completed"
+                );
+            }
         }
         Err((e, error_type)) => {
             // Map the failure to the canonical ConnectionStatus (single source
@@ -530,18 +533,20 @@ async fn handle_client(
                 .inc();
 
             // Structured access log
-            tracing::info!(
-                target: "access_log",
-                client_ip = %client_addr.ip(),
-                target = %target_addr_str,
-                protocol = proto_label,
-                user_id = ?ctx.effective_uid(),
-                duration_ms = relay_start.elapsed().as_millis() as u64,
-                status = "failed",
-                error_type = error_label,
-                error = %e,
-                "connection failed"
-            );
+            if ctx.config.access_log_enabled {
+                tracing::info!(
+                    target: "access_log",
+                    client_ip = %ctx.access_log_ip(),
+                    target = %target_addr_str,
+                    protocol = proto_label,
+                    user_id = ?ctx.effective_uid(),
+                    duration_ms = relay_start.elapsed().as_millis() as u64,
+                    status = "failed",
+                    error_type = error_label,
+                    error = %e,
+                    "connection failed"
+                );
+            }
             if let Some(uid) = ctx.effective_uid() {
                 state
                     .usage_writer
@@ -690,7 +695,9 @@ async fn async_handle_client_with_target(
     }
     let _ = target_stream.set_nodelay(true);
     utils::enable_tcp_keepalive(&target_stream);
-    tracing::info!(
+    // debug, not info: per-connection client+destination belongs in the
+    // (configurable) access log, not the default operational log (#59).
+    tracing::debug!(
         "[{}]: Connection established to {} by {}",
         &protocol,
         target_addr,
@@ -786,7 +793,7 @@ async fn async_handle_client_with_target(
     .await
     {
         Ok((c2t, t2c)) => {
-            tracing::info!(
+            tracing::debug!(
                 "[{}]: Closed tunnel {} <-> {} (sent: {}, received: {})",
                 &protocol,
                 client_addr,

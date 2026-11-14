@@ -156,6 +156,14 @@ Exposed at `GET /metrics` in Prometheus text format:
 - Production: `--log-format json` for structured JSON logs (ELK/Loki compatible)
 - Includes target module and thread IDs in JSON mode
 
+### Access Log & Privacy
+
+- One `access_log`-target event per proxied connection: client IP, destination `host:port`, protocol, user id, bytes, duration, status. This amounts to per-user browsing history, so treat it as personal data
+- `[logging] access_log_enabled = false` turns it off; `access_log_client_ip = "truncated"` (IPv4 /24, IPv6 /48) or `"omit"` reduces the client IP (default `"full"`)
+- Events share the process log output: drop or route them with `RUST_LOG` (e.g. `info,access_log=off`) or your collector, and set retention there
+- Security decisions (denials, admin bypasses, SSRF blocks) are logged separately on the `audit` target
+- Usage rows in SQLite also hold client IP + destination; they are purged after `[database] usage_retention_days` (default 90)
+
 ### Graceful Shutdown
 
 - Listens for `SIGTERM` and `Ctrl+C`

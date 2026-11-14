@@ -205,8 +205,52 @@ pub struct LoggingConfig {
     pub format: LogFormat,
     pub file_enabled: bool,
     pub file_path: String,
+    // Per-connection access log (target "access_log": client IP, destination,
+    // user, bytes). This is effectively per-user browsing history; disable it
+    // or reduce the client IP with access_log_client_ip where that matters.
     pub access_log_enabled: bool,
+    // Reserved: access-log events currently go to the process log output
+    // (filter with RUST_LOG, e.g. "info,access_log=off"); not a separate file.
     pub access_log_path: String,
+    // How the client IP appears in access-log events: "full" (default),
+    // "truncated" (IPv4 /24, IPv6 /48) or "omit".
+    #[serde(default)]
+    pub access_log_client_ip: AccessLogIpMode,
+}
+
+/// Client-IP handling for access-log events (#59).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AccessLogIpMode {
+    /// Log the full client IP.
+    #[default]
+    Full,
+    /// Log only the network: IPv4 /24, IPv6 /48.
+    Truncated,
+    /// Do not log the client IP at all.
+    Omit,
+}
+
+impl AccessLogIpMode {
+    /// Render `ip` for an access-log event according to this mode.
+    pub fn render(self, ip: std::net::IpAddr) -> String {
+        use std::net::IpAddr;
+        match self {
+            AccessLogIpMode::Full => ip.to_string(),
+            AccessLogIpMode::Omit => "-".to_string(),
+            AccessLogIpMode::Truncated => match ip {
+                IpAddr::V4(v4) => {
+                    let o = v4.octets();
+                    format!("{}.{}.{}.0/24", o[0], o[1], o[2])
+                }
+                IpAddr::V6(v6) => {
+                    let s = v6.segments();
+                    let net = std::net::Ipv6Addr::new(s[0], s[1], s[2], 0, 0, 0, 0, 0);
+                    format!("{}/48", net)
+                }
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -367,6 +411,7 @@ impl Default for Config {
                 file_path: "proxy.log".to_string(),
                 access_log_enabled: true,
                 access_log_path: "access.log".to_string(),
+                access_log_client_ip: AccessLogIpMode::Full,
             },
             metrics: MetricsConfig {
                 enabled: true,
@@ -507,6 +552,20 @@ mod tests {
         assert!(config.validate_access_control().is_ok());
         config.features.webhook_url = Some(String::new());
         assert!(config.validate_access_control().is_ok());
+    }
+
+    #[test]
+    fn test_access_log_ip_modes() {
+        let v4: std::net::IpAddr = "203.0.113.77".parse().unwrap();
+        let v6: std::net::IpAddr = "2001:db8:abcd:12::1".parse().unwrap();
+        assert_eq!(AccessLogIpMode::Full.render(v4), "203.0.113.77");
+        assert_eq!(AccessLogIpMode::Truncated.render(v4), "203.0.113.0/24");
+        assert_eq!(AccessLogIpMode::Truncated.render(v6), "2001:db8:abcd::/48");
+        assert_eq!(AccessLogIpMode::Omit.render(v4), "-");
+        assert_eq!(
+            Config::default().logging.access_log_client_ip,
+            AccessLogIpMode::Full
+        );
     }
 
     #[test]

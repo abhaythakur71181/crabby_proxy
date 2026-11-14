@@ -1050,18 +1050,22 @@ async fn handle_h2_forward_validated(
             // enforcement path read, so removing it changes nothing functional.
             // Proper forward-path usage accounting is tracked as a follow-up.
 
-            tracing::info!(
-                target: "access_log",
-                client_ip = %client_addr.ip(),
-                target = %target_url,
-                protocol = "HTTP2",
-                method = %method,
-                user_id = ?ctx.effective_uid(),
-                bytes = bytes_transferred,
-                duration_ms = started_at.elapsed().as_millis() as u64,
-                status = "success",
-                "h2 forward completed"
-            );
+            // Log the destination host only: the full URL (path + query)
+            // is far more sensitive than the CONNECT-style host:port (#59).
+            if ctx.config.access_log_enabled {
+                tracing::info!(
+                    target: "access_log",
+                    client_ip = %ctx.access_log_ip(),
+                    target = %ctx.target_host.as_deref().unwrap_or("-"),
+                    protocol = "HTTP2",
+                    method = %method,
+                    user_id = ?ctx.effective_uid(),
+                    bytes = bytes_transferred,
+                    duration_ms = started_at.elapsed().as_millis() as u64,
+                    status = "success",
+                    "h2 forward completed"
+                );
+            }
         }
         Err(e) => {
             tracing::error!(
