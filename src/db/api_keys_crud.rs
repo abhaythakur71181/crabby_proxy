@@ -62,6 +62,20 @@ pub async fn list_api_keys(pool: &SqlitePool, user_id: i64) -> Result<Vec<ApiKey
     Ok(keys)
 }
 
+/// Count a user's usable API keys (active and not yet expired).
+pub async fn count_active_api_keys(pool: &SqlitePool, user_id: i64) -> Result<i64, sqlx::Error> {
+    let now = chrono::Utc::now().timestamp();
+    let (count,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM api_keys WHERE user_id = ? AND is_active = 1 \
+         AND (expires_at IS NULL OR expires_at > ?)",
+    )
+    .bind(user_id)
+    .bind(now)
+    .fetch_one(pool)
+    .await?;
+    Ok(count)
+}
+
 /// Revoke an API key (soft delete)
 pub async fn revoke_api_key(
     pool: &SqlitePool,

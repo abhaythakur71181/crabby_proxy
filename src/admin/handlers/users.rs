@@ -255,6 +255,40 @@ pub async fn delete_user(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Maximum number of active, unexpired API keys a single user may hold.
+pub const MAX_API_KEYS_PER_USER: i64 = 25;
+/// Maximum API key display-name length, in characters.
+pub const MAX_API_KEY_NAME_LEN: usize = 64;
+/// Maximum API key lifetime (10 years). `0` still means "never expires".
+pub const MAX_API_KEY_EXPIRES_DAYS: i64 = 3650;
+
+/// Validate and normalise a create-API-key request into
+/// `(name, expires_in_days)` as stored. The name is trimmed (the column is NOT
+/// NULL, so an empty name is stored as "" rather than NULL); 0 days -> None
+/// (no expiry). Negative days (an already-expired key) and absurd lifetimes
+/// are rejected, as are over-long names or names with control characters.
+fn validate_api_key_request(
+    name: String,
+    expires_in_days: i64,
+) -> Result<(String, Option<i64>), String> {
+    let name = name.trim().to_string();
+    if name.chars().count() > MAX_API_KEY_NAME_LEN {
+        return Err(format!(
+            "name must be at most {MAX_API_KEY_NAME_LEN} characters"
+        ));
+    }
+    if name.chars().any(char::is_control) {
+        return Err("name must not contain control characters".to_string());
+    }
+    if !(0..=MAX_API_KEY_EXPIRES_DAYS).contains(&expires_in_days) {
+        return Err(format!(
+            "expires_in_days must be between 0 (never) and {MAX_API_KEY_EXPIRES_DAYS}"
+        ));
+    }
+    let expires = (expires_in_days != 0).then_some(expires_in_days);
+    Ok((name, expires))
+}
+
 /// Create API key for user.
 ///
 /// Authorization goes through `authorize_target`: a caller may create keys for
@@ -269,19 +303,18 @@ pub async fn create_api_key(
 ) -> Result<impl IntoResponse, ApiError> {
     current_user.authorize_target(&state, user_id).await?;
 
-    let name = if request.name.is_empty() {
-        None
-    } else {
-        Some(request.name)
-    };
-    let expires_in_days = if request.expires_in_days == 0 {
-        None
-    } else {
-        Some(request.expires_in_days)
-    };
+    let (name, expires_in_days) = validate_api_key_request(request.name, request.expires_in_days)
+        .map_err(ApiError::bad_request)?;
+
+    let active = api_keys_crud::count_active_api_keys(&state.db_pool, user_id).await?;
+    if active >= MAX_API_KEYS_PER_USER {
+        return Err(ApiError::conflict(format!(
+            "API key limit reached ({MAX_API_KEYS_PER_USER} active keys); revoke one first"
+        )));
+    }
 
     let (plaintext_key, api_key) =
-        api_keys_crud::create_api_key(&state.db_pool, user_id, name, expires_in_days)
+        api_keys_crud::create_api_key(&state.db_pool, user_id, Some(name), expires_in_days)
             .await
             .map_err(|e| {
                 tracing::error!("Failed to create API key: {}", e);
@@ -473,6 +506,24 @@ mod authz_tests {
         assert!(authorize_admin_reset(&Role::Admin, &Role::RootAdmin).is_err());
         // plain user cannot reset others
         assert!(authorize_admin_reset(&Role::User, &Role::User).is_err());
+    }
+
+    #[test]
+    fn api_key_request_validation() {
+        use super::{
+            validate_api_key_request as v, MAX_API_KEY_EXPIRES_DAYS, MAX_API_KEY_NAME_LEN,
+        };
+        assert_eq!(v(String::new(), 0).unwrap(), (String::new(), None));
+        assert_eq!(
+            v("  ci  ".into(), 30).unwrap(),
+            ("ci".to_string(), Some(30))
+        );
+        assert!(v("k".into(), -1).is_err(), "negative expiry rejected");
+        assert!(v("k".into(), MAX_API_KEY_EXPIRES_DAYS).is_ok());
+        assert!(v("k".into(), MAX_API_KEY_EXPIRES_DAYS + 1).is_err());
+        assert!(v("x".repeat(MAX_API_KEY_NAME_LEN), 0).is_ok());
+        assert!(v("x".repeat(MAX_API_KEY_NAME_LEN + 1), 0).is_err());
+        assert!(v("bad\nname".into(), 0).is_err());
     }
 
     #[test]

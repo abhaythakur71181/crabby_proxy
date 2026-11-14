@@ -119,3 +119,58 @@ async fn admin_cannot_view_or_kill_root_sessions() {
     let user_sessions = format!("/api/users/{}/sessions", f.user_id);
     assert_eq!(get_status(&f.base, &admin, &user_sessions).await, 200);
 }
+
+// ─── #24: API key creation limits ────────────────────────────────────────
+
+#[tokio::test]
+async fn api_key_cap_and_input_validation() {
+    let state = test_state().await;
+    let uid = add_user(&state, "alice", Role::User).await;
+    let pool = state.db_pool.clone();
+    let base = spawn(state).await;
+    let token = login_bearer(&base, "alice").await;
+    let post = |body: serde_json::Value| {
+        let (base, token) = (base.clone(), token.clone());
+        async move {
+            client()
+                .post(format!("{base}/api/users/{uid}/api-keys"))
+                .bearer_auth(token)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+
+    assert_eq!(post(serde_json::json!({"expires_in_days": -1})).await, 400);
+    assert_eq!(post(serde_json::json!({"name": "x".repeat(65)})).await, 400);
+
+    // Fill up to the cap directly (avoids hashing 25 real keys); revoked keys
+    // must not count towards it.
+    let now = chrono::Utc::now().timestamp();
+    for i in 0..crate::admin::handlers::users::MAX_API_KEYS_PER_USER {
+        sqlx::query(
+            "INSERT INTO api_keys (user_id, key_hash, key_prefix, name, created_at, is_active) \
+             VALUES (?, ?, ?, 'n', ?, 1)",
+        )
+        .bind(uid)
+        .bind(format!("h{i}"))
+        .bind(format!("p{i}"))
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    assert_eq!(post(serde_json::json!({"name": "one-too-many"})).await, 409);
+
+    sqlx::query(
+        "UPDATE api_keys SET is_active = 0 \
+         WHERE id = (SELECT MIN(id) FROM api_keys WHERE user_id = ?)",
+    )
+    .bind(uid)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(post(serde_json::json!({"name": "fits-again"})).await, 201);
+}
