@@ -77,6 +77,17 @@ pub async fn get_user_by_username(
     Ok(user)
 }
 
+/// The (first, active) root_admin account. Config-file credentials resolve to
+/// this user. Looked up by role, since the bootstrap account is named "root"
+/// (see `ensure_root_admin`), not "root_admin".
+pub async fn get_root_admin(pool: &SqlitePool) -> Result<Option<User>, sqlx::Error> {
+    sqlx::query_as::<_, User>(
+        "SELECT * FROM users WHERE role = 'root_admin' AND is_active = 1 ORDER BY id LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+}
+
 /// Get user by ID
 pub async fn get_user_by_id(pool: &SqlitePool, id: i64) -> Result<Option<User>, sqlx::Error> {
     let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = ?")

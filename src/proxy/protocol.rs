@@ -338,10 +338,22 @@ impl ProxyProtocol {
         }
 
         // Fallback to Config credentials if enabled
-        let config_match = {
+        // Constant-time, optionally an Argon2 hash, and disabled when the
+        // configured password is empty (see crate::credentials).
+        let (expected_user, expected_secret) = {
             let config = state.config.load();
-            username == config.authentication.username && password == config.authentication.password
+            (
+                config.authentication.username.clone(),
+                config.authentication.password.clone(),
+            )
         };
+        let config_match = crate::credentials::config_credential_matches(
+            &expected_user,
+            &expected_secret,
+            username,
+            password,
+        )
+        .await;
         if config_match {
             // Config-based auth resolves to the real `root_admin` DB user — never
             // a sentinel. A negative/synthetic id is Some(_) to the validator
@@ -349,7 +361,7 @@ impl ProxyProtocol {
             // fail OPEN (target filter, connection limit), silently disabling
             // per-user controls. The admin HTTP path was already hardened the
             // same way; reject if root_admin is missing rather than bypass.
-            match users::get_user_by_username(&state.db_pool, "root_admin").await {
+            match users::get_root_admin(&state.db_pool).await {
                 Ok(Some(user)) => {
                     state.auth_cache.insert(cache_key, user.id);
                     return Some(user.id);

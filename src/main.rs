@@ -11,6 +11,7 @@ mod connection;
 mod connection_pool;
 #[allow(dead_code)]
 mod constants;
+mod credentials;
 mod db;
 mod dns_cache;
 #[allow(dead_code)]

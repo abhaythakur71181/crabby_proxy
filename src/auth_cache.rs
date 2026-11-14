@@ -36,7 +36,6 @@ pub enum CredentialDomain {
     /// Proxy authentication (Basic / SOCKS5 user-pass / API key).
     Proxy,
     /// `Authorization: Basic` on the admin API.
-    #[allow(dead_code)]
     AdminBasic,
 }
 
