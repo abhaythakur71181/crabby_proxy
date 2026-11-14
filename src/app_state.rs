@@ -246,9 +246,12 @@ impl AppState {
             Arc::new(RwLock::new(filter))
         };
 
-        // Initialize GeoIP filter (optional)
-        let geo_filter =
-            crate::geo_filter::init_geo_filter(config.filtering.geoip_database_path.as_deref());
+        // Initialize GeoIP filter. Mandatory when geo blocking is enabled:
+        // refuse to start rather than silently fail open (#55).
+        let geo_filter = crate::geo_filter::init_geo_filter(
+            config.filtering.geoip_database_path.as_deref(),
+            config.filtering.geo_blocking_enabled,
+        )?;
 
         // Build self-loop guard from the proxy bind address.
         let self_loop_guard = crate::self_loop::SelfLoopGuard::from_bind(&config.server.proxy_bind);
@@ -424,6 +427,17 @@ impl AppState {
                 "config reload: change to 'admin.auth_enabled' ignored — restart required"
             );
             new_config.admin.auth_enabled = current.admin.auth_enabled;
+        }
+
+        // The GeoIP database is loaded once at startup. A reload that turns
+        // geo blocking on without a loaded database would make every
+        // connection fail closed, so reject it with an actionable error (#55).
+        if new_config.filtering.geo_blocking_enabled && self.geo_filter.is_none() {
+            return Err(
+                "config reload rejected: filtering.geo_blocking_enabled = true but no \
+                 GeoIP database is loaded; set filtering.geoip_database_path and restart"
+                    .into(),
+            );
         }
 
         drop(current);

@@ -48,7 +48,8 @@ IPv4-mapped IPv6 addresses (`::ffff:x.x.x.x`) are normalized to prevent bypass.
 - **MaxMind GeoLite2** database integration via `maxminddb` crate
 - Country-level **allowlist** and **blocklist**
 - Configurable via `geoip_database_path` in `[filtering]`
-- Fail-open for unknown IPs (no GeoIP data = allowed)
+- IPs the database cannot classify are allowed in blocklist mode but denied when an `allowed_countries` allowlist is set
+- Fail-closed when misconfigured: with `geo_blocking_enabled = true` the proxy refuses to start if the database path is unset or unloadable (`proxy_geo_filter_loaded` gauge reports load state)
 
 ### Target Domain Filtering
 

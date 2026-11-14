@@ -32,13 +32,28 @@ pub async fn validate_geo_block(ctx: &ConnectionContext, state: &AppState) -> Ve
     }
     let geo = match &state.geo_filter {
         Some(g) => g,
-        None => return Verdict::Allow,
+        None => {
+            // Enabled but no database loaded. Startup and config reload both
+            // refuse this state, so reaching here is a bug — fail closed
+            // rather than silently dropping every country restriction (#55).
+            tracing::error!(
+                "geo blocking enabled but no GeoIP database is loaded — denying {} (fail-closed)",
+                ctx.client_addr.ip()
+            );
+            crate::metrics::GEO_FILTER_ACTIONS
+                .with_label_values(&["unavailable"])
+                .inc();
+            return Verdict::Deny("Geo-filter unavailable (fail-closed)".to_string());
+        }
     };
     let (allowed, country) = geo.is_ip_allowed(
         ctx.client_addr.ip(),
         &ctx.config.blocked_countries,
         &ctx.config.allowed_countries,
     );
+    crate::metrics::GEO_FILTER_ACTIONS
+        .with_label_values(&[if allowed { "allowed" } else { "blocked" }])
+        .inc();
     if !allowed {
         return Verdict::Deny(format!(
             "IP {} blocked by geo-filter (country: {})",

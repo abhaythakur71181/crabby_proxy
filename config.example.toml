@@ -59,8 +59,14 @@ ban_duration = 300
 [filtering]
 ip_allowlist = []
 ip_blocklist = []
+# Geo blocking needs a MaxMind GeoLite2-Country database. When
+# geo_blocking_enabled = true the database is mandatory: the proxy refuses to
+# start (and a config reload is rejected) if geoip_database_path is unset or the
+# file cannot be loaded, instead of silently allowing every country.
 geo_blocking_enabled = false
 blocked_countries = []
+# allowed_countries = []          # if non-empty, ONLY these countries may connect
+# geoip_database_path = "/app/data/GeoLite2-Country.mmdb"
 # SSRF egress guard is ON by default in code (block_private_targets); leave it on
 # unless this instance intentionally proxies to internal/same-machine targets.
 
