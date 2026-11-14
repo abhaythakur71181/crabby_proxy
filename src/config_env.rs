@@ -81,6 +81,56 @@ impl ConfigEnvExt for Config {
                 "⚠️  Basic auth password is the default value — allowed only because CRABBY_ALLOW_DEFAULT_PASSWORDS is set."
             );
         }
+
+        validate_admin_exposure(self);
+    }
+}
+
+/// True if a bind address (`ip:port` or `localhost:port`) only listens on
+/// loopback. Anything unparseable counts as exposed.
+fn is_loopback_bind(bind: &str) -> bool {
+    if let Ok(addr) = bind.parse::<std::net::SocketAddr>() {
+        return addr.ip().is_loopback();
+    }
+    matches!(bind.rsplit_once(':'), Some(("localhost", _)))
+}
+
+/// Why this config must not start, if `admin.auth_enabled = false` would
+/// expose an unauthenticated admin API beyond the local host.
+pub(crate) fn admin_exposure_error(config: &Config) -> Option<String> {
+    if config.admin.enabled
+        && !config.admin.auth_enabled
+        && !is_loopback_bind(&config.server.admin_bind)
+    {
+        return Some(format!(
+            "admin.auth_enabled = false with admin_bind {} (not loopback) would give anyone who can reach that address full root_admin access. \
+             Re-enable admin auth, bind the admin API to 127.0.0.1, or set CRABBY_ALLOW_INSECURE_ADMIN=1 if access is restricted some other way.",
+            config.server.admin_bind
+        ));
+    }
+    None
+}
+
+/// With admin auth off, every admin request is treated as root_admin (see
+/// admin::auth). Refuse to start if that is reachable off-host unless the
+/// operator explicitly opts in, and warn loudly either way.
+fn validate_admin_exposure(config: &Config) {
+    if !config.admin.enabled || config.admin.auth_enabled {
+        return;
+    }
+    let allow_insecure = std::env::var("CRABBY_ALLOW_INSECURE_ADMIN")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    match admin_exposure_error(config) {
+        Some(msg) if !allow_insecure => panic!("{}", msg),
+        Some(msg) => tracing::error!(
+            "⚠️  {} Starting anyway because CRABBY_ALLOW_INSECURE_ADMIN is set.",
+            msg
+        ),
+        None => tracing::warn!(
+            "⚠️  admin.auth_enabled = false: every admin API request on {} is treated as root_admin. Use only for local development.",
+            config.server.admin_bind
+        ),
     }
 }
 
@@ -223,5 +273,32 @@ mod tests {
         std::env::remove_var("CRABBY_ALLOW_DEFAULT_PASSWORDS");
         let mut config = Config::default(); // admin_password = default
         config.apply_env_overrides(); // should panic — guessable admin credential
+    }
+
+    #[test]
+    fn test_admin_exposure_requires_loopback_when_auth_off() {
+        let mut config = Config::default();
+        config.admin.auth_enabled = false;
+
+        config.server.admin_bind = "127.0.0.1:8081".to_string();
+        assert!(admin_exposure_error(&config).is_none());
+        config.server.admin_bind = "[::1]:8081".to_string();
+        assert!(admin_exposure_error(&config).is_none());
+        config.server.admin_bind = "localhost:8081".to_string();
+        assert!(admin_exposure_error(&config).is_none());
+
+        config.server.admin_bind = "0.0.0.0:8081".to_string();
+        assert!(admin_exposure_error(&config).is_some());
+        config.server.admin_bind = "10.1.2.3:8081".to_string();
+        assert!(admin_exposure_error(&config).is_some());
+        config.server.admin_bind = "admin.example.com:8081".to_string();
+        assert!(admin_exposure_error(&config).is_some());
+
+        // Auth on, or admin API disabled: any bind is fine.
+        config.admin.auth_enabled = true;
+        assert!(admin_exposure_error(&config).is_none());
+        config.admin.auth_enabled = false;
+        config.admin.enabled = false;
+        assert!(admin_exposure_error(&config).is_none());
     }
 }

@@ -27,7 +27,30 @@ pub async fn auth_middleware(
         )
     };
     if !auth_enabled {
-        return Ok(next.run(request).await);
+        // Auth is off (only allowed on a loopback admin_bind; see
+        // config_env::validate_admin_exposure). Rather than pass requests
+        // through with no identity, which made identity-requiring handlers
+        // fail with 401/500, lost audit attribution, and would turn any
+        // future handler that forgets to require an identity into a silent
+        // bypass, attribute every request to the root_admin account
+        // explicitly so handlers and the audit log see a real user.
+        return match users::get_root_admin(&state.db_pool).await {
+            Ok(Some(root)) => {
+                request.extensions_mut().insert(root.id);
+                Ok(next.run(request).await)
+            }
+            Ok(None) => {
+                tracing::error!("admin.auth_enabled = false but no active root_admin exists");
+                Err(StatusCode::INTERNAL_SERVER_ERROR)
+            }
+            Err(e) => {
+                tracing::error!(
+                    "admin.auth_enabled = false: root_admin lookup failed: {}",
+                    e
+                );
+                Err(StatusCode::INTERNAL_SERVER_ERROR)
+            }
+        };
     }
     let auth_header = request
         .headers()
