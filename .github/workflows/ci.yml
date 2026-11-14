@@ -104,10 +104,12 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Validate compose file
+        # compose's ${VAR:?} guards only need these to be non-empty; nothing
+        # starts, so the values are dummies.
         env:
-          CRABBY_JWT_SECRET: ci-placeholder-secret-at-least-32-bytes-long
-          CRABBY_ADMIN_PASSWORD: ci-placeholder
-          CRABBY_BASIC_AUTH_PASSWORD: ci-placeholder
+          CRABBY_JWT_SECRET: x
+          CRABBY_ADMIN_PASSWORD: x
+          CRABBY_BASIC_AUTH_PASSWORD: x
         run: docker compose --profile backup config --quiet
       - name: Build image
         run: docker build -t crabby-proxy:ci .
