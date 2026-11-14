@@ -602,9 +602,6 @@ impl AppState {
     /// checks here and on every other instance, so the revoked key stops
     /// working immediately instead of at the end of the auth-cache TTL.
     pub async fn invalidate_api_key_cache(&self, user_id: i64) {
-        if let Some(ref cache) = self.cache {
-            cache.invalidate_api_keys_for_user(user_id).await;
-        }
         self.auth_cache.invalidate_user(user_id);
         self.broadcast_user_invalidated(user_id).await;
     }
@@ -631,7 +628,6 @@ impl AppState {
             if let Some(name) = username {
                 cache.invalidate_user(user_id, name).await;
             }
-            cache.invalidate_api_keys_for_user(user_id).await;
             cache.invalidate_approvals_for_user(user_id).await;
             cache.invalidate_quota(user_id).await;
         }

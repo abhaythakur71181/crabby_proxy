@@ -308,26 +308,10 @@ impl ProxyProtocol {
                 .map(|cu| (cu.id, cu.username.clone()));
 
             if let Some((user_id, _)) = user {
-                // Try API key verification cache
-                if let Some(ref cache) = state.cache {
-                    if let Some(verified) = cache.get_api_key_verified(user_id, password).await {
-                        if verified {
-                            state.auth_cache.insert(cache_key, user_id);
-                            return Some(user_id);
-                        } else {
-                            return None;
-                        }
-                    }
-                }
-                // Cache miss: verify via DB (expensive argon2)
+                // One indexed SHA-256 lookup (no Argon2; see db::api_keys).
                 let verified = api_keys::verify_api_key(&state.db_pool, user_id, password)
                     .await
                     .unwrap_or(false);
-                if let Some(ref cache) = state.cache {
-                    cache
-                        .set_api_key_verified(user_id, password, verified)
-                        .await;
-                }
                 if verified {
                     state.auth_cache.insert(cache_key, user_id);
                     return Some(user_id);

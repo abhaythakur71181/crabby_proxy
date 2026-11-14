@@ -6,7 +6,6 @@ use crate::db::models::User;
 
 /// TTL constants (in seconds)
 pub(crate) const USER_TTL: u64 = 300; // 5 minutes
-pub(crate) const API_KEY_TTL: u64 = 300; // 5 minutes
 pub(crate) const QUOTA_TTL: u64 = 30; // 30 seconds (matches existing DashMap TTL)
 pub(crate) const APPROVAL_TTL: u64 = 120; // 2 minutes
 pub(crate) const USER_ROLE_TTL: u64 = 300; // 5 minutes
@@ -118,28 +117,11 @@ impl CacheLayer {
         self.set_json(&key, role, USER_ROLE_TTL).await;
     }
 
-    // ─── API key verification cache ────────────────────────────────────
-
-    pub async fn get_api_key_verified(&self, user_id: i64, key_value: &str) -> Option<bool> {
-        let digest = simple_hash(key_value);
-        let key = format!("{}cache:apikey:{}:{:016x}", self.prefix, user_id, digest);
-        let mut conn = self.conn.clone();
-        let val: Option<String> = conn.get(&key).await.ok()?;
-        val.map(|v| v == "1")
-    }
-
-    pub async fn set_api_key_verified(&self, user_id: i64, key_value: &str, verified: bool) {
-        let digest = simple_hash(key_value);
-        let key = format!("{}cache:apikey:{}:{:016x}", self.prefix, user_id, digest);
-        let mut conn = self.conn.clone();
-        let val = if verified { "1" } else { "0" };
-        let _: Result<(), _> = conn.set_ex(&key, val, API_KEY_TTL).await;
-    }
-
-    pub async fn invalidate_api_keys_for_user(&self, user_id: i64) {
-        let pattern = format!("{}cache:apikey:{}:*", self.prefix, user_id);
-        self.scan_and_delete(&pattern).await;
-    }
+    // There is deliberately no Redis cache of API-key verification results.
+    // It used to store the decision under an unkeyed 64-bit FNV hash of the
+    // key; now that keys are verified by a single indexed SHA-256 lookup
+    // (db::api_keys) such a cache saves nothing and only widened the
+    // revocation window. The in-process AuthCache still absorbs repeats.
 
     // ─── Quota cache ───────────────────────────────────────────────────
 
@@ -316,17 +298,4 @@ impl From<&CachedUser> for CachedUserRole {
             is_active: u.is_active,
         }
     }
-}
-
-// ─── Helpers ───────────────────────────────────────────────────────────
-
-/// Simple FNV-1a hash for cache keys (NOT cryptographic — just for key uniqueness).
-/// Returns raw u64 so callers can format it inline (single allocation).
-fn simple_hash(input: &str) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in input.as_bytes() {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
 }
