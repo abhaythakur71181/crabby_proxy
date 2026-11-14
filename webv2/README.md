@@ -41,6 +41,7 @@ reserved for the backend liveness endpoint (proxied).
 ```bash
 bun run build        # typecheck + production bundle → dist/
 bun run typecheck    # tsc only
+bun run test         # unit tests (bun test, *.test.ts)
 bun run preview      # serve dist/ locally
 ```
 
