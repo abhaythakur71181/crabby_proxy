@@ -174,3 +174,46 @@ async fn api_key_cap_and_input_validation() {
     .unwrap();
     assert_eq!(post(serde_json::json!({"name": "fits-again"})).await, 201);
 }
+
+// ─── #21: typed extractor guards ─────────────────────────────────────────
+
+#[tokio::test]
+async fn extractor_guards_enforce_roles() {
+    let f = fixture().await;
+    let admin = login_bearer(&f.base, "admin1").await;
+    let alice = login_bearer(&f.base, "alice").await;
+    let c = client();
+
+    // root_admin-only endpoints reject admins and users.
+    for token in [&admin, &alice] {
+        let s = c
+            .put(format!("{}/api/config", f.base))
+            .bearer_auth(token)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(s, 403);
+        assert_eq!(
+            delete_status(&f.base, token, &format!("/api/users/{}", f.user2_id)).await,
+            403
+        );
+    }
+    // admin-only endpoints reject regular users.
+    assert_eq!(get_status(&f.base, &alice, "/api/usage/summary").await, 403);
+    assert_eq!(get_status(&f.base, &admin, "/api/usage/summary").await, 200);
+    // Self-or-admin endpoints.
+    let alice_quota = format!("/api/users/{}/quota", f.user_id);
+    let bob_quota = format!("/api/users/{}/quota", f.user2_id);
+    assert_eq!(get_status(&f.base, &alice, &alice_quota).await, 200);
+    assert_eq!(get_status(&f.base, &alice, &bob_quota).await, 403);
+    // No credentials at all.
+    let s = c
+        .get(format!("{}/api/users", f.base))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(s, 401);
+}

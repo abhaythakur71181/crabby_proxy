@@ -1,4 +1,5 @@
 use super::models::ApiError;
+use crate::admin::auth::{AdminUser, CurrentUser};
 use axum::{extract::Path, extract::State, Json};
 use serde::{Deserialize, Serialize};
 
@@ -21,12 +22,10 @@ pub struct UpdateQuotaRequest {
 
 /// GET /api/users/:id/quota - Get user's quota usage stats
 pub async fn get_user_quota(
+    current_user: CurrentUser,
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
-    axum::Extension(current_user_id): axum::Extension<i64>,
 ) -> Result<Json<QuotaResponse>, ApiError> {
-    let current_user =
-        crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
     if !current_user.can_access_user(user_id) {
         return Err(ApiError::forbidden("Cannot access other users' quota"));
     }
@@ -89,14 +88,11 @@ async fn overlay_with_tracker(
 
 /// PUT /api/users/:id/quota - Update user's quota
 pub async fn update_user_quota(
+    _admin: AdminUser,
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
-    axum::Extension(current_user_id): axum::Extension<i64>,
     Json(payload): Json<UpdateQuotaRequest>,
 ) -> Result<Json<QuotaResponse>, ApiError> {
-    let current_user =
-        crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
-    current_user.require_admin()?;
     // A negative quota is meaningless and breaks remaining/percentage math; reject it.
     // `None` means "no quota" (unlimited) and is allowed.
     if payload.quota_bytes.is_some_and(|q| q < 0) {

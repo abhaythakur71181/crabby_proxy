@@ -346,6 +346,27 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for AdminUser {
     }
 }
 
+/// Axum extractor: authenticated user that must be `root_admin`.
+pub struct RootAdminUser(pub CurrentUser);
+
+#[axum::async_trait]
+impl axum::extract::FromRequestParts<Arc<AppState>> for RootAdminUser {
+    type Rejection = super::handlers::models::ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let user = CurrentUser::from_request_parts(parts, state).await?;
+        if user.role_enum() != Role::RootAdmin {
+            return Err(super::handlers::models::ApiError::forbidden(
+                "root_admin access required",
+            ));
+        }
+        Ok(RootAdminUser(user))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

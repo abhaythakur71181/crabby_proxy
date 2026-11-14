@@ -2,14 +2,13 @@ use super::models::{
     ApiError, ApiKeyResponse, CreateApiKeyRequest, CreateApiKeyResponse, UpdateUserRequest,
     UserResponse,
 };
-use crate::admin::auth::CurrentUser;
+use crate::admin::auth::{CurrentUser, RootAdminUser};
 use crate::app_state::AppState;
 use crate::db::{api_keys_crud, models::Role, users};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Json},
-    Extension,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -62,14 +61,12 @@ fn self_reset_allowed(caller: &Role) -> bool {
 
 /// Create a new user (root_admin only)
 pub async fn create_user(
+    current_user: CurrentUser,
     State(state): State<Arc<AppState>>,
-    Extension(current_user_id): Extension<i64>,
     Json(request): Json<super::models::CreateUserRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
-        .await?
-        .ok_or_else(|| ApiError::unauthorized("Invalid session"))?;
-    authorize_create_user(&current_user.get_role(), &request.role).map_err(ApiError::forbidden)?;
+    let current_user_id = current_user.id;
+    authorize_create_user(&current_user.role_enum(), &request.role).map_err(ApiError::forbidden)?;
     crate::validation::validate_username(&request.username).map_err(ApiError::bad_request)?;
     crate::validation::validate_password(&request.password).map_err(ApiError::bad_request)?;
     if let Ok(Some(_)) = users::get_user_by_username(&state.db_pool, &request.username).await {
@@ -98,17 +95,18 @@ pub async fn create_user(
 
 /// List users. Admins see all users; regular users see only themselves.
 pub async fn list_users(
+    current_user: CurrentUser,
     State(state): State<Arc<AppState>>,
-    Extension(current_user_id): Extension<i64>,
     Query(pagination): Query<PaginationQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
-        .await?
-        .ok_or_else(|| ApiError::unauthorized("Invalid session"))?;
+    let current_user_id = current_user.id;
 
     // Regular users only see their own profile
-    if current_user.get_role() == Role::User {
-        let items = vec![UserResponse::from(current_user)];
+    if current_user.role_enum() == Role::User {
+        let me = users::get_user_by_id(&state.db_pool, current_user_id)
+            .await?
+            .ok_or_else(|| ApiError::unauthorized("Invalid session"))?;
+        let items = vec![UserResponse::from(me)];
         return Ok(Json(serde_json::json!({
             "items": items,
             "total": 1,
@@ -136,16 +134,14 @@ pub async fn list_users(
 
 /// Get user details (admin+ or self)
 pub async fn get_user(
+    current_user: CurrentUser,
     State(state): State<Arc<AppState>>,
-    Extension(current_user_id): Extension<i64>,
     Path(user_id): Path<i64>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
-        .await?
-        .ok_or_else(|| ApiError::unauthorized("Invalid session"))?;
+    let current_user_id = current_user.id;
 
     // Allow if admin+ or viewing own profile
-    if current_user.get_role() == Role::User && current_user_id != user_id {
+    if current_user.role_enum() == Role::User && current_user_id != user_id {
         return Err(ApiError::forbidden("Cannot view other users"));
     }
 
@@ -158,17 +154,15 @@ pub async fn get_user(
 
 /// Update user (root_admin or self for limited fields)
 pub async fn update_user(
+    current_user: CurrentUser,
     State(state): State<Arc<AppState>>,
-    Extension(current_user_id): Extension<i64>,
     Path(user_id): Path<i64>,
     Json(request): Json<UpdateUserRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
-        .await?
-        .ok_or_else(|| ApiError::unauthorized("Invalid session"))?;
+    let current_user_id = current_user.id;
 
     let is_self = current_user_id == user_id;
-    let is_root_admin = current_user.get_role() == Role::RootAdmin;
+    let is_root_admin = current_user.role_enum() == Role::RootAdmin;
 
     // Regular users can only update their own password
     if !is_root_admin && !is_self {
@@ -224,17 +218,11 @@ pub async fn update_user(
 
 /// Delete user (root_admin only)
 pub async fn delete_user(
+    RootAdminUser(current_user): RootAdminUser,
     State(state): State<Arc<AppState>>,
-    Extension(current_user_id): Extension<i64>,
     Path(user_id): Path<i64>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
-        .await?
-        .ok_or_else(|| ApiError::unauthorized("Invalid session"))?;
-
-    if current_user.get_role() != Role::RootAdmin {
-        return Err(ApiError::forbidden("Only root_admin can delete users"));
-    }
+    let current_user_id = current_user.id;
 
     // Don't allow deleting yourself
     if current_user_id == user_id {
@@ -368,15 +356,13 @@ pub async fn revoke_api_key(
 /// Requires the caller's current password. root_admin is not allowed here
 /// (it resets via the admin endpoint); available to `user` and `admin`.
 pub async fn change_own_password(
+    current_user: CurrentUser,
     State(state): State<Arc<AppState>>,
-    Extension(current_user_id): Extension<i64>,
     Json(request): Json<super::models::ChangeOwnPasswordRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
-        .await?
-        .ok_or_else(|| ApiError::unauthorized("Invalid session"))?;
+    let current_user_id = current_user.id;
 
-    if !self_reset_allowed(&current_user.get_role()) {
+    if !self_reset_allowed(&current_user.role_enum()) {
         return Err(ApiError::forbidden(
             "root_admin changes password via the admin reset flow",
         ));
@@ -429,19 +415,17 @@ pub async fn change_own_password(
 /// current password). root_admin may target anyone; admin may target only
 /// regular users.
 pub async fn admin_reset_password(
+    current_user: CurrentUser,
     State(state): State<Arc<AppState>>,
-    Extension(current_user_id): Extension<i64>,
     Path(user_id): Path<i64>,
     Json(request): Json<super::models::AdminResetPasswordRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
-        .await?
-        .ok_or_else(|| ApiError::unauthorized("Invalid session"))?;
+    let current_user_id = current_user.id;
     let target = users::get_user_by_id(&state.db_pool, user_id)
         .await?
         .ok_or_else(|| ApiError::not_found("User not found"))?;
 
-    authorize_admin_reset(&current_user.get_role(), &target.get_role())
+    authorize_admin_reset(&current_user.role_enum(), &target.get_role())
         .map_err(ApiError::forbidden)?;
 
     crate::validation::validate_password(&request.new_password).map_err(ApiError::bad_request)?;

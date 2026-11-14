@@ -1,4 +1,5 @@
 use super::models::ApiError;
+use crate::admin::auth::{AdminUser, CurrentUser};
 use crate::app_state::AppState;
 use crate::db::approvals;
 use axum::{
@@ -39,13 +40,11 @@ pub struct TerminateRequest {
 
 /// POST /api/approvals - Create a new approval (admin only)
 pub async fn create_approval(
+    AdminUser(current_user): AdminUser,
     State(state): State<Arc<AppState>>,
-    axum::Extension(current_user_id): axum::Extension<i64>,
     Json(payload): Json<CreateApprovalRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let current_user =
-        crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
-    current_user.require_admin()?;
+    let current_user_id = current_user.id;
 
     // Bound the grant duration: negative -> expires in the past; huge -> effectively
     // permanent. Cap at 1..=8760 hours (1 year).
@@ -116,13 +115,9 @@ pub async fn create_approval(
 
 /// GET /api/approvals - List all active approvals (admin only)
 pub async fn list_approvals(
+    _admin: AdminUser,
     State(state): State<Arc<AppState>>,
-    axum::Extension(current_user_id): axum::Extension<i64>,
 ) -> Result<Json<Vec<ApprovalResponse>>, ApiError> {
-    let current_user =
-        crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
-    current_user.require_admin()?;
-
     let records = approvals::list_all_approvals(&state.db_pool)
         .await
         .map_err(|e| {
@@ -150,12 +145,10 @@ pub async fn list_approvals(
 
 /// GET /api/users/:id/approvals - List user's active approvals
 pub async fn list_user_approvals(
+    current_user: CurrentUser,
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
-    axum::Extension(current_user_id): axum::Extension<i64>,
 ) -> Result<Json<Vec<ApprovalResponse>>, ApiError> {
-    let current_user =
-        crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
     if !current_user.can_access_user(user_id) {
         return Err(ApiError::forbidden("Cannot access other users' approvals"));
     }
@@ -187,14 +180,12 @@ pub async fn list_user_approvals(
 
 /// DELETE /api/approvals/:id - Terminate an approval (admin only)
 pub async fn terminate_approval(
+    AdminUser(current_user): AdminUser,
     State(state): State<Arc<AppState>>,
     Path(approval_id): Path<i64>,
-    axum::Extension(current_user_id): axum::Extension<i64>,
     Json(payload): Json<TerminateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let current_user =
-        crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
-    current_user.require_admin()?;
+    let current_user_id = current_user.id;
 
     let terminated_user = approvals::terminate_approval(
         &state.db_pool,
