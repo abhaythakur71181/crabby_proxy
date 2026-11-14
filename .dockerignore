@@ -18,8 +18,8 @@
 **/target
 /bin
 
-# Node / frontend artifacts (backend image does not consume web/)
-/web
+# Node / frontend artifacts (backend image does not consume webv2/)
+/webv2
 **/node_modules
 **/dist
 **/.vite

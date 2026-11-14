@@ -64,51 +64,9 @@ services:
         max-size: "10m"
         max-file: "5"
 
-  crabby-web:
-    build:
-      context: ./web
-      dockerfile: Dockerfile
-      target: runtime
-      args:
-        BUN_VERSION: "1"
-        # Public URL of the admin API the browser calls. Defaults to the admin
-        # port published on the host (127.0.0.1:8081). The backend's [admin]
-        # cors_origins must include the web origin (http://localhost:3000 by
-        # default — already in config.toml). Override for non-local hosts.
-        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8081}
-    image: crabby-proxy-web:latest
-    container_name: crabby-proxy-web
-    restart: unless-stopped
-
-    depends_on:
-      crabby-proxy:
-        condition: service_healthy
-
-    ports:
-      - "${WEB_PORT:-3000}:8080"
-
-    security_opt:
-      - no-new-privileges:true
-
-    cap_drop:
-      - ALL
-
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 5s
-
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
-
-  # Next-generation console (webv2) — static SPA behind nginx with a
-  # same-origin /api proxy (no CORS config needed on the backend). Runs
-  # alongside the legacy crabby-web during rollout.
+  # Admin console (webv2) — static SPA behind nginx with a same-origin /api
+  # proxy (no CORS config needed on the backend). The only shipped UI; the
+  # legacy web/ app has been removed.
   crabby-webv2:
     build:
       context: ./webv2
