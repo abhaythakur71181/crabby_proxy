@@ -246,7 +246,7 @@ Base: admin API on `:8081`. Auth: `Authorization: Bearer <JWT>` (or Basic) on al
 | `/api/config` | GET | admin | redacted config |
 | `/api/config/reload` | POST | admin | reload from file |
 | `/api/dashboard`,`/stats`,`/api/metrics` | GET | admin | summaries |
-| `/health`,`/health/deep`,`/metrics` | GET | **public** | liveness + Prometheus (bind to localhost) |
+| `/health`,`/health/deep`,`/metrics` | GET | **public** (`/metrics`: bearer `scrape_token` unless loopback bind) | liveness + Prometheus |
 
 **Pagination/filter/sort:** `?limit` (cap 200) + `?offset` on users & audit-log; audit-log also `user_id`, `action`. Most other lists are unpaginated today **[A: add cursor/limit envelopes uniformly]**.
 

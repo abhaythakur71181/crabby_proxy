@@ -304,11 +304,16 @@ pub struct MetricsConfig {
     pub enabled: bool,
     pub prometheus_path: String,
     pub update_interval: u64,
-    /// Bearer token required to scrape `/metrics`. Unset (default) keeps the
-    /// endpoint unauthenticated, which is only safe on a loopback / private
-    /// admin bind; the server warns at boot otherwise.
+    /// Bearer token required to scrape `/metrics`. When unset, `/metrics` is
+    /// served without credentials only if the admin API is bound to loopback
+    /// (or `allow_unauthenticated` is set); otherwise it answers 403.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scrape_token: Option<String>,
+    /// Explicit opt-out: serve `/metrics` without a token even on a
+    /// non-loopback admin bind. Only for networks where the admin port is
+    /// already restricted (firewall / private network).
+    #[serde(default)]
+    pub allow_unauthenticated: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -498,6 +503,7 @@ impl Default for Config {
                 prometheus_path: "/metrics".to_string(),
                 update_interval: 10,
                 scrape_token: None,
+                allow_unauthenticated: false,
             },
             admin: AdminConfig {
                 enabled: true,

@@ -12,9 +12,16 @@ Set these or the process refuses to start:
   local dev only).
 - `RUST_LOG` — log level, e.g. `info` or `crabby_proxy=debug,warn` (default `info`).
 
-The admin port (admin API + unauthenticated `/metrics`) binds to `127.0.0.1`
-on the host by default. To expose it, set `ADMIN_BIND_HOST=0.0.0.0` **only**
-behind a firewall / private network, ideally with a reverse proxy enforcing TLS.
+The admin port (admin API + `/metrics`) binds to `127.0.0.1` on the host by
+default. To expose it, set `ADMIN_BIND_HOST=0.0.0.0` **only** behind a
+firewall / private network, ideally with a reverse proxy enforcing TLS.
+
+`/metrics` needs a scrape token in the compose setup: the container binds the
+admin API to `0.0.0.0:8081`, and without a token a non-loopback bind answers
+`403`. Set `CRABBY_METRICS_SCRAPE_TOKEN` in `.env` and configure Prometheus
+with `authorization: { credentials: <token> }`. Only if the admin port is
+already restricted, `CRABBY_METRICS_ALLOW_UNAUTHENTICATED=true` serves it
+without a token instead.
 
 Copy `.env.example` to `.env` for the full list of compose variables.
 
@@ -148,7 +155,8 @@ version. These snapshots are not pruned automatically. See ADR-0007.
 
 ## Monitoring
 
-- `/metrics` (Prometheus) on the admin port. Watch:
+- `/metrics` (Prometheus) on the admin port; bearer `scrape_token` required
+  unless the admin bind is loopback (see "Deploy / boot requirements"). Watch:
   - `proxy_usage_records_dropped_total` — should stay flat; growth means the
     usage writer is stalled and quota/billing is under-counting.
   - `proxy_auth_failures_total{reason=...}`, `proxy_ip_rate_limit_evictions_total`,
