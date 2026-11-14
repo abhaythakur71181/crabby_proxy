@@ -1,10 +1,11 @@
 // Approvals — request workflow + active grants, for both roles.
 // Users: request access, watch their own requests. Admins: decide with a
 // reason, create grants directly, terminate with a required reason.
-// The request dialog best-effort auto-fills the client IP via api.ipify.org;
-// the field stays editable and accepts wildcard/CIDR patterns.
+// The request dialog's client IP is entered by hand (exact, wildcard or CIDR).
+// It deliberately does not look the IP up via a third-party service: that
+// would leak the operator's IP and the fact they run Crabby Proxy (#67).
 import { CheckCircle2, Plus, ShieldCheck, XCircle } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useSearchParams } from "react-router";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -17,7 +18,6 @@ import {
 } from "@/api/endpoints";
 import type { ApprovalRequestResponse, ApprovalResponse } from "@/api/types";
 import { formatRelative } from "@/lib/format";
-import { isIpv4 } from "@/lib/ip";
 import {
   keys,
   useApprovalRequests,
@@ -300,23 +300,6 @@ function RequestAccessDialog({
   const [ip, setIp] = useState("");
   const [hours, setHours] = useState("24");
   const [reason, setReason] = useState("");
-
-  useEffect(() => {
-    if (!open) return;
-    const ac = new AbortController();
-    const t = setTimeout(() => ac.abort(), 3000);
-    fetch("https://api.ipify.org?format=json", { signal: ac.signal })
-      .then((r) => r.json())
-      .then((d: { ip?: string }) => {
-        if (d.ip && isIpv4(d.ip)) setIp((cur) => (cur.trim() ? cur : d.ip!));
-      })
-      .catch(() => {}) // best-effort; leave field empty on failure
-      .finally(() => clearTimeout(t));
-    return () => {
-      clearTimeout(t);
-      ac.abort();
-    };
-  }, [open]);
 
   const create = useMutation({
     mutationFn: () =>
