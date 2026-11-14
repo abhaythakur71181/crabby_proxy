@@ -433,3 +433,27 @@ async fn bearer_clients_unaffected_by_cookie_mode() {
         .status();
     assert_eq!(s, 201);
 }
+
+// ─── #22: /metrics scrape token ──────────────────────────────────────────
+
+#[tokio::test]
+async fn metrics_scrape_token() {
+    let get = |base: String, token: Option<&'static str>| async move {
+        let mut rb = client().get(format!("{base}/metrics"));
+        if let Some(t) = token {
+            rb = rb.bearer_auth(t);
+        }
+        rb.send().await.unwrap().status()
+    };
+
+    // Default: open (backwards compatible).
+    let open = spawn(test_state().await).await;
+    assert_eq!(get(open, None).await, 200);
+
+    let mut config = test_config();
+    config.metrics.scrape_token = Some("scrape-secret".to_string());
+    let base = spawn(test_state_with(config).await).await;
+    assert_eq!(get(base.clone(), None).await, 401);
+    assert_eq!(get(base.clone(), Some("wrong")).await, 401);
+    assert_eq!(get(base, Some("scrape-secret")).await, 200);
+}

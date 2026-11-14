@@ -262,6 +262,20 @@ pub async fn run_admin_server(
 ) -> Result<(), std::io::Error> {
     tracing::info!("Starting admin API server on {}", addr);
     let app = build_router(state.clone());
+    {
+        let config = state.config.load();
+        if handlers::metrics::metrics_exposed_without_auth(
+            &config.server.admin_bind,
+            config.metrics.scrape_token.as_deref(),
+        ) {
+            tracing::warn!(
+                "/metrics is unauthenticated and the admin API is bound to {} (non-loopback): \
+                 operational metrics are readable by anyone who can reach it. Set \
+                 [metrics] scrape_token (or PROXY__METRICS__SCRAPE_TOKEN) to require a bearer token.",
+                config.server.admin_bind
+            );
+        }
+    }
 
     tracing::info!(
         "Admin API listening on {} with {} routes (health, metrics, login, stats, connections, tunnels, users, quota, config)",

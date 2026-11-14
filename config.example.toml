@@ -76,6 +76,10 @@ access_log_path = "access.log"
 enabled = true
 prometheus_path = "/metrics"
 update_interval = 10
+# Optional bearer token required to scrape /metrics (Prometheus
+# `authorization: { credentials: ... }`). Unset = unauthenticated; only safe
+# when the admin API is bound to loopback / a private network.
+# scrape_token = "REPLACE_WITH_RANDOM_TOKEN"
 
 [admin]
 enabled = true
