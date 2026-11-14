@@ -60,6 +60,85 @@ mod migration_tests {
         m.run(pool).await.unwrap();
     }
 
+    /// #36: migration 021 rebuilds the user-owned tables with ON DELETE
+    /// CASCADE, keeps their rows and id high-water marks, and keeps actor /
+    /// history references blocking.
+    #[tokio::test]
+    async fn migration_021_cascades_user_owned_rows() {
+        let pool = create_pool("sqlite::memory:", 1).await.unwrap();
+        migrate_up_to(&pool, 20).await;
+        for stmt in [
+            "INSERT INTO users (id, username, password_hash, role, created_at, updated_at) VALUES (1,'admin','h','admin',0,0),(2,'u','h','user',0,0)",
+            "INSERT INTO user_groups (id, name) VALUES (1,'g')",
+            "INSERT INTO user_group_members (user_id, group_id) VALUES (2,1)",
+            "INSERT INTO sessions (id, user_id, token_hash, created_at, expires_at) VALUES (5,2,'t5',0,9)",
+            // Deleted row: the AUTOINCREMENT high-water mark must survive.
+            "INSERT INTO sessions (id, user_id, token_hash, created_at, expires_at) VALUES (9,2,'t9',0,9)",
+            "DELETE FROM sessions WHERE id = 9",
+            "INSERT INTO api_keys (user_id, key_hash, key_prefix, name, created_at) VALUES (2,'k','p','n',0)",
+            "INSERT INTO approvals (user_id, client_ip, approved_by, approved_at, expires_at, approval_duration_hours) VALUES (2,'1.2.3.4',1,0,9,1)",
+            "INSERT INTO approval_requests (user_id, client_ip, duration_hours, requested_at, decided_by) VALUES (2,'1.2.3.4',1,0,1)",
+        ] {
+            sqlx::query(stmt).execute(&pool).await.unwrap();
+        }
+
+        run_migrations(&pool).await.unwrap();
+
+        let count = |t: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query(&format!("SELECT COUNT(*) FROM {t}"))
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+                    .get::<i64, _>(0)
+            }
+        };
+        for t in [
+            "sessions",
+            "api_keys",
+            "user_group_members",
+            "approvals",
+            "approval_requests",
+        ] {
+            assert_eq!(count(t).await, 1, "{t} rows must survive the rebuild");
+        }
+        let fk_violations = sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert!(fk_violations.is_empty());
+
+        // Ids are not reused after the rebuild.
+        let new_id = sqlx::query("INSERT INTO sessions (user_id, token_hash, created_at, expires_at) VALUES (2,'t10',0,9)")
+            .execute(&pool)
+            .await
+            .unwrap()
+            .last_insert_rowid();
+        assert_eq!(new_id, 10);
+
+        // The admin is referenced as an actor: hard delete stays blocked.
+        assert!(sqlx::query("DELETE FROM users WHERE id = 1")
+            .execute(&pool)
+            .await
+            .is_err());
+
+        // Hard-deleting the subject user removes everything owned by them.
+        sqlx::query("DELETE FROM users WHERE id = 2")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for t in [
+            "sessions",
+            "api_keys",
+            "user_group_members",
+            "approvals",
+            "approval_requests",
+        ] {
+            assert_eq!(count(t).await, 0, "{t} rows must cascade");
+        }
+    }
+
     /// #35: migration 020 folds `bandwidth_limit_mb` into
     /// `monthly_bandwidth_quota` without changing anyone's effective quota.
     #[tokio::test]
