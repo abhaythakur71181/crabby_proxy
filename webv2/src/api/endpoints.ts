@@ -96,7 +96,7 @@ export const issueLiveTicket = () => post<LiveTicketResponse>("/api/connections/
 
 // ── Tunnels ──
 export const listTunnels = () => get<TunnelsListResponse>("/api/tunnels");
-export const createTunnel = (body: { service_type: string; port?: number; target_addr?: string }) =>
+export const createTunnel = (body: { service_type: string; port?: number; target_addr: string }) =>
   post<TunnelInfo>("/api/tunnels", body);
 export const closeTunnel = (port: number) => del<void>(`/api/tunnels/${port}`);
 
