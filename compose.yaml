@@ -34,11 +34,17 @@ services:
       CRABBY_ADMIN_PASSWORD: ${CRABBY_ADMIN_PASSWORD:?set CRABBY_ADMIN_PASSWORD in .env}
       CRABBY_BASIC_AUTH_PASSWORD: ${CRABBY_BASIC_AUTH_PASSWORD:?set CRABBY_BASIC_AUTH_PASSWORD in .env}
       RUST_LOG: ${RUST_LOG:-info}
+      # /metrics: the admin API binds 0.0.0.0 inside the container, so
+      # Prometheus must send this as a bearer token (it answers 403 without
+      # one). ALLOW_UNAUTHENTICATED=true drops the token requirement; use it
+      # only when the admin port is otherwise restricted.
+      PROXY__METRICS__SCRAPE_TOKEN: ${CRABBY_METRICS_SCRAPE_TOKEN:-}
+      PROXY__METRICS__ALLOW_UNAUTHENTICATED: ${CRABBY_METRICS_ALLOW_UNAUTHENTICATED:-false}
 
     ports:
       - "${PROXY_PORT:-8080}:8080"
       # Admin API + /metrics bind to localhost on the host by default — the
-      # admin surface and unauthenticated /metrics must not be world-reachable.
+      # admin surface must not be world-reachable.
       # Override ADMIN_BIND_HOST=0.0.0.0 only behind a firewall / private net.
       - "${ADMIN_BIND_HOST:-127.0.0.1}:${ADMIN_PORT:-8081}:8081"
 

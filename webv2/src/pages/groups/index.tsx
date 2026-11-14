@@ -6,8 +6,8 @@ import { useNavigate } from "react-router";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { createGroup } from "@/api/endpoints";
-import type { UserGroupWithCount } from "@/api/types";
 import { formatRelative } from "@/lib/format";
+import { groupPolicyChips } from "@/lib/groups";
 import { keys, useGroups, useInvalidate } from "@/hooks/queries";
 import { Stagger, StaggerItem } from "@/components/motion";
 import { Modal } from "@/components/ui/dialog";
@@ -16,18 +16,6 @@ import { Panel } from "@/components/ui/card";
 import { Field, Input, Textarea } from "@/components/ui/input";
 import { Pill } from "@/components/ui/badge";
 import { EmptyState, ErrorState, Skeleton } from "@/components/ui/states";
-
-export function groupPolicyChips(g: UserGroupWithCount | Omit<UserGroupWithCount, "member_count">) {
-  const chips: string[] = [];
-  if (g.max_connections != null) chips.push(`${g.max_connections} conns`);
-  if (g.bandwidth_limit_mb != null) chips.push(`${g.bandwidth_limit_mb} MB`);
-  if (g.rate_limit_rps != null) chips.push(`${g.rate_limit_rps} rps`);
-  if (g.allowed_protocols) chips.push("protocols");
-  if (g.allowed_targets) chips.push("allow-list");
-  if (g.blocked_targets) chips.push("block-list");
-  if (g.access_schedule) chips.push("schedule");
-  return chips;
-}
 
 export function GroupsPage() {
   const groups = useGroups();

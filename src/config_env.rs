@@ -203,7 +203,7 @@ fn enforce_password_strength(field: &str, env_var: &str, password: &str, allow_w
 
 /// True if a bind address (`ip:port` or `localhost:port`) only listens on
 /// loopback. Anything unparseable counts as exposed.
-fn is_loopback_bind(bind: &str) -> bool {
+pub(crate) fn is_loopback_bind(bind: &str) -> bool {
     if let Ok(addr) = bind.parse::<std::net::SocketAddr>() {
         return addr.ip().is_loopback();
     }
@@ -425,25 +425,27 @@ mod tests {
     }
 
     #[test]
-    fn test_template_config_ships_no_placeholder_credentials() {
-        // The committed template must not ship usable placeholder secrets:
-        // empty means "disabled" (passwords) / "auto-generate" (JWT secret).
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/crabby-proxy.toml.g");
-        let text = std::fs::read_to_string(path).unwrap();
-        let v: toml::Value = toml::from_str(&text).unwrap();
-        for (section, key) in [
-            ("authentication", "password"),
-            ("authentication", "jwt_secret"),
-            ("admin", "admin_password"),
-        ] {
-            assert_eq!(
-                v[section][key].as_str(),
-                Some(""),
-                "{}.{} must be empty in the template",
-                section,
-                key
+    fn test_example_config_ships_no_usable_credentials() {
+        // config.example.toml is the only shipped template (the Dockerfile
+        // copies it to /app/config.toml). Its credentials must be empty
+        // ("disabled" / "auto-generate") or placeholders that the startup
+        // checks reject, never values that would be accepted as-is.
+        let raw = include_str!("../config.example.toml");
+        let v: toml::Value = toml::from_str(raw).unwrap();
+        for (section, key) in [("authentication", "password"), ("admin", "admin_password")] {
+            let value = v[section][key].as_str().unwrap_or("");
+            assert!(
+                value.is_empty() || config_password_weakness(value).is_some(),
+                "{section}.{key} in config.example.toml must be empty or a rejected placeholder"
             );
         }
+    }
+
+    #[test]
+    fn test_example_config_deserializes() {
+        // The shipped template must stay in sync with the Config struct.
+        let raw = include_str!("../config.example.toml");
+        toml::from_str::<Config>(raw).expect("config.example.toml must deserialize into Config");
     }
 
     #[test]

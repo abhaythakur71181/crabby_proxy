@@ -304,11 +304,16 @@ pub struct MetricsConfig {
     pub enabled: bool,
     pub prometheus_path: String,
     pub update_interval: u64,
-    /// Bearer token required to scrape `/metrics`. Unset (default) keeps the
-    /// endpoint unauthenticated, which is only safe on a loopback / private
-    /// admin bind; the server warns at boot otherwise.
+    /// Bearer token required to scrape `/metrics`. When unset, `/metrics` is
+    /// served without credentials only if the admin API is bound to loopback
+    /// (or `allow_unauthenticated` is set); otherwise it answers 403.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scrape_token: Option<String>,
+    /// Explicit opt-out: serve `/metrics` without a token even on a
+    /// non-loopback admin bind. Only for networks where the admin port is
+    /// already restricted (firewall / private network).
+    #[serde(default)]
+    pub allow_unauthenticated: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -341,7 +346,25 @@ pub struct AdvancedConfig {
     #[serde(default)]
     pub pool_max_idle_per_host: usize,
     pub http2_enabled: bool,
+    /// Upper bound (seconds) on how long a DNS answer is cached; the record's
+    /// own TTL is used when shorter. 0 disables DNS caching entirely.
     pub dns_cache_ttl: u64,
+    /// Lower bound (seconds) on how long a positive DNS answer is cached, so
+    /// 0-TTL records don't force a lookup per connection.
+    #[serde(default = "default_dns_cache_min_ttl")]
+    pub dns_cache_min_ttl: u64,
+    /// Upper bound (seconds) for caching NXDOMAIN / no-record answers (the
+    /// zone's negative TTL is used when shorter). 0 disables negative caching.
+    #[serde(default = "default_dns_negative_cache_ttl")]
+    pub dns_negative_cache_ttl: u64,
+}
+
+fn default_dns_cache_min_ttl() -> u64 {
+    5
+}
+
+fn default_dns_negative_cache_ttl() -> u64 {
+    5
 }
 
 impl Config {
@@ -480,6 +503,7 @@ impl Default for Config {
                 prometheus_path: "/metrics".to_string(),
                 update_interval: 10,
                 scrape_token: None,
+                allow_unauthenticated: false,
             },
             admin: AdminConfig {
                 enabled: true,
@@ -497,6 +521,8 @@ impl Default for Config {
                 pool_max_idle_per_host: 10,
                 http2_enabled: false,
                 dns_cache_ttl: 300,
+                dns_cache_min_ttl: default_dns_cache_min_ttl(),
+                dns_negative_cache_ttl: default_dns_negative_cache_ttl(),
             },
         }
     }

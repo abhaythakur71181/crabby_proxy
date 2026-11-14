@@ -457,3 +457,28 @@ async fn metrics_scrape_token() {
     assert_eq!(get(base.clone(), Some("wrong")).await, 401);
     assert_eq!(get(base, Some("scrape-secret")).await, 200);
 }
+
+/// #22: secure by default. A non-loopback admin bind without a scrape token
+/// refuses to serve /metrics unless explicitly opted out.
+#[tokio::test]
+async fn metrics_refused_on_exposed_bind_without_token() {
+    let status = |base: String| async move {
+        client()
+            .get(format!("{base}/metrics"))
+            .send()
+            .await
+            .unwrap()
+            .status()
+    };
+
+    // The handler decides by the configured bind; the test server itself
+    // still listens on loopback.
+    let mut config = test_config();
+    config.server.admin_bind = "0.0.0.0:8081".to_string();
+    let refused = spawn(test_state_with(config.clone()).await).await;
+    assert_eq!(status(refused).await, 403);
+
+    config.metrics.allow_unauthenticated = true;
+    let opted_out = spawn(test_state_with(config).await).await;
+    assert_eq!(status(opted_out).await, 200);
+}

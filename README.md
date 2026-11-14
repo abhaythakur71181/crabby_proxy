@@ -115,7 +115,24 @@ One instance (`backend = "memory"`) is the default and needs nothing else. Sever
 
 ### Metrics (Prometheus)
 
-Exposed at `GET /metrics` in Prometheus text format:
+Exposed at `GET /metrics` on the admin port in Prometheus text format.
+
+Access is secure by default:
+
+- With `[metrics] scrape_token` set (or `PROXY__METRICS__SCRAPE_TOKEN`), the
+  scraper must send `Authorization: Bearer <token>`. In Prometheus:
+  `authorization: { credentials: <token> }`.
+- Without a token, `/metrics` is served only when `server.admin_bind` is a
+  loopback address. On any other bind (including `0.0.0.0` in the Docker
+  image) it answers `403` unless `[metrics] allow_unauthenticated = true`,
+  which is meant for an admin port that a firewall or private network
+  already restricts.
+
+> **Breaking change:** before this, `/metrics` was served without
+> credentials on every bind. Deployments that scrape a non-loopback admin
+> bind (the Docker image binds `0.0.0.0:8081` inside the container) must set
+> `scrape_token` (recommended) or `allow_unauthenticated = true`.
+
 
 | Metric | Type | Labels |
 |--------|------|--------|

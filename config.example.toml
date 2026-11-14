@@ -131,10 +131,14 @@ access_log_path = "access.log"
 enabled = true
 prometheus_path = "/metrics"
 update_interval = 10
-# Optional bearer token required to scrape /metrics (Prometheus
-# `authorization: { credentials: ... }`). Unset = unauthenticated; only safe
-# when the admin API is bound to loopback / a private network.
+# Bearer token required to scrape /metrics (Prometheus
+# `authorization: { credentials: ... }`). Also settable via
+# PROXY__METRICS__SCRAPE_TOKEN.
+# Without a token, /metrics is served only when the admin API is bound to
+# loopback; on any other bind it answers 403 unless allow_unauthenticated is
+# set (only for an admin port restricted by firewall / private network).
 # scrape_token = "REPLACE_WITH_RANDOM_TOKEN"
+# allow_unauthenticated = false
 
 [admin]
 enabled = true
@@ -154,4 +158,12 @@ buffer_size = 8192
 connection_pooling = false
 pool_max_idle_per_host = 10
 http2_enabled = false
+# DNS answers are cached for the record's own TTL, clamped to
+# [dns_cache_min_ttl, dns_cache_ttl] seconds. dns_cache_ttl = 0 disables
+# caching. Lookups use /etc/resolv.conf and /etc/hosts; if no resolver config
+# can be read (or the nameservers are unreachable) the libc resolver is used.
 dns_cache_ttl = 300
+dns_cache_min_ttl = 5
+# NXDOMAIN / no-record answers are cached for at most this many seconds
+# (0 disables negative caching).
+dns_negative_cache_ttl = 5

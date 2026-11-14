@@ -76,8 +76,10 @@ behind each decision.
 ## Deployment
 
 - Single binary; `docker compose` ships the proxy + nginx-served SPA.
-- Admin port (admin API + unauthenticated `/metrics`) binds to `127.0.0.1` on
-  the host by default — override `ADMIN_BIND_HOST` only behind a firewall.
+- Admin port (admin API + `/metrics`) binds to `127.0.0.1` on the host by
+  default — override `ADMIN_BIND_HOST` only behind a firewall. `/metrics`
+  requires `[metrics] scrape_token` on any non-loopback bind (403 otherwise)
+  unless `[metrics] allow_unauthenticated = true`.
 - Secrets via env (`CRABBY_JWT_SECRET`, `CRABBY_ADMIN_PASSWORD`,
   `CRABBY_BASIC_AUTH_PASSWORD`); the process refuses to boot with a weak JWT
   secret or default passwords (override with `CRABBY_ALLOW_DEFAULT_PASSWORDS=1`

@@ -81,6 +81,21 @@ impl KeySpace {
         pipe
     }
 
+    /// Push back the expiry of a live record and its index sets (#46).
+    fn refresh_connection_pipe(&self, id: Uuid, user_id: Option<i64>) -> redis::Pipeline {
+        let mut pipe = redis::pipe();
+        pipe.atomic()
+            .expire(self.conn_key(id), CONN_TTL_SECS as i64)
+            .ignore()
+            .expire(self.connections_set(), CONN_INDEX_TTL_SECS)
+            .ignore();
+        if let Some(uid) = user_id {
+            pipe.expire(self.user_conns_set(uid), CONN_INDEX_TTL_SECS)
+                .ignore();
+        }
+        pipe
+    }
+
     /// Remove a connection record and its index entries, all-or-nothing.
     fn delete_connection_pipe(&self, id: Uuid, user_id: Option<i64>) -> redis::Pipeline {
         let id_str = id.to_string();
@@ -245,6 +260,24 @@ impl StateBackend for RedisBackend {
             .await
     }
 
+    fn connection_record_ttl(&self) -> Option<std::time::Duration> {
+        Some(std::time::Duration::from_secs(CONN_TTL_SECS))
+    }
+
+    async fn refresh_connection(&self, id: Uuid) -> StateResult<()> {
+        // NotFound here means the record is already gone (deleted by an admin
+        // terminate, or expired during a long Redis outage); nothing to extend.
+        let user_id = self.get_connection(id).await?.user_id;
+        let mut conn = self.conn.clone();
+        let _: () = self
+            .keys
+            .refresh_connection_pipe(id, user_id)
+            .query_async(&mut conn)
+            .await
+            .map_err(redis_err)?;
+        Ok(())
+    }
+
     async fn get_pending(&self, id: Uuid) -> StateResult<ConnectionRequest> {
         let mut conn = self.conn.clone();
         let data: Option<String> = conn
@@ -366,6 +399,11 @@ mod tests {
         );
 
         assert_eq!(
+            cmds(&ks.refresh_connection_pipe(id, Some(7))),
+            vec!["MULTI", "EXPIRE", "EXPIRE", "EXPIRE", "EXEC"]
+        );
+        assert!(packed(&ks.refresh_connection_pipe(id, Some(7))).contains("t:user_conns:7"));
+        assert_eq!(
             cmds(&ks.delete_connection_pipe(id, Some(7))),
             vec!["MULTI", "SREM", "DEL", "SREM", "EXEC"]
         );
@@ -407,10 +445,66 @@ mod tests {
         let ttl: i64 = conn.ttl(backend.keys.user_conns_set(9)).await.unwrap();
         assert!(ttl > 0 && ttl <= CONN_INDEX_TTL_SECS);
 
+        // A refresh pushes the record's expiry back to the full TTL (#46).
+        let _: () = conn.expire(backend.keys.conn_key(id), 5).await.unwrap();
+        backend.refresh_connection(id).await.unwrap();
+        let ttl: i64 = conn.ttl(backend.keys.conn_key(id)).await.unwrap();
+        assert!(ttl > 5 && ttl <= CONN_TTL_SECS as i64);
+
         backend.delete_connection(id).await.unwrap();
         assert_eq!(backend.count_connections().await.unwrap(), 0);
         assert_eq!(backend.count_user_connections(9).await.unwrap(), 0);
         assert!(backend.get_connection(id).await.is_err());
+    }
+
+    /// #46 against a real server: reserve-then-count never admits more than
+    /// `max` concurrent connections for one user (skipped without Redis).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reserve_then_count_never_overshoots_on_redis() {
+        use crate::proxy::validators::exceeds_connection_limit;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let Ok(url) = std::env::var("CRABBY_TEST_REDIS_URL") else {
+            return;
+        };
+        const MAX: usize = 3;
+        let prefix = format!("crabby-test-{}", Uuid::new_v4());
+        let backend = Arc::new(RedisBackend::new(&url, prefix).await.unwrap());
+        let admitted_now = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for i in 0..60u16 {
+            let (backend, admitted_now, peak) =
+                (backend.clone(), admitted_now.clone(), peak.clone());
+            tasks.push(tokio::spawn(async move {
+                let id = Uuid::new_v4();
+                let info = ConnectionInfo {
+                    id,
+                    client_addr: ([127, 0, 0, 1], 2000 + i).into(),
+                    target_addr: "example.com:443".into(),
+                    protocol: crate::proxy::protocol::ProxyProtocol::SOCKS5,
+                    state: crate::connection::ConnectionState::Active,
+                    user_id: Some(11),
+                    bytes_sent: 0,
+                    bytes_received: 0,
+                    created_at: 0,
+                };
+                backend.set_connection(id, info).await.unwrap();
+                let count = backend.count_user_connections(11).await.unwrap();
+                if !exceeds_connection_limit(count, MAX) {
+                    let now = admitted_now.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                    admitted_now.fetch_sub(1, Ordering::SeqCst);
+                }
+                backend.delete_connection(id).await.unwrap();
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+        assert!(peak.load(Ordering::SeqCst) <= MAX);
+        assert_eq!(backend.count_user_connections(11).await.unwrap(), 0);
     }
 
     #[test]

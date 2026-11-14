@@ -9,6 +9,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege: every job gets a read-only token unless it asks for more.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -42,6 +46,11 @@ jobs:
   audit:
     name: Supply-chain — cargo audit
     runs-on: ubuntu-latest
+    # audit-check publishes its report as a check run. Job-level permissions
+    # replace the workflow-level block, so contents: read is restated.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
@@ -75,6 +84,10 @@ jobs:
   secrets:
     name: Secret scan — gitleaks
     runs-on: ubuntu-latest
+    # gitleaks-action lists the PR's commits through the API to scan them.
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -84,7 +97,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   webv2:
-    name: Web (v2) — typecheck, test, build
+    name: Web (v2) — lint, typecheck, test, build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -93,9 +106,12 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: latest
+          # Keep in step with the bun that writes webv2/bun.lock.
+          bun-version: 1.4.4
       - name: Install
         run: bun install --frozen-lockfile
+      - name: Lint
+        run: bun run lint
       - name: Typecheck
         run: bun run typecheck
       - name: Test
