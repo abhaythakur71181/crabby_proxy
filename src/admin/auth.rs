@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use crate::app_state::AppState;
 use crate::auth::jwt;
+use crate::db::models::Role;
 use crate::db::users;
 
 pub async fn auth_middleware(
@@ -193,7 +194,72 @@ pub struct CurrentUser {
     pub role: String,
 }
 
+/// Authorize `caller` acting on credentials / sessions of another account
+/// (`target_id` with `target_role`). This is the single gate for any action
+/// that would let the caller obtain or control a credential for the target
+/// (API keys, sessions):
+///
+/// - anyone may act on themselves;
+/// - root_admin may act on anyone;
+/// - admin may act only on regular users (never on another admin or on
+///   root_admin, otherwise an admin could mint a key for root_admin and
+///   impersonate it);
+/// - a regular user may not act on anyone else.
+pub fn authorize_admin_target(
+    caller_id: i64,
+    caller_role: &Role,
+    target_id: i64,
+    target_role: &Role,
+) -> Result<(), String> {
+    if caller_id == target_id {
+        return Ok(());
+    }
+    match caller_role {
+        Role::RootAdmin => Ok(()),
+        Role::Admin if *target_role == Role::User => Ok(()),
+        Role::Admin => Err("Admins can only manage regular users".to_string()),
+        Role::User => Err("Cannot manage other users".to_string()),
+    }
+}
+
+fn parse_role(role: &str) -> Role {
+    match role {
+        "root_admin" => Role::RootAdmin,
+        "admin" => Role::Admin,
+        _ => Role::User,
+    }
+}
+
 impl CurrentUser {
+    /// Parsed role. Unknown role strings degrade to the least-privileged role.
+    pub fn role_enum(&self) -> Role {
+        parse_role(&self.role)
+    }
+
+    /// Resolve `target_id` and apply [`authorize_admin_target`]. Returns 404
+    /// for an unknown target, 403 when the caller may not manage it.
+    pub async fn authorize_target(
+        &self,
+        state: &AppState,
+        target_id: i64,
+    ) -> Result<(), super::handlers::models::ApiError> {
+        use super::handlers::models::ApiError;
+        if target_id == self.id {
+            return Ok(());
+        }
+        let target = state
+            .cached_user_role(target_id)
+            .await
+            .ok_or_else(|| ApiError::not_found(format!("User {} not found", target_id)))?;
+        authorize_admin_target(
+            self.id,
+            &self.role_enum(),
+            target_id,
+            &parse_role(&target.role),
+        )
+        .map_err(ApiError::forbidden)
+    }
+
     /// Check if user can access another user's data
     pub fn can_access_user(&self, target_user_id: i64) -> bool {
         // Admins can access all users
@@ -338,6 +404,42 @@ mod tests {
         assert!(!user.can_access_user(1));
         assert!(!user.can_access_user(11));
         assert!(!user.can_access_user(999));
+    }
+
+    // === authorize_admin_target (privilege-escalation gate, #16) ===
+
+    #[test]
+    fn test_admin_target_matrix() {
+        use Role::*;
+        // self is always allowed
+        for r in [RootAdmin, Admin, User] {
+            assert!(authorize_admin_target(5, &r, 5, &r).is_ok());
+        }
+        // root_admin may target anyone
+        for t in [RootAdmin, Admin, User] {
+            assert!(authorize_admin_target(1, &RootAdmin, 2, &t).is_ok());
+        }
+        // admin may target only regular users
+        assert!(authorize_admin_target(2, &Admin, 3, &User).is_ok());
+        assert!(authorize_admin_target(2, &Admin, 1, &RootAdmin).is_err());
+        assert!(authorize_admin_target(2, &Admin, 4, &Admin).is_err());
+        // a regular user may not target anyone else
+        for t in [RootAdmin, Admin, User] {
+            assert!(authorize_admin_target(3, &User, 9, &t).is_err());
+        }
+    }
+
+    #[test]
+    fn test_role_enum_parsing() {
+        assert_eq!(root_admin_user().role_enum(), Role::RootAdmin);
+        assert_eq!(admin_user().role_enum(), Role::Admin);
+        assert_eq!(regular_user(3).role_enum(), Role::User);
+        let odd = CurrentUser {
+            id: 1,
+            username: "x".into(),
+            role: "superuser".into(),
+        };
+        assert_eq!(odd.role_enum(), Role::User);
     }
 
     // === require_admin Tests ===

@@ -2,6 +2,7 @@ use super::models::{
     ApiError, ApiKeyResponse, CreateApiKeyRequest, CreateApiKeyResponse, UpdateUserRequest,
     UserResponse,
 };
+use crate::admin::auth::CurrentUser;
 use crate::app_state::AppState;
 use crate::db::{api_keys_crud, models::Role, users};
 use axum::{
@@ -254,41 +255,29 @@ pub async fn delete_user(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Create API key for user
+/// Create API key for user.
+///
+/// Authorization goes through `authorize_target`: a caller may create keys for
+/// itself; root_admin for anyone; admin only for regular users. Previously any
+/// admin could mint a working key for root_admin (or another admin) and
+/// impersonate it on the proxy data plane.
 pub async fn create_api_key(
+    current_user: CurrentUser,
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
-    Extension(current_user_id): Extension<i64>,
     Json(request): Json<CreateApiKeyRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    // Extract fields from request immediately to avoid holding non-Send types across .await
-    let req_name = request.name;
-    let req_expires = request.expires_in_days;
+    current_user.authorize_target(&state, user_id).await?;
 
-    let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
-        .await?
-        .ok_or_else(|| ApiError::unauthorized("Invalid session"))?;
-
-    // Allow if creating for self or if admin+
-    let is_self = current_user_id == user_id;
-    let is_admin_plus =
-        current_user.get_role() == Role::RootAdmin || current_user.get_role() == Role::Admin;
-
-    if !is_self && !is_admin_plus {
-        return Err(ApiError::forbidden(
-            "Cannot create API keys for other users",
-        ));
-    }
-
-    let name = if req_name.is_empty() {
+    let name = if request.name.is_empty() {
         None
     } else {
-        Some(req_name)
+        Some(request.name)
     };
-    let expires_in_days = if req_expires == 0 {
+    let expires_in_days = if request.expires_in_days == 0 {
         None
     } else {
-        Some(req_expires)
+        Some(request.expires_in_days)
     };
 
     let (plaintext_key, api_key) =
@@ -307,24 +296,13 @@ pub async fn create_api_key(
     Ok((StatusCode::CREATED, Json(response)))
 }
 
-/// List API keys for user
+/// List API keys for user (same target rules as creation).
 pub async fn list_api_keys(
+    current_user: CurrentUser,
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
-    Extension(current_user_id): Extension<i64>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
-        .await?
-        .ok_or_else(|| ApiError::unauthorized("Invalid session"))?;
-
-    // Allow if viewing own keys or if admin+
-    let is_self = current_user_id == user_id;
-    let is_admin_plus =
-        current_user.get_role() == Role::RootAdmin || current_user.get_role() == Role::Admin;
-
-    if !is_self && !is_admin_plus {
-        return Err(ApiError::forbidden("Cannot view other users' API keys"));
-    }
+    current_user.authorize_target(&state, user_id).await?;
 
     let keys = api_keys_crud::list_api_keys(&state.db_pool, user_id).await?;
 
@@ -333,22 +311,13 @@ pub async fn list_api_keys(
     Ok(Json(response))
 }
 
-/// Revoke API key
+/// Revoke API key (same target rules as creation).
 pub async fn revoke_api_key(
+    current_user: CurrentUser,
     State(state): State<Arc<AppState>>,
     Path((user_id, key_id)): Path<(i64, i64)>,
-    Extension(current_user_id): Extension<i64>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
-        .await?
-        .ok_or_else(|| ApiError::unauthorized("Invalid session"))?;
-    // Allow if revoking own key or if admin+
-    let is_self = current_user_id == user_id;
-    let is_admin_plus =
-        current_user.get_role() == Role::RootAdmin || current_user.get_role() == Role::Admin;
-    if !is_self && !is_admin_plus {
-        return Err(ApiError::forbidden("Cannot revoke other users' API keys"));
-    }
+    current_user.authorize_target(&state, user_id).await?;
     api_keys_crud::revoke_api_key(&state.db_pool, key_id, user_id)
         .await
         .map_err(|e| {

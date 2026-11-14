@@ -10,12 +10,9 @@ use tower_http::cors::{Any, CorsLayer};
 use super::handlers;
 use crate::app_state::AppState;
 
-pub async fn run_admin_server(
-    state: Arc<AppState>,
-    addr: SocketAddr,
-) -> Result<(), std::io::Error> {
-    tracing::info!("Starting admin API server on {}", addr);
-
+/// Build the admin API router (public + protected routes, auth middleware,
+/// CORS). Split out of `run_admin_server` so tests can drive the real stack.
+pub fn build_router(state: Arc<AppState>) -> Router {
     // Public routes (no auth required)
     let public_routes = Router::new()
         .route("/health", get(handlers::health::health_check))
@@ -248,11 +245,19 @@ pub async fn run_admin_server(
             .allow_credentials(true)
             .allow_origin(origins)
     };
-    let app = Router::new()
+    Router::new()
         .merge(public_routes)
         .merge(protected_routes)
         .layer(cors)
-        .with_state(state.clone());
+        .with_state(state)
+}
+
+pub async fn run_admin_server(
+    state: Arc<AppState>,
+    addr: SocketAddr,
+) -> Result<(), std::io::Error> {
+    tracing::info!("Starting admin API server on {}", addr);
+    let app = build_router(state.clone());
 
     tracing::info!(
         "Admin API listening on {} with {} routes (health, metrics, login, stats, connections, tunnels, users, quota, config)",
