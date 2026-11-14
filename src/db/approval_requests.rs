@@ -115,36 +115,115 @@ pub async fn reject_request(
     Ok(result.rows_affected() > 0)
 }
 
-/// List all requests (admin view, optionally filter by status)
+/// Approval request joined with the requesting user's username, so listings
+/// need no per-row user lookup (#25).
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+pub struct ApprovalRequestWithUser {
+    #[sqlx(flatten)]
+    #[serde(flatten)]
+    pub request: ApprovalRequest,
+    pub username: Option<String>,
+}
+
+const LIST_COLUMNS: &str = "r.id, r.user_id, r.client_ip, r.duration_hours, r.reason, r.status, r.requested_at, r.decided_by, r.decided_at, r.decision_reason, u.username";
+
+/// List all requests (admin view, optionally filter by status), newest first.
 pub async fn list_all_requests(
     pool: &SqlitePool,
     status_filter: Option<&str>,
-) -> Result<Vec<ApprovalRequest>, sqlx::Error> {
-    if let Some(status) = status_filter {
-        sqlx::query_as::<_, ApprovalRequest>(
-            "SELECT id, user_id, client_ip, duration_hours, reason, status, requested_at, decided_by, decided_at, decision_reason FROM approval_requests WHERE status = ? ORDER BY requested_at DESC",
-        )
-        .bind(status)
+    page: crate::db::Page,
+) -> Result<Vec<ApprovalRequestWithUser>, sqlx::Error> {
+    let sql = format!(
+        "SELECT {LIST_COLUMNS} FROM approval_requests r LEFT JOIN users u ON u.id = r.user_id \
+         WHERE (?1 IS NULL OR r.status = ?1) \
+         ORDER BY r.requested_at DESC, r.id DESC LIMIT ?2 OFFSET ?3"
+    );
+    sqlx::query_as::<_, ApprovalRequestWithUser>(&sql)
+        .bind(status_filter)
+        .bind(page.limit)
+        .bind(page.offset)
         .fetch_all(pool)
         .await
-    } else {
-        sqlx::query_as::<_, ApprovalRequest>(
-            "SELECT id, user_id, client_ip, duration_hours, reason, status, requested_at, decided_by, decided_at, decision_reason FROM approval_requests ORDER BY requested_at DESC",
-        )
-        .fetch_all(pool)
-        .await
-    }
 }
 
-/// List requests for a specific user
+/// List requests for a specific user, newest first.
 pub async fn list_user_requests(
     pool: &SqlitePool,
     user_id: i64,
-) -> Result<Vec<ApprovalRequest>, sqlx::Error> {
-    sqlx::query_as::<_, ApprovalRequest>(
-        "SELECT id, user_id, client_ip, duration_hours, reason, status, requested_at, decided_by, decided_at, decision_reason FROM approval_requests WHERE user_id = ? ORDER BY requested_at DESC",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
+    page: crate::db::Page,
+) -> Result<Vec<ApprovalRequestWithUser>, sqlx::Error> {
+    let sql = format!(
+        "SELECT {LIST_COLUMNS} FROM approval_requests r LEFT JOIN users u ON u.id = r.user_id \
+         WHERE r.user_id = ? ORDER BY r.requested_at DESC, r.id DESC LIMIT ? OFFSET ?"
+    );
+    sqlx::query_as::<_, ApprovalRequestWithUser>(&sql)
+        .bind(user_id)
+        .bind(page.limit)
+        .bind(page.offset)
+        .fetch_all(pool)
+        .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Page;
+
+    async fn setup() -> SqlitePool {
+        let pool = crate::db::create_pool("sqlite::memory:", 1).await.unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, role, created_at, updated_at) VALUES (1,'alice','h','user',0,0),(2,'bob','h','user',0,0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn listing_joins_username_and_paginates() {
+        let pool = setup().await;
+        for i in 0..5 {
+            let uid = if i % 2 == 0 { 1 } else { 2 };
+            create_request(&pool, uid, "10.0.0.1", 1, None)
+                .await
+                .unwrap();
+        }
+        reject_request(&pool, 1, 1, None).await.unwrap();
+
+        let all = list_all_requests(&pool, None, Page::default())
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 5);
+        for r in &all {
+            let expected = if r.request.user_id == 1 {
+                "alice"
+            } else {
+                "bob"
+            };
+            assert_eq!(r.username.as_deref(), Some(expected));
+        }
+
+        let pending = list_all_requests(&pool, Some("pending"), Page::default())
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 4);
+
+        let first = list_all_requests(&pool, None, Page::new(Some(2), Some(0)))
+            .await
+            .unwrap();
+        let second = list_all_requests(&pool, None, Page::new(Some(2), Some(2)))
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(second.len(), 2);
+        assert!(first
+            .iter()
+            .all(|a| second.iter().all(|b| a.request.id != b.request.id)));
+
+        let mine = list_user_requests(&pool, 2, Page::default()).await.unwrap();
+        assert_eq!(mine.len(), 2);
+        assert!(mine.iter().all(|r| r.username.as_deref() == Some("bob")));
+    }
 }

@@ -1,7 +1,7 @@
-use super::models::ApiError;
+use super::models::{ApiError, PageQuery};
 use crate::admin::auth::AdminUser;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
@@ -46,8 +46,9 @@ pub async fn create_group(
 pub async fn list_groups(
     _admin: AdminUser,
     State(state): State<Arc<AppState>>,
+    Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<groups::UserGroupWithCount>>, ApiError> {
-    groups::list_groups(&state.db_pool)
+    groups::list_groups(&state.db_pool, page.page())
         .await
         .map(Json)
         .map_err(|e| {
@@ -123,8 +124,9 @@ pub async fn list_members(
     _admin: AdminUser,
     State(state): State<Arc<AppState>>,
     Path(group_id): Path<i64>,
+    Query(page): Query<PageQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let members = groups::get_group_members(&state.db_pool, group_id)
+    let members = groups::get_group_members(&state.db_pool, group_id, page.page())
         .await
         .map_err(|e| {
             tracing::error!("Failed to list members: {}", e);
@@ -144,8 +146,9 @@ pub async fn list_user_groups(
     _admin: AdminUser,
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
+    Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<groups::UserGroup>>, ApiError> {
-    groups::get_user_groups(&state.db_pool, user_id)
+    groups::get_user_groups(&state.db_pool, user_id, page.page())
         .await
         .map(Json)
         .map_err(|e| {

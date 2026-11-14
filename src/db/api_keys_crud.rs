@@ -52,11 +52,17 @@ pub async fn create_api_key(
 }
 
 /// List all API keys for a user
-pub async fn list_api_keys(pool: &SqlitePool, user_id: i64) -> Result<Vec<ApiKey>, sqlx::Error> {
+pub async fn list_api_keys(
+    pool: &SqlitePool,
+    user_id: i64,
+    page: crate::db::Page,
+) -> Result<Vec<ApiKey>, sqlx::Error> {
     let keys = sqlx::query_as::<_, ApiKey>(
-        "SELECT * FROM api_keys WHERE user_id = ? ORDER BY created_at DESC",
+        "SELECT * FROM api_keys WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
     )
     .bind(user_id)
+    .bind(page.limit)
+    .bind(page.offset)
     .fetch_all(pool)
     .await?;
     Ok(keys)
@@ -226,7 +232,9 @@ mod tests {
     #[tokio::test]
     async fn test_list_api_keys_empty() {
         let pool = setup_test_db().await;
-        let keys = list_api_keys(&pool, 1).await.unwrap();
+        let keys = list_api_keys(&pool, 1, crate::db::Page::default())
+            .await
+            .unwrap();
         assert!(keys.is_empty());
     }
 
@@ -243,7 +251,9 @@ mod tests {
             .await
             .unwrap();
 
-        let keys = list_api_keys(&pool, 1).await.unwrap();
+        let keys = list_api_keys(&pool, 1, crate::db::Page::default())
+            .await
+            .unwrap();
         assert_eq!(keys.len(), 3);
     }
 
@@ -269,11 +279,15 @@ mod tests {
             .await
             .unwrap();
 
-        let user1_keys = list_api_keys(&pool, 1).await.unwrap();
+        let user1_keys = list_api_keys(&pool, 1, crate::db::Page::default())
+            .await
+            .unwrap();
         assert_eq!(user1_keys.len(), 1);
         assert_eq!(user1_keys[0].name, "user1key");
 
-        let user2_keys = list_api_keys(&pool, 2).await.unwrap();
+        let user2_keys = list_api_keys(&pool, 2, crate::db::Page::default())
+            .await
+            .unwrap();
         assert_eq!(user2_keys.len(), 1);
         assert_eq!(user2_keys[0].name, "user2key");
     }
@@ -289,7 +303,9 @@ mod tests {
 
         revoke_api_key(&pool, api_key.id, 1).await.unwrap();
 
-        let keys = list_api_keys(&pool, 1).await.unwrap();
+        let keys = list_api_keys(&pool, 1, crate::db::Page::default())
+            .await
+            .unwrap();
         let revoked = keys.iter().find(|k| k.id == api_key.id).unwrap();
         assert!(!revoked.is_active);
     }
@@ -305,7 +321,9 @@ mod tests {
         revoke_api_key(&pool, api_key.id, 999).await.unwrap();
 
         // Key should still be active
-        let keys = list_api_keys(&pool, 1).await.unwrap();
+        let keys = list_api_keys(&pool, 1, crate::db::Page::default())
+            .await
+            .unwrap();
         let key = keys.iter().find(|k| k.id == api_key.id).unwrap();
         assert!(key.is_active);
     }

@@ -73,13 +73,16 @@ pub async fn is_ip_approved(
 pub async fn list_user_approvals(
     pool: &SqlitePool,
     user_id: i64,
+    page: crate::db::Page,
 ) -> Result<Vec<ApprovalRecord>, sqlx::Error> {
     let now = chrono::Utc::now().timestamp();
     let rows = sqlx::query_as::<_, ApprovalRecord>(
-        "SELECT id, user_id, client_ip, approved_by, approved_at, expires_at, is_expired, is_terminated, terminated_by, terminated_at, termination_reason, reason, approval_duration_hours FROM approvals WHERE user_id = ? AND expires_at > ? AND is_terminated = 0 ORDER BY approved_at DESC",
+        "SELECT id, user_id, client_ip, approved_by, approved_at, expires_at, is_expired, is_terminated, terminated_by, terminated_at, termination_reason, reason, approval_duration_hours FROM approvals WHERE user_id = ? AND expires_at > ? AND is_terminated = 0 ORDER BY approved_at DESC, id DESC LIMIT ? OFFSET ?",
     )
     .bind(user_id)
     .bind(now)
+    .bind(page.limit)
+    .bind(page.offset)
     .fetch_all(pool)
     .await?;
 
@@ -87,12 +90,17 @@ pub async fn list_user_approvals(
 }
 
 /// List all active approvals (admin)
-pub async fn list_all_approvals(pool: &SqlitePool) -> Result<Vec<ApprovalRecord>, sqlx::Error> {
+pub async fn list_all_approvals(
+    pool: &SqlitePool,
+    page: crate::db::Page,
+) -> Result<Vec<ApprovalRecord>, sqlx::Error> {
     let now = chrono::Utc::now().timestamp();
     let rows = sqlx::query_as::<_, ApprovalRecord>(
-        "SELECT id, user_id, client_ip, approved_by, approved_at, expires_at, is_expired, is_terminated, terminated_by, terminated_at, termination_reason, reason, approval_duration_hours FROM approvals WHERE expires_at > ? AND is_terminated = 0 ORDER BY approved_at DESC",
+        "SELECT id, user_id, client_ip, approved_by, approved_at, expires_at, is_expired, is_terminated, terminated_by, terminated_at, termination_reason, reason, approval_duration_hours FROM approvals WHERE expires_at > ? AND is_terminated = 0 ORDER BY approved_at DESC, id DESC LIMIT ? OFFSET ?",
     )
     .bind(now)
+    .bind(page.limit)
+    .bind(page.offset)
     .fetch_all(pool)
     .await?;
 

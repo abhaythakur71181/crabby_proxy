@@ -74,6 +74,22 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// Optional `?limit=&offset=` query parameters accepted by list endpoints.
+/// Absent parameters fall back to `db::DEFAULT_LIST_LIMIT` / 0, and the limit is
+/// capped at `db::MAX_LIST_LIMIT`, so responses keep their original shape but
+/// are never unbounded (#32).
+#[derive(Debug, Default, Deserialize)]
+pub struct PageQuery {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+impl PageQuery {
+    pub fn page(&self) -> crate::db::Page {
+        crate::db::Page::new(self.limit, self.offset)
+    }
+}
+
 /// Whether a sqlx error is a UNIQUE / PRIMARY KEY constraint violation.
 pub fn is_unique_violation(e: &sqlx::Error) -> bool {
     e.as_database_error()

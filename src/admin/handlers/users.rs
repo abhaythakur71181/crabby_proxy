@@ -318,6 +318,7 @@ pub async fn list_api_keys(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
     Extension(current_user_id): Extension<i64>,
+    Query(page): Query<super::models::PageQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
         .await?
@@ -332,7 +333,7 @@ pub async fn list_api_keys(
         return Err(ApiError::forbidden("Cannot view other users' API keys"));
     }
 
-    let keys = api_keys_crud::list_api_keys(&state.db_pool, user_id).await?;
+    let keys = api_keys_crud::list_api_keys(&state.db_pool, user_id, page.page()).await?;
 
     let response: Vec<ApiKeyResponse> = keys.into_iter().map(ApiKeyResponse::from).collect();
 

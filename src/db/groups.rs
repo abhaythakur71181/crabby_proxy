@@ -93,10 +93,15 @@ pub async fn get_group(pool: &SqlitePool, id: i64) -> Result<Option<UserGroup>, 
 }
 
 /// List all groups with member counts
-pub async fn list_groups(pool: &SqlitePool) -> Result<Vec<UserGroupWithCount>, sqlx::Error> {
+pub async fn list_groups(
+    pool: &SqlitePool,
+    page: crate::db::Page,
+) -> Result<Vec<UserGroupWithCount>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT g.id, g.name, g.description, g.max_connections, g.bandwidth_limit_mb, g.rate_limit_rps, g.rate_limit_burst, g.allowed_protocols, g.allowed_targets, g.blocked_targets, g.access_schedule, g.created_at, g.updated_at, COUNT(m.user_id) as member_count FROM user_groups g LEFT JOIN user_group_members m ON g.id = m.group_id GROUP BY g.id ORDER BY g.name",
+        "SELECT g.id, g.name, g.description, g.max_connections, g.bandwidth_limit_mb, g.rate_limit_rps, g.rate_limit_burst, g.allowed_protocols, g.allowed_targets, g.blocked_targets, g.access_schedule, g.created_at, g.updated_at, COUNT(m.user_id) as member_count FROM user_groups g LEFT JOIN user_group_members m ON g.id = m.group_id GROUP BY g.id ORDER BY g.name LIMIT ? OFFSET ?",
     )
+    .bind(page.limit)
+    .bind(page.offset)
     .fetch_all(pool)
     .await?;
 
@@ -166,11 +171,14 @@ pub async fn remove_user_from_group(
 pub async fn get_user_groups(
     pool: &SqlitePool,
     user_id: i64,
+    page: crate::db::Page,
 ) -> Result<Vec<UserGroup>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT g.id, g.name, g.description, g.max_connections, g.bandwidth_limit_mb, g.rate_limit_rps, g.rate_limit_burst, g.allowed_protocols, g.allowed_targets, g.blocked_targets, g.access_schedule, g.created_at, g.updated_at FROM user_groups g INNER JOIN user_group_members m ON g.id = m.group_id WHERE m.user_id = ? ORDER BY g.name",
+        "SELECT g.id, g.name, g.description, g.max_connections, g.bandwidth_limit_mb, g.rate_limit_rps, g.rate_limit_burst, g.allowed_protocols, g.allowed_targets, g.blocked_targets, g.access_schedule, g.created_at, g.updated_at FROM user_groups g INNER JOIN user_group_members m ON g.id = m.group_id WHERE m.user_id = ? ORDER BY g.name LIMIT ? OFFSET ?",
     )
     .bind(user_id)
+    .bind(page.limit)
+    .bind(page.offset)
     .fetch_all(pool)
     .await?;
 
@@ -198,11 +206,14 @@ pub async fn get_user_groups(
 pub async fn get_group_members(
     pool: &SqlitePool,
     group_id: i64,
+    page: crate::db::Page,
 ) -> Result<Vec<GroupMemberDetail>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT u.id, u.username, u.role, m.added_at FROM user_group_members m INNER JOIN users u ON u.id = m.user_id WHERE m.group_id = ? ORDER BY m.added_at",
+        "SELECT u.id, u.username, u.role, m.added_at FROM user_group_members m INNER JOIN users u ON u.id = m.user_id WHERE m.group_id = ? ORDER BY m.added_at, u.id LIMIT ? OFFSET ?",
     )
     .bind(group_id)
+    .bind(page.limit)
+    .bind(page.offset)
     .fetch_all(pool)
     .await?;
     Ok(rows
