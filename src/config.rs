@@ -110,8 +110,18 @@ pub struct FeatureConfig {
     pub reverse_tunnels: bool,
     pub tunnel_port_start: u16,
     pub tunnel_port_end: u16,
+    // Must be https and (unless webhook_allow_private_targets) must not point
+    // at an internal / non-routable address (#58). Validated at startup.
     pub webhook_url: Option<String>,
     pub webhook_events: Vec<String>, // e.g. ["quota_exceeded", "rate_limit", "auth_failure"]
+    // Allow webhook_url to target private / loopback / link-local addresses
+    // (e.g. an in-cluster receiver). Off by default: SSRF guard.
+    #[serde(default)]
+    pub webhook_allow_private_targets: bool,
+    // Include per-connection PII (client IPs, destinations) in webhook
+    // payloads. Off by default: those keys are stripped before sending.
+    #[serde(default)]
+    pub webhook_include_pii: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -247,6 +257,15 @@ impl Config {
                 ));
             }
         }
+        if let Some(url) = self
+            .features
+            .webhook_url
+            .as_deref()
+            .filter(|u| !u.trim().is_empty())
+        {
+            crate::webhook::validate_webhook_url(url, self.features.webhook_allow_private_targets)
+                .map_err(|e| format!("features.webhook_url: {}", e))?;
+        }
         Ok(())
     }
 
@@ -309,6 +328,8 @@ impl Default for Config {
                 tunnel_port_end: 10999,
                 webhook_url: None,
                 webhook_events: vec![],
+                webhook_allow_private_targets: false,
+                webhook_include_pii: false,
             },
             state: StateConfig {
                 backend: "memory".to_string(),
@@ -469,6 +490,22 @@ mod tests {
         let err = config.validate_access_control().unwrap_err();
         assert!(err.contains("unknown rule 'ip_filter'"));
         config.filtering.admin_bypass_rules = vec![];
+        assert!(config.validate_access_control().is_ok());
+    }
+
+    #[test]
+    fn test_webhook_url_validated() {
+        let mut config = Config::default();
+        config.features.webhook_url = Some("http://hooks.example.com/x".into());
+        assert!(config.validate_access_control().is_err());
+        config.features.webhook_url = Some("https://169.254.169.254/".into());
+        assert!(config.validate_access_control().is_err());
+        config.features.webhook_allow_private_targets = true;
+        assert!(config.validate_access_control().is_ok());
+        config.features.webhook_url = Some("https://hooks.example.com/x".into());
+        config.features.webhook_allow_private_targets = false;
+        assert!(config.validate_access_control().is_ok());
+        config.features.webhook_url = Some(String::new());
         assert!(config.validate_access_control().is_ok());
     }
 

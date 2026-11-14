@@ -140,7 +140,7 @@ Exposed at `GET /metrics` in Prometheus text format:
 
 ### Alerting Webhooks
 
-- Configurable webhook URL for event notifications
+- Configurable webhook URL for event notifications (https only; internal targets refused unless `webhook_allow_private_targets`; client IPs / destinations stripped unless `webhook_include_pii`; redirects not followed)
 - Fire-and-forget delivery via `reqwest` with 5s timeout
 - Event filtering: `quota_exceeded`, `rate_limit`, `auth_failure`, etc.
 
