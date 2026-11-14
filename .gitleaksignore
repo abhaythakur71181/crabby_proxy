@@ -2,3 +2,5 @@
 # Dummy CRABBY_JWT_SECRET used only to satisfy compose's ${VAR:?} guard in the
 # CI compose-validation step; replaced with "x" in the following commit.
 fd59ddb4cded2772f962a4ad9a628273150f70ba:.github/workflows/ci.yml:generic-api-key:108
+# Test-only JWT signing key in an earlier PR #102 commit (now built at runtime).
+feaf935a1de2bbb6af65da0eb29716edf59e8e02:src/admin/test_support.rs:generic-api-key:16
