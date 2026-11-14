@@ -540,7 +540,9 @@ async fn handle_client(
             &*state.state,
             conn_id,
             ctx.conn_tracked,
-            async_handle_client_with_target(
+            // Boxed: the relay future is large, and keeping it inline in
+            // the wrapper overflowed the worker stack in debug builds.
+            Box::pin(async_handle_client_with_target(
                 &mut stream,
                 client_addr,
                 &mut protocol,
@@ -548,7 +550,7 @@ async fn handle_client(
                 state,
                 ctx.user_id,
                 ctx.admin_bypasses(super::pipeline::RULE_QUOTA),
-            ),
+            )),
         ) => r,
     };
     state.conn_cancel.remove(&conn_id);

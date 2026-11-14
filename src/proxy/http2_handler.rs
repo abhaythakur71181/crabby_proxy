@@ -123,14 +123,14 @@ pub async fn handle_h2_connection(
                     &*state_ref.state,
                     conn_id,
                     true,
-                    handle_h2_forward_validated(
+                    Box::pin(handle_h2_forward_validated(
                         request,
                         respond,
                         client_addr,
                         auth_header,
                         conn_id,
                         &state_ref,
-                    ),
+                    )),
                 )
                 .await;
                 // Drop the tracking record however the request ended. A
@@ -371,7 +371,7 @@ async fn handle_h2_connect_validated(
             &*state.state,
             conn_id,
             ctx.conn_tracked,
-            handle_h2_tunnel(
+            Box::pin(handle_h2_tunnel(
                 &authority,
                 client_addr,
                 host,
@@ -382,7 +382,7 @@ async fn handle_h2_connect_validated(
                 quota_tracker,
                 ctx.effective_uid(),
                 ctx.admin_bypasses(super::pipeline::RULE_QUOTA),
-            ),
+            )),
         ) => r,
     };
     state.conn_cancel.remove(&conn_id);
