@@ -71,12 +71,10 @@ pub async fn create_user(
     authorize_create_user(&current_user.get_role(), &request.role).map_err(ApiError::forbidden)?;
     crate::validation::validate_username(&request.username).map_err(ApiError::bad_request)?;
     crate::validation::validate_password(&request.password).map_err(ApiError::bad_request)?;
-    if let Ok(Some(_)) = users::get_user_by_username(&state.db_pool, &request.username).await {
-        return Err(ApiError::conflict(format!(
-            "Username '{}' already exists",
-            request.username
-        )));
-    }
+    // No pre-check: the UNIQUE(username) constraint is the single source of
+    // truth, so concurrent creates cannot both pass a check-then-insert race.
+    // A violation is mapped to 409 below.
+    let username = request.username.clone();
     let db_request = crate::db::models::CreateUserRequest {
         username: request.username,
         password: request.password,
@@ -88,7 +86,15 @@ pub async fn create_user(
         allowed_protocols: None,
         notes: None,
     };
-    let user_id = users::create_user(&state.db_pool, &db_request, Some(current_user_id)).await?;
+    let user_id = users::create_user(&state.db_pool, &db_request, Some(current_user_id))
+        .await
+        .map_err(|e| {
+            if super::models::is_unique_violation(&e) {
+                ApiError::conflict(format!("Username '{}' already exists", username))
+            } else {
+                ApiError::from(e)
+            }
+        })?;
     let user = users::get_user_by_id(&state.db_pool, user_id)
         .await?
         .ok_or_else(|| ApiError::internal("Failed to retrieve created user"))?;
@@ -314,6 +320,7 @@ pub async fn list_api_keys(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
     Extension(current_user_id): Extension<i64>,
+    Query(page): Query<super::models::PageQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let current_user = users::get_user_by_id(&state.db_pool, current_user_id)
         .await?
@@ -328,7 +335,7 @@ pub async fn list_api_keys(
         return Err(ApiError::forbidden("Cannot view other users' API keys"));
     }
 
-    let keys = api_keys_crud::list_api_keys(&state.db_pool, user_id).await?;
+    let keys = api_keys_crud::list_api_keys(&state.db_pool, user_id, page.page()).await?;
 
     let response: Vec<ApiKeyResponse> = keys.into_iter().map(ApiKeyResponse::from).collect();
 

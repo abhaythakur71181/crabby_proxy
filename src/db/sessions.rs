@@ -80,13 +80,16 @@ pub async fn get_session_by_token(
 pub async fn list_user_sessions(
     pool: &SqlitePool,
     user_id: i64,
+    page: crate::db::Page,
 ) -> Result<Vec<Session>, sqlx::Error> {
     let now = chrono::Utc::now().timestamp();
     let rows = sqlx::query(
-        "SELECT id, user_id, token_hash, created_at, expires_at, ip_address, user_agent FROM sessions WHERE user_id = ? AND expires_at > ? ORDER BY created_at DESC",
+        "SELECT id, user_id, token_hash, created_at, expires_at, ip_address, user_agent FROM sessions WHERE user_id = ? AND expires_at > ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
     )
     .bind(user_id)
     .bind(now)
+    .bind(page.limit)
+    .bind(page.offset)
     .fetch_all(pool)
     .await?;
     Ok(rows

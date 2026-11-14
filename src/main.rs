@@ -128,7 +128,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize database
     tracing::info!("Initializing database...");
-    let db_pool = db::create_pool(&config.database.path, config.database.max_connections).await?;
+    let db_pool = db::connection::create_pool_with(
+        &config.database.path,
+        db::connection::PoolSettings::from(&config.database),
+    )
+    .await?;
 
     // Run migrations
     tracing::info!("Running database migrations...");
@@ -189,6 +193,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "advanced.connection_pooling is set but ignored: upstream pooling was \
              removed (raw CONNECT/SOCKS tunnels cannot safely reuse sockets)"
         );
+    }
+
+    // Background: evict idle per-user quota trackers so the registry does not
+    // grow with every user ever seen (#30).
+    {
+        let trackers = state.quota_trackers.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(crate::quota_tracker::EVICT_SWEEP_INTERVAL).await;
+                let n = trackers.evict_idle(crate::quota_tracker::IDLE_EVICT_SECS);
+                if n > 0 {
+                    tracing::debug!("quota tracker sweep: evicted {} idle entries", n);
+                }
+            }
+        });
     }
 
     // Background: purge usage rows past the retention window (bounds PII growth).

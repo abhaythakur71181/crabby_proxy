@@ -140,6 +140,12 @@ scratch, run `sqlite3 restored.db "PRAGMA integrity_check; SELECT count(*) FROM 
 or boot a throwaway proxy container against it. An untested backup is not a
 backup.
 
+**Automatic pre-migration snapshot.** Before applying pending migrations to an
+existing database the proxy also writes a snapshot
+(`proxy.db.pre-migrate-<from>-to-<to>-<unix>.bak`) next to it; to roll back,
+stop the proxy, restore that file (removing `-wal`/`-shm`), and run the previous
+version. These snapshots are not pruned automatically. See ADR-0007.
+
 ## Monitoring
 
 - `/metrics` (Prometheus) on the admin port. Watch:

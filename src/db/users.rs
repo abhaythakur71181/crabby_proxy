@@ -7,6 +7,37 @@ use sqlx::SqlitePool;
 use super::models::{CreateUserRequest, Role, User};
 
 /// Create a new user
+/// Bytes per MiB, the unit of the API-facing `bandwidth_limit_mb` field.
+pub const MIB: i64 = 1024 * 1024;
+
+/// Convert an API `bandwidth_limit_mb` value into the canonical
+/// `monthly_bandwidth_quota` byte value (0 or negative = unlimited = NULL).
+pub fn mb_to_quota_bytes(mb: i64) -> Option<i64> {
+    (mb > 0).then(|| mb.saturating_mul(MIB))
+}
+
+/// Columns for a `User` row. `monthly_bandwidth_quota` (bytes) is the single
+/// stored quota (#35); `bandwidth_limit_mb` is derived from it, rounded up to
+/// whole MiB so a non-zero quota never reads back as 0 ("unlimited").
+///
+/// `password_hash` is deliberately NOT selected here (#36): only
+/// [`verify_password`] needs it, so ordinary reads (list pages, lookups,
+/// caches) never pull the hash into memory. The field is filled with "".
+const USER_COLUMNS_NO_HASH: &str = "id, username, '' AS password_hash, role, created_by, created_at, updated_at, is_active, \
+     max_connections, \
+     CAST((COALESCE(monthly_bandwidth_quota, 0) + 1048575) / 1048576 AS INTEGER) AS bandwidth_limit_mb, \
+     bandwidth_rate_bps, rate_limit_enabled, rate_limit_rps, rate_limit_burst, \
+     allowed_protocols, ip_whitelist, allowed_targets, blocked_targets, access_schedule, \
+     notes, last_login_at";
+
+/// Same as [`USER_COLUMNS_NO_HASH`] but including the real password hash.
+const USER_COLUMNS_WITH_HASH: &str = "id, username, password_hash, role, created_by, created_at, updated_at, is_active, \
+     max_connections, \
+     CAST((COALESCE(monthly_bandwidth_quota, 0) + 1048575) / 1048576 AS INTEGER) AS bandwidth_limit_mb, \
+     bandwidth_rate_bps, rate_limit_enabled, rate_limit_rps, rate_limit_burst, \
+     allowed_protocols, ip_whitelist, allowed_targets, blocked_targets, access_schedule, \
+     notes, last_login_at";
+
 pub async fn create_user(
     pool: &SqlitePool,
     request: &CreateUserRequest,
@@ -25,7 +56,7 @@ pub async fn create_user(
     };
 
     let max_connections = request.max_connections.unwrap_or(100);
-    let bandwidth_limit_mb = request.bandwidth_limit_mb.unwrap_or(1000);
+    let monthly_quota = mb_to_quota_bytes(request.bandwidth_limit_mb.unwrap_or(1000));
     let rate_limit_enabled = request.rate_limit_enabled.unwrap_or(true);
     let rate_limit_rps = request.rate_limit_rps.unwrap_or(10);
     let rate_limit_burst = rate_limit_rps * 2;
@@ -39,7 +70,7 @@ pub async fn create_user(
         r#"
         INSERT INTO users (
             username, password_hash, role, created_by, created_at, updated_at,
-            max_connections, bandwidth_limit_mb, rate_limit_enabled,
+            max_connections, monthly_bandwidth_quota, rate_limit_enabled,
             rate_limit_rps, rate_limit_burst, allowed_protocols, notes
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -52,7 +83,7 @@ pub async fn create_user(
     .bind(now)
     .bind(now)
     .bind(max_connections)
-    .bind(bandwidth_limit_mb)
+    .bind(monthly_quota)
     .bind(rate_limit_enabled)
     .bind(rate_limit_rps)
     .bind(rate_limit_burst)
@@ -64,38 +95,35 @@ pub async fn create_user(
     Ok(result.last_insert_rowid())
 }
 
-/// Get user by username
+/// Get user by username (without the password hash; see [`verify_password`]).
 pub async fn get_user_by_username(
     pool: &SqlitePool,
     username: &str,
 ) -> Result<Option<User>, sqlx::Error> {
-    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = ?")
+    let sql = format!("SELECT {USER_COLUMNS_NO_HASH} FROM users WHERE username = ?");
+    sqlx::query_as::<_, User>(&sql)
         .bind(username)
         .fetch_optional(pool)
-        .await?;
-
-    Ok(user)
+        .await
 }
 
 /// The (first, active) root_admin account. Config-file credentials resolve to
 /// this user. Looked up by role, since the bootstrap account is named "root"
 /// (see `ensure_root_admin`), not "root_admin".
 pub async fn get_root_admin(pool: &SqlitePool) -> Result<Option<User>, sqlx::Error> {
-    sqlx::query_as::<_, User>(
-        "SELECT * FROM users WHERE role = 'root_admin' AND is_active = 1 ORDER BY id LIMIT 1",
-    )
-    .fetch_optional(pool)
-    .await
+    let sql = format!(
+        "SELECT {USER_COLUMNS_NO_HASH} FROM users WHERE role = 'root_admin' AND is_active = 1 ORDER BY id LIMIT 1"
+    );
+    sqlx::query_as::<_, User>(&sql).fetch_optional(pool).await
 }
 
 /// Get user by ID
 pub async fn get_user_by_id(pool: &SqlitePool, id: i64) -> Result<Option<User>, sqlx::Error> {
-    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = ?")
+    let sql = format!("SELECT {USER_COLUMNS_NO_HASH} FROM users WHERE id = ?");
+    sqlx::query_as::<_, User>(&sql)
         .bind(id)
         .fetch_optional(pool)
-        .await?;
-
-    Ok(user)
+        .await
 }
 
 /// Verify user password.
@@ -112,9 +140,13 @@ pub async fn verify_password(
     username: &str,
     password: &str,
 ) -> Result<Option<User>, sqlx::Error> {
-    let user = get_user_by_username(pool, username).await?;
+    let sql = format!("SELECT {USER_COLUMNS_WITH_HASH} FROM users WHERE username = ?");
+    let user = sqlx::query_as::<_, User>(&sql)
+        .bind(username)
+        .fetch_optional(pool)
+        .await?;
 
-    let Some(user) = user else {
+    let Some(mut user) = user else {
         let _ = verify_password_hash(password, dummy_password_hash().await).await;
         return Ok(None);
     };
@@ -124,6 +156,8 @@ pub async fn verify_password(
     if needs_rehash(&user.password_hash) {
         upgrade_password_hash(pool, &user, password).await;
     }
+    // Callers only need the identity; don't hand the hash onward.
+    user.password_hash.clear();
     Ok(Some(user))
 }
 
@@ -165,13 +199,22 @@ async fn dummy_password_hash() -> &'static str {
         .await
 }
 
+/// Minimum spacing between `last_login_at` writes for the same user.
+const LAST_LOGIN_WRITE_INTERVAL_SECS: i64 = 60;
+
 /// Update last login time
 pub async fn update_last_login(pool: &SqlitePool, user_id: i64) -> Result<(), sqlx::Error> {
     let now = chrono::Utc::now().timestamp();
 
-    sqlx::query("UPDATE users SET last_login_at = ? WHERE id = ?")
-        .bind(now)
-        .bind(user_id)
+    // Throttled: skip the write (and the WAL write lock) when the timestamp was
+    // refreshed within the last minute; minute precision is plenty for a
+    // "last login" display and repeated logins no longer queue writers.
+    sqlx::query(
+        "UPDATE users SET last_login_at = ? WHERE id = ? AND (last_login_at IS NULL OR last_login_at < ?)",
+    )
+    .bind(now)
+    .bind(user_id)
+    .bind(now - LAST_LOGIN_WRITE_INTERVAL_SECS)
         .execute(pool)
         .await?;
 
@@ -421,7 +464,7 @@ pub async fn update_user(
             password_hash = COALESCE(?, password_hash),
             role = COALESCE(?, role),
             max_connections = COALESCE(?, max_connections),
-            bandwidth_limit_mb = COALESCE(?, bandwidth_limit_mb),
+            monthly_bandwidth_quota = CASE WHEN ? THEN ? ELSE monthly_bandwidth_quota END,
             is_active = COALESCE(?, is_active),
             updated_at = ?
         WHERE id = ?
@@ -430,7 +473,8 @@ pub async fn update_user(
     .bind(password_hash)
     .bind(role_str)
     .bind(max_connections)
-    .bind(bandwidth_limit_mb)
+    .bind(bandwidth_limit_mb.is_some())
+    .bind(bandwidth_limit_mb.and_then(mb_to_quota_bytes))
     .bind(is_active)
     .bind(now)
     .bind(user_id)
@@ -442,7 +486,8 @@ pub async fn update_user(
         return Err(sqlx::Error::RowNotFound);
     }
 
-    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = ?")
+    let sql = format!("SELECT {USER_COLUMNS_NO_HASH} FROM users WHERE id = ?");
+    let user = sqlx::query_as::<_, User>(&sql)
         .bind(user_id)
         .fetch_one(&mut *tx)
         .await?;
@@ -483,13 +528,14 @@ pub async fn list_users_paginated(
     limit: i32,
     offset: i32,
 ) -> Result<Vec<User>, sqlx::Error> {
-    let users =
-        sqlx::query_as::<_, User>("SELECT * FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?")
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(pool)
-            .await?;
-    Ok(users)
+    let sql = format!(
+        "SELECT {USER_COLUMNS_NO_HASH} FROM users ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+    );
+    sqlx::query_as::<_, User>(&sql)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await
 }
 
 /// Count total users.
@@ -514,75 +560,9 @@ mod tests {
     use sqlx::SqlitePool;
 
     async fn setup_test_db() -> SqlitePool {
-        let pool = SqlitePool::connect(":memory:").await.unwrap();
-        sqlx::query(
-            r#"
-            CREATE TABLE users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL UNIQUE,
-                password_hash TEXT NOT NULL,
-                role TEXT NOT NULL DEFAULT 'user',
-                created_by INTEGER,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                is_active BOOLEAN NOT NULL DEFAULT 1,
-                max_connections INTEGER NOT NULL DEFAULT 100,
-                bandwidth_limit_mb INTEGER NOT NULL DEFAULT 1000,
-                rate_limit_enabled BOOLEAN NOT NULL DEFAULT 1,
-                rate_limit_rps INTEGER NOT NULL DEFAULT 10,
-                rate_limit_burst INTEGER NOT NULL DEFAULT 20,
-                allowed_protocols TEXT,
-                ip_whitelist TEXT,
-                allowed_targets TEXT,
-                blocked_targets TEXT,
-                access_schedule TEXT,
-                notes TEXT,
-                last_login_at INTEGER,
-                monthly_bandwidth_quota INTEGER,
-                bandwidth_rate_bps INTEGER NOT NULL DEFAULT 0
-            )
-            "#,
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        sqlx::query(
-            r#"
-            CREATE TABLE api_keys (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                key_hash TEXT NOT NULL,
-                key_prefix TEXT NOT NULL,
-                name TEXT NOT NULL DEFAULT '',
-                created_at INTEGER NOT NULL,
-                expires_at INTEGER,
-                last_used_at INTEGER,
-                is_active BOOLEAN NOT NULL DEFAULT 1
-            )
-            "#,
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        sqlx::query(
-            r#"
-            CREATE TABLE sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                token_hash TEXT,
-                created_at INTEGER NOT NULL DEFAULT 0,
-                expires_at INTEGER NOT NULL DEFAULT 0,
-                ip_address TEXT,
-                user_agent TEXT
-            )
-            "#,
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
+        // Real migrations, so the tests exercise the shipped schema.
+        let pool = crate::db::create_pool("sqlite::memory:", 1).await.unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
         pool
     }
 
@@ -863,6 +843,34 @@ mod tests {
         assert!(user.last_login_at.is_some());
     }
 
+    /// #34: a recent last_login_at is not rewritten; a stale one is.
+    #[tokio::test]
+    async fn test_update_last_login_is_throttled() {
+        let pool = setup_test_db().await;
+        let id = create_user(&pool, &test_create_user_request("throttle"), None)
+            .await
+            .unwrap();
+        let recent = chrono::Utc::now().timestamp() - 5;
+        sqlx::query("UPDATE users SET last_login_at = ? WHERE id = ?")
+            .bind(recent)
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        update_last_login(&pool, id).await.unwrap();
+        let user = get_user_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!(user.last_login_at, Some(recent));
+
+        sqlx::query("UPDATE users SET last_login_at = 1 WHERE id = ?")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        update_last_login(&pool, id).await.unwrap();
+        let user = get_user_by_id(&pool, id).await.unwrap().unwrap();
+        assert!(user.last_login_at.unwrap() > 1);
+    }
+
     // === update_user Tests ===
 
     #[tokio::test]
@@ -898,6 +906,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(updated.role, "admin");
+    }
+
+    /// #35: the API's bandwidth_limit_mb writes and reads the single byte quota.
+    #[tokio::test]
+    async fn test_update_user_bandwidth_limit_writes_byte_quota() {
+        let pool = setup_test_db().await;
+        let req = test_create_user_request("update_bw");
+        let id = create_user(&pool, &req, None).await.unwrap();
+
+        let updated = update_user(&pool, id, None, None, None, Some(250), None)
+            .await
+            .unwrap();
+        assert_eq!(updated.bandwidth_limit_mb, 250);
+        let stats = crate::db::quota::get_quota_stats(&pool, id).await.unwrap();
+        assert_eq!(stats.quota_bytes, Some(250 * MIB));
+
+        // Leaving it unset keeps the quota.
+        update_user(&pool, id, None, None, Some(3), None, None)
+            .await
+            .unwrap();
+        let stats = crate::db::quota::get_quota_stats(&pool, id).await.unwrap();
+        assert_eq!(stats.quota_bytes, Some(250 * MIB));
+
+        // 0 means unlimited.
+        let updated = update_user(&pool, id, None, None, None, Some(0), None)
+            .await
+            .unwrap();
+        assert_eq!(updated.bandwidth_limit_mb, 0);
+        let stats = crate::db::quota::get_quota_stats(&pool, id).await.unwrap();
+        assert_eq!(stats.quota_bytes, None);
     }
 
     #[tokio::test]

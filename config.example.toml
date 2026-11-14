@@ -20,6 +20,11 @@ max_connections = 10
 # Delete usage rows older than this many days (per-user destination history is
 # sensitive PII and grows without bound). 0 disables purging.
 usage_retention_days = 90
+# SQLite allows one writer at a time (WAL). Writers wait up to busy_timeout_ms
+# for the write lock; requests wait up to acquire_timeout_secs for a pooled
+# connection. Keep acquire_timeout_secs * 1000 above busy_timeout_ms.
+busy_timeout_ms = 5000
+acquire_timeout_secs = 10
 
 [authentication]
 enabled = true

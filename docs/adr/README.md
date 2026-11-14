@@ -11,3 +11,4 @@ made during the Audit Round 3 security pass (2026-06-27); see `task.md`.
 | [0004](0004-typed-authz-extractors.md) | Authorization via typed extractors |
 | [0005](0005-proxy-protocol-trusted-cidrs.md) | PROXY header trusted only from configured CIDRs |
 | [0006](0006-bandwidth-single-source-of-truth.md) | One source of truth for bandwidth accounting |
+| [0007](0007-forward-only-migrations.md) | Forward-only migrations, snapshot before migrating |

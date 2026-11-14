@@ -671,9 +671,8 @@ impl AppState {
         // Drop the process-local Arc cache too so the next validator call
         // sees the new limit immediately.
         self.invalidate_user_arc_cache(user_id);
-        // Re-derive the effective limit using the same merged logic the
-        // tracker seed uses (`monthly_bandwidth_quota` if set, else
-        // `bandwidth_limit_mb` × 1 MiB; 0 means unlimited).
+        // Re-derive the effective limit from `monthly_bandwidth_quota` (the
+        // single stored quota; NULL means unlimited), as the tracker seed does.
         match crate::db::quota::get_quota_stats(&self.db_pool, user_id).await {
             Ok(stats) => self.quota_trackers.update_limit(user_id, stats.quota_bytes),
             Err(_) => self.quota_trackers.invalidate(user_id),
