@@ -631,6 +631,9 @@ impl AppState {
         user_id: i64,
         client_ip: std::net::IpAddr,
     ) -> Result<bool, sqlx::Error> {
+        // Canonicalise so the cache key / DB match never depends on whether
+        // the client arrived as `::ffff:a.b.c.d` or `a.b.c.d` (#52).
+        let client_ip = crate::ip_filter::canonical_ip(client_ip);
         let cache_key = (user_id, client_ip);
         let ttl = std::time::Duration::from_secs(crate::constants::APPROVAL_CACHE_TTL_SECS);
 

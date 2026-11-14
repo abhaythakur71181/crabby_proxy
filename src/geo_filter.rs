@@ -16,6 +16,9 @@ impl GeoFilter {
 
     /// Look up the country ISO code for an IP address
     pub fn lookup_country(&self, ip: IpAddr) -> Option<String> {
+        // Canonicalise so a dual-stack client (`::ffff:a.b.c.d`) is looked up
+        // by its IPv4 address (#52).
+        let ip = crate::ip_filter::canonical_ip(ip);
         match self.reader.lookup::<geoip2::Country>(ip) {
             Ok(result) => result
                 .country

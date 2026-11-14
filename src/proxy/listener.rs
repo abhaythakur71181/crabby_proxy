@@ -84,6 +84,11 @@ pub async fn run_proxy_server(state: Arc<AppState>, addr: SocketAddr) {
                         client_addr
                     }
                 };
+                // Canonicalise once at ingress (#52): on a dual-stack listener
+                // IPv4 clients arrive as `::ffff:a.b.c.d`, and every downstream
+                // consumer (IP filter, geo filter, approvals, rate limiting,
+                // access log, usage records) must see the plain IPv4 address.
+                let real_addr = crate::ip_filter::canonical_socket_addr(real_addr);
 
                 let state = state.clone();
                 tokio::spawn(async move {
@@ -122,12 +127,14 @@ pub async fn run_proxy_server(state: Arc<AppState>, addr: SocketAddr) {
 /// Invalid CIDR entries are skipped (logged once at parse). Returns false on an
 /// empty list, so an enabled-but-unconfigured PROXY protocol trusts nobody.
 fn peer_is_trusted_proxy(peer: std::net::IpAddr, trusted_cidrs: &[String]) -> bool {
+    use crate::ip_filter::{canonical_ip, net_contains};
+    let peer = canonical_ip(peer);
     trusted_cidrs.iter().any(|c| {
         match c.parse::<ipnet::IpNet>() {
-            Ok(net) => net.contains(&peer),
+            Ok(net) => net_contains(&net, peer),
             Err(_) => match c.parse::<std::net::IpAddr>() {
                 // Bare IP (no prefix) — exact match.
-                Ok(ip) => ip == peer,
+                Ok(ip) => canonical_ip(ip) == peer,
                 Err(_) => {
                     tracing::warn!("Invalid proxy_protocol_trusted_cidrs entry '{}'", c);
                     false
@@ -823,6 +830,14 @@ mod tests {
         assert!(peer_is_trusted_proxy(ip("192.168.1.5"), &cidrs)); // bare IP
         assert!(!peer_is_trusted_proxy(ip("192.168.1.6"), &cidrs));
         assert!(!peer_is_trusted_proxy(ip("8.8.8.8"), &cidrs));
+    }
+
+    #[test]
+    fn mapped_peer_matches_v4_trusted_cidr() {
+        let cidrs = vec!["10.0.0.0/8".to_string(), "192.168.1.5".to_string()];
+        assert!(peer_is_trusted_proxy(ip("::ffff:10.1.2.3"), &cidrs));
+        assert!(peer_is_trusted_proxy(ip("::ffff:192.168.1.5"), &cidrs));
+        assert!(!peer_is_trusted_proxy(ip("::ffff:8.8.8.8"), &cidrs));
     }
 
     #[test]
