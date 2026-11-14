@@ -116,13 +116,21 @@ pub async fn handle_h2_connection(
             tokio::spawn(async move {
                 let _permit = permit; // held for the stream's lifetime
                 let conn_id = uuid::Uuid::new_v4();
-                handle_h2_forward_validated(
-                    request,
-                    respond,
-                    client_addr,
-                    auth_header,
+                // Keep the in-flight request's record from expiring under a
+                // long transfer. Before the record exists (or if the request is
+                // rejected untracked) a refresh is a harmless NotFound.
+                crate::state::backend::keep_record_alive(
+                    &*state_ref.state,
                     conn_id,
-                    &state_ref,
+                    true,
+                    handle_h2_forward_validated(
+                        request,
+                        respond,
+                        client_addr,
+                        auth_header,
+                        conn_id,
+                        &state_ref,
+                    ),
                 )
                 .await;
                 // Drop the tracking record however the request ended. A
@@ -359,17 +367,22 @@ async fn handle_h2_connect_validated(
             tracing::info!(target: "audit", %conn_id, %client_addr, "h2 connection terminated by admin");
             Err("terminated by admin".into())
         }
-        r = handle_h2_tunnel(
-            &authority,
-            client_addr,
-            host,
-            port,
-            request,
-            respond,
-            state,
-            quota_tracker,
-            ctx.effective_uid(),
-            ctx.admin_bypasses(super::pipeline::RULE_QUOTA),
+        r = crate::state::backend::keep_record_alive(
+            &*state.state,
+            conn_id,
+            ctx.conn_tracked,
+            handle_h2_tunnel(
+                &authority,
+                client_addr,
+                host,
+                port,
+                request,
+                respond,
+                state,
+                quota_tracker,
+                ctx.effective_uid(),
+                ctx.admin_bypasses(super::pipeline::RULE_QUOTA),
+            ),
         ) => r,
     };
     state.conn_cancel.remove(&conn_id);

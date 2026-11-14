@@ -536,14 +536,19 @@ async fn handle_client(
                 ErrorType::Connection,
             ))
         }
-        r = async_handle_client_with_target(
-            &mut stream,
-            client_addr,
-            &mut protocol,
-            target,
-            state,
-            ctx.user_id,
-            ctx.admin_bypasses(super::pipeline::RULE_QUOTA),
+        r = crate::state::backend::keep_record_alive(
+            &*state.state,
+            conn_id,
+            ctx.conn_tracked,
+            async_handle_client_with_target(
+                &mut stream,
+                client_addr,
+                &mut protocol,
+                target,
+                state,
+                ctx.user_id,
+                ctx.admin_bypasses(super::pipeline::RULE_QUOTA),
+            ),
         ) => r,
     };
     state.conn_cancel.remove(&conn_id);
