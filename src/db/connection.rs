@@ -23,6 +23,7 @@ impl From<&crate::config::DatabaseConfig> for PoolSettings {
 }
 
 /// Create a pool with default lock-wait settings (5s busy, 10s acquire).
+#[cfg_attr(not(test), allow(dead_code))]
 pub async fn create_pool(
     database_url: &str,
     max_connections: u32,

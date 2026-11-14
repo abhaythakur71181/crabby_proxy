@@ -16,7 +16,9 @@ pub mod sessions;
 pub mod usage;
 pub mod users;
 
-pub use connection::{create_pool, run_migrations};
+#[cfg_attr(not(test), allow(unused_imports))]
+pub use connection::create_pool;
+pub use connection::run_migrations;
 
 /// Default page size for list queries when the caller does not ask for one.
 pub const DEFAULT_LIST_LIMIT: i64 = 500;
