@@ -7,7 +7,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::{app_state::AppState, auth::jwt, db::users};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
@@ -34,7 +34,7 @@ pub async fn login(
 
     if !state
         .login_rate_limiter
-        .check_user(&client_ip, &payload.username)
+        .check_user(client_ip, &payload.username)
         .await
     {
         tracing::warn!(
@@ -81,23 +81,71 @@ pub async fn login(
 /// bucket and brute-force logins. We now honor forwarded headers ONLY when the
 /// immediate peer is loopback — i.e. a reverse proxy on the same host (the
 /// bundled nginx). A remote peer's forged header is ignored.
-fn extract_client_ip(peer: SocketAddr, headers: &HeaderMap) -> String {
+///
+/// Returns a typed `IpAddr`: a forwarded value that does not parse as an IP is
+/// ignored (we fall back to the peer address) rather than handed to the
+/// limiter as an opaque string, which used to fail open.
+pub(crate) fn extract_client_ip(peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
     let peer_ip = peer.ip();
     if peer_ip.is_loopback() {
-        if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
-            let ip = real_ip.trim();
-            if !ip.is_empty() {
-                return ip.to_string();
-            }
+        if let Some(ip) = headers
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<IpAddr>().ok())
+        {
+            return ip;
         }
-        if let Some(fwd) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            if let Some(first) = fwd.split(',').next() {
-                let ip = first.trim();
-                if !ip.is_empty() {
-                    return ip.to_string();
-                }
-            }
+        if let Some(ip) = headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .and_then(|v| v.trim().parse::<IpAddr>().ok())
+        {
+            return ip;
         }
     }
-    peer_ip.to_string()
+    peer_ip
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn remote_peer_ignores_forwarded_headers() {
+        let mut h = HeaderMap::new();
+        h.insert("x-real-ip", HeaderValue::from_static("9.9.9.9"));
+        let peer: SocketAddr = "203.0.113.5:4000".parse().unwrap();
+        assert_eq!(
+            extract_client_ip(peer, &h),
+            "203.0.113.5".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn loopback_peer_honors_forwarded_headers() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("198.51.100.7, 10.0.0.1"),
+        );
+        let peer: SocketAddr = "127.0.0.1:4000".parse().unwrap();
+        assert_eq!(
+            extract_client_ip(peer, &h),
+            "198.51.100.7".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn unparseable_forwarded_value_falls_back_to_peer() {
+        let mut h = HeaderMap::new();
+        h.insert("x-real-ip", HeaderValue::from_static("198.51.100.7:8080"));
+        h.insert("x-forwarded-for", HeaderValue::from_static("not-an-ip"));
+        let peer: SocketAddr = "127.0.0.1:4000".parse().unwrap();
+        assert_eq!(
+            extract_client_ip(peer, &h),
+            "127.0.0.1".parse::<IpAddr>().unwrap()
+        );
+    }
 }

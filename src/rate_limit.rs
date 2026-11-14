@@ -289,13 +289,14 @@ impl LoginRateLimiter {
         }
     }
 
-    /// Check if IP is allowed to attempt login (B15: use IpAddr to prevent string-key bypass)
-    pub async fn check(&self, ip: &str) -> bool {
-        // Parse to IpAddr for consistent keying; fall back to allow if unparseable
-        let ip_addr: IpAddr = match ip.parse() {
-            Ok(addr) => normalize_ip(addr), // normalize IPv4-mapped IPv6
-            Err(_) => return true,
-        };
+    /// Check if IP is allowed to attempt login.
+    ///
+    /// Takes a typed `IpAddr` rather than a string so there is no "unparseable
+    /// input" branch: the old `&str` API failed OPEN (returned `true`) on any
+    /// value that did not parse, so a caller passing e.g. `"ip:port"` would
+    /// have silently disabled login throttling.
+    pub async fn check(&self, ip: IpAddr) -> bool {
+        let ip_addr = normalize_ip(ip);
         let mut limiters = self.limiters.write().await;
         let limiter = limiters.get_or_insert(ip_addr, || GovernorRateLimiter::direct(self.quota));
         limiter.check().is_ok()
@@ -304,15 +305,11 @@ impl LoginRateLimiter {
     /// Check both the per-IP and per-(IP, username) buckets. Both must
     /// allow the attempt. Use this on the login path so a single client
     /// can't enumerate users without burning its overall budget.
-    pub async fn check_user(&self, ip: &str, username: &str) -> bool {
+    pub async fn check_user(&self, ip: IpAddr, username: &str) -> bool {
         if !self.check(ip).await {
             return false;
         }
-        let ip_addr: IpAddr = match ip.parse() {
-            Ok(addr) => normalize_ip(addr),
-            Err(_) => return true,
-        };
-        let key = (ip_addr, username.to_string());
+        let key = (normalize_ip(ip), username.to_string());
         let mut limiters = self.user_limiters.write().await;
         let limiter = limiters.get_or_insert(key, || GovernorRateLimiter::direct(self.user_quota));
         limiter.check().is_ok()
@@ -715,14 +712,14 @@ mod tests {
         let limiter = LoginRateLimiter::new();
         // Default: 5 per minute, burst 10
         for _ in 0..10 {
-            assert!(limiter.check("192.168.1.1").await);
+            assert!(limiter.check(v4(192, 168, 1, 1)).await);
         }
     }
 
     #[tokio::test]
     async fn test_login_rate_limiter_blocks_after_burst() {
         let limiter = LoginRateLimiter::with_limits(5, 5, 1000);
-        let ip = "10.0.0.1";
+        let ip = v4(10, 0, 0, 1);
 
         for _ in 0..5 {
             limiter.check(ip).await;
@@ -736,12 +733,12 @@ mod tests {
 
         // Exhaust ip1
         for _ in 0..3 {
-            limiter.check("1.1.1.1").await;
+            limiter.check(v4(1, 1, 1, 1)).await;
         }
-        assert!(!limiter.check("1.1.1.1").await);
+        assert!(!limiter.check(v4(1, 1, 1, 1)).await);
 
         // ip2 should still work
-        assert!(limiter.check("2.2.2.2").await);
+        assert!(limiter.check(v4(2, 2, 2, 2)).await);
     }
 
     #[tokio::test]
@@ -749,18 +746,18 @@ mod tests {
         let limiter = LoginRateLimiter::new();
         assert_eq!(limiter.count().await, 0);
 
-        limiter.check("1.1.1.1").await;
+        limiter.check(v4(1, 1, 1, 1)).await;
         assert_eq!(limiter.count().await, 1);
 
-        limiter.check("2.2.2.2").await;
+        limiter.check(v4(2, 2, 2, 2)).await;
         assert_eq!(limiter.count().await, 2);
     }
 
     #[tokio::test]
     async fn test_login_rate_limiter_clear() {
         let limiter = LoginRateLimiter::new();
-        limiter.check("1.1.1.1").await;
-        limiter.check("2.2.2.2").await;
+        limiter.check(v4(1, 1, 1, 1)).await;
+        limiter.check(v4(2, 2, 2, 2)).await;
 
         limiter.clear().await;
         assert_eq!(limiter.count().await, 0);
@@ -770,15 +767,35 @@ mod tests {
     async fn test_login_rate_limiter_default() {
         let limiter = LoginRateLimiter::default();
         assert_eq!(limiter.count().await, 0);
-        assert!(limiter.check("test-ip").await);
+        assert!(limiter.check(v4(127, 0, 0, 1)).await);
     }
 
     #[tokio::test]
-    async fn test_login_rate_limiter_string_ip_formats() {
-        let limiter = LoginRateLimiter::new();
-        // Should work with various string formats
-        assert!(limiter.check("127.0.0.1").await);
-        assert!(limiter.check("::1").await);
-        assert!(limiter.check("10.0.0.1:8080").await); // With port as string
+    async fn test_login_rate_limiter_ipv4_mapped_shares_bucket() {
+        // ::ffff:10.0.0.9 and 10.0.0.9 are the same client and must share
+        // one bucket, otherwise the mapped form is a free second budget.
+        let limiter = LoginRateLimiter::with_limits(5, 2, 1000);
+        let mapped: IpAddr = "::ffff:10.0.0.9".parse().unwrap();
+        assert!(limiter.check(v4(10, 0, 0, 9)).await);
+        assert!(limiter.check(mapped).await);
+        assert!(!limiter.check(v4(10, 0, 0, 9)).await);
+        assert!(!limiter.check(mapped).await);
+    }
+
+    #[tokio::test]
+    async fn test_login_rate_limiter_per_user_bucket() {
+        let limiter = LoginRateLimiter::with_limits(1000, 1000, 1000);
+        let ip = v4(10, 0, 0, 1);
+        // Per-(ip, user) burst is 5.
+        for _ in 0..5 {
+            assert!(limiter.check_user(ip, "alice").await);
+        }
+        assert!(!limiter.check_user(ip, "alice").await);
+        // A different username from the same IP has its own bucket.
+        assert!(limiter.check_user(ip, "bob").await);
+    }
+
+    fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(a, b, c, d))
     }
 }
