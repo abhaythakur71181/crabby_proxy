@@ -357,6 +357,28 @@ mod tests {
     }
 
     #[test]
+    fn test_template_config_ships_no_placeholder_credentials() {
+        // The committed template must not ship usable placeholder secrets:
+        // empty means "disabled" (passwords) / "auto-generate" (JWT secret).
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/crabby-proxy.toml.g");
+        let text = std::fs::read_to_string(path).unwrap();
+        let v: toml::Value = toml::from_str(&text).unwrap();
+        for (section, key) in [
+            ("authentication", "password"),
+            ("authentication", "jwt_secret"),
+            ("admin", "admin_password"),
+        ] {
+            assert_eq!(
+                v[section][key].as_str(),
+                Some(""),
+                "{}.{} must be empty in the template",
+                section,
+                key
+            );
+        }
+    }
+
+    #[test]
     fn test_config_password_weakness() {
         // Weak: short, placeholders (any case), low variety.
         assert!(config_password_weakness("@1234").is_some());
