@@ -66,9 +66,6 @@ pub struct AppState {
     // DNS resolution cache (reduces upstream connect latency)
     pub dns_cache: Arc<crate::dns_cache::DnsCache>,
 
-    // Upstream connection pool (reuses idle TCP connections)
-    pub connection_pool: Option<Arc<crate::connection_pool::ConnectionPool>>,
-
     // Auth result cache: HMAC(creds) -> (user_id, cached_at).
     // Avoids DB + argon2 on every connection from the same user (60s TTL).
     // The key is an HMAC-SHA256 of (username, password) under a process-random
@@ -307,14 +304,6 @@ impl AppState {
             dns_cache: Arc::new(crate::dns_cache::DnsCache::new(
                 config.advanced.dns_cache_ttl,
             )),
-            connection_pool: if config.advanced.connection_pooling {
-                Some(Arc::new(crate::connection_pool::ConnectionPool::new(
-                    config.advanced.pool_max_idle_per_host,
-                    60, // 60s idle timeout
-                )))
-            } else {
-                None
-            },
             shutdown_tx,
             usage_writer: crate::usage_writer::UsageWriter::spawn(db_pool.clone()),
             quota_cache: Arc::new(dashmap::DashMap::new()),

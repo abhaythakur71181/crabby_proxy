@@ -212,7 +212,14 @@ pub struct AdminConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AdvancedConfig {
     pub buffer_size: usize,
+    /// Deprecated and ignored. Upstream socket pooling was removed: it never
+    /// repopulated (tunnels shut the upstream down) and reusing a keep-alive
+    /// socket for a raw CONNECT/SOCKS tunnel is unsound. Kept so existing
+    /// config files still parse; a startup warning is logged if set.
+    #[serde(default)]
     pub connection_pooling: bool,
+    /// Deprecated and ignored (see `connection_pooling`).
+    #[serde(default)]
     pub pool_max_idle_per_host: usize,
     pub http2_enabled: bool,
     pub dns_cache_ttl: u64,

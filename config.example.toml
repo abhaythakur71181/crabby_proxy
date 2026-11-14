@@ -88,6 +88,7 @@ cors_origins = ["http://localhost:3000"]
 
 [advanced]
 buffer_size = 8192
+# connection_pooling / pool_max_idle_per_host are deprecated and ignored.
 connection_pooling = false
 pool_max_idle_per_host = 10
 http2_enabled = false
