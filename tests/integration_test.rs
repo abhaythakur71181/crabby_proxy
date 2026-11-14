@@ -44,6 +44,27 @@ impl TestProxy {
 
     /// Start a proxy with auth disabled and the given options.
     fn start(opts: ProxyOptions) -> Self {
+        let (mut command, proxy_addr, admin_addr) = Self::command(opts);
+        let child = command
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("Failed to start proxy");
+
+        let proxy = TestProxy {
+            child,
+            proxy_addr,
+            admin_addr,
+        };
+
+        // Wait for the proxy to be ready
+        proxy.wait_ready();
+        proxy
+    }
+
+    /// Write a temp config for `opts` on random ports and return the command
+    /// that runs the proxy binary with it.
+    fn command(opts: ProxyOptions) -> (Command, SocketAddr, SocketAddr) {
         let blocked_targets = opts
             .blocked_targets
             .iter()
@@ -163,25 +184,13 @@ dns_cache_ttl = 60
 
         // Use the binary built by `cargo test`
         let binary = env!("CARGO_BIN_EXE_crabby_proxy");
-        let child = Command::new(binary)
+        let mut command = Command::new(binary);
+        command
             .args(["--config", config_path.to_str().unwrap()])
             // Fixed root password so first boot doesn't write a generated
             // one to initial_root_password.txt in the crate directory.
-            .env("CRABBY_ROOT_PASSWORD", "integration-test-root-password")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("Failed to start proxy");
-
-        let proxy = TestProxy {
-            child,
-            proxy_addr,
-            admin_addr,
-        };
-
-        // Wait for the proxy to be ready
-        proxy.wait_ready();
-        proxy
+            .env("CRABBY_ROOT_PASSWORD", "integration-test-root-password");
+        (command, proxy_addr, admin_addr)
     }
 
     /// Wait until the admin port accepts connections (up to 15s).
@@ -206,6 +215,34 @@ impl Drop for TestProxy {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+// ── Startup refusals ─────────────────────────────────────────────────
+
+#[test]
+fn test_weak_config_password_exits_cleanly_without_panic() {
+    // A 5-character proxy password with auth enabled is refused at boot. That
+    // must be a single `error: ...` line and exit status 1, not a panic.
+    let short: String = ('a'..='e').collect();
+    let (mut command, _, _) = TestProxy::command(ProxyOptions {
+        proxy_auth: Some(("test".to_string(), short)),
+        ..Default::default()
+    });
+    let output = command
+        .env_remove("CRABBY_BASIC_AUTH_PASSWORD")
+        .env_remove("CRABBY_ALLOW_DEFAULT_PASSWORDS")
+        .output()
+        .expect("failed to run proxy");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.lines().any(|l| l.starts_with(
+            "error: authentication.password is only 5 characters (minimum 12). Refusing to start"
+        )),
+        "missing error line, stderr: {stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "stderr: {stderr}");
+    assert!(!stderr.contains("RUST_BACKTRACE"), "stderr: {stderr}");
 }
 
 // ── Admin API tests ──────────────────────────────────────────────────

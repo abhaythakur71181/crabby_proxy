@@ -27,8 +27,11 @@ services:
     # All replicas share the crabby-data volume (same-host SQLite only). See
     # docs/RUNBOOK.md, "Scaling".
     #
-    # Secrets are loaded from .env. Required — container refuses to start
-    # if CRABBY_JWT_SECRET is unset (config_env.rs panics on weak secrets).
+    # Secrets are loaded from .env. Required here so sessions survive restarts
+    # and the static credentials are set; the proxy itself refuses to start
+    # (`error: ...`, exit 1) on a weak JWT secret or a weak/placeholder password.
+    # First run creates a `root` admin; without CRABBY_ROOT_PASSWORD its
+    # generated password is written to /app/initial_root_password.txt (0600).
     environment:
       CRABBY_JWT_SECRET: ${CRABBY_JWT_SECRET:?set CRABBY_JWT_SECRET in .env (>=32 bytes)}
       CRABBY_ADMIN_PASSWORD: ${CRABBY_ADMIN_PASSWORD:?set CRABBY_ADMIN_PASSWORD in .env}
