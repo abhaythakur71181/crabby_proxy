@@ -305,15 +305,15 @@ pub async fn json_metrics(
     let mut active_by_protocol = HashMap::new();
     let families = prometheus::gather();
     for fam in &families {
-        if fam.get_name() == "proxy_active_connections" {
+        if fam.name() == "proxy_active_connections" {
             for m in fam.get_metric() {
                 let protocol = m
                     .get_label()
                     .iter()
-                    .find(|l| l.get_name() == "protocol")
-                    .map(|l| l.get_value().to_string())
+                    .find(|l| l.name() == "protocol")
+                    .map(|l| l.value().to_string())
                     .unwrap_or_else(|| "unknown".to_string());
-                let val = m.get_gauge().get_value() as i64;
+                let val = m.get_gauge().value() as i64;
                 if val != 0 {
                     active_by_protocol.insert(protocol, val);
                 }
@@ -333,15 +333,15 @@ pub async fn json_metrics(
     let mut success: u64 = 0;
     let mut failed: u64 = 0;
     for fam in &families {
-        if fam.get_name() == "proxy_requests_total" {
+        if fam.name() == "proxy_requests_total" {
             for m in fam.get_metric() {
                 let status = m
                     .get_label()
                     .iter()
-                    .find(|l| l.get_name() == "status")
-                    .map(|l| l.get_value())
+                    .find(|l| l.name() == "status")
+                    .map(|l| l.value())
                     .unwrap_or("unknown");
-                let val = m.get_counter().get_value() as u64;
+                let val = m.get_counter().value() as u64;
                 if status == "success" {
                     success += val;
                 } else {
@@ -354,15 +354,15 @@ pub async fn json_metrics(
     // Auth failures by reason
     let mut auth_failures_by_reason = HashMap::new();
     for fam in &families {
-        if fam.get_name() == "proxy_auth_failures_total" {
+        if fam.name() == "proxy_auth_failures_total" {
             for m in fam.get_metric() {
                 let reason = m
                     .get_label()
                     .iter()
-                    .find(|l| l.get_name() == "reason")
-                    .map(|l| l.get_value().to_string())
+                    .find(|l| l.name() == "reason")
+                    .map(|l| l.value().to_string())
                     .unwrap_or_else(|| "unknown".to_string());
-                let val = m.get_counter().get_value() as u64;
+                let val = m.get_counter().value() as u64;
                 if val > 0 {
                     auth_failures_by_reason.insert(reason, val);
                 }
@@ -392,7 +392,7 @@ pub async fn json_metrics(
         let mut p95 = 0.0_f64;
         let mut p99 = 0.0_f64;
         for fam in &families {
-            if fam.get_name() == "proxy_connection_duration_seconds"
+            if fam.name() == "proxy_connection_duration_seconds"
                 && fam.get_field_type() == MetricType::HISTOGRAM
             {
                 // Aggregate across all protocols
@@ -403,9 +403,9 @@ pub async fn json_metrics(
                     total_count += h.get_sample_count();
                     for (i, b) in h.get_bucket().iter().enumerate() {
                         if i >= buckets.len() {
-                            buckets.push((b.get_upper_bound(), b.get_cumulative_count()));
+                            buckets.push((b.upper_bound(), b.cumulative_count()));
                         } else {
-                            buckets[i].1 += b.get_cumulative_count();
+                            buckets[i].1 += b.cumulative_count();
                         }
                     }
                 }

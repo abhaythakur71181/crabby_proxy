@@ -13,7 +13,7 @@ services:
       dockerfile: Dockerfile
       target: runtime
       args:
-        RUST_VERSION: "1.90"
+        RUST_VERSION: "1.97"
     image: crabby-proxy:${CRABBY_IMAGE_TAG:-latest}
     container_name: crabby-proxy
     restart: unless-stopped
