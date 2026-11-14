@@ -217,6 +217,7 @@ pub async fn update_user(
     state
         .invalidate_all_for_user(user_id, Some(&updated_user.username))
         .await;
+    state.broadcast_user_invalidated(user_id).await;
 
     Ok(Json(UserResponse::from(updated_user)))
 }
@@ -250,6 +251,7 @@ pub async fn delete_user(
     state
         .invalidate_all_for_user(user_id, Some(&username))
         .await;
+    state.broadcast_user_invalidated(user_id).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -408,6 +410,7 @@ pub async fn change_own_password(
     state
         .invalidate_all_for_user(current_user_id, Some(&updated.username))
         .await;
+    state.broadcast_user_invalidated(current_user_id).await;
 
     let _ = crate::db::audit_log::log_action(
         &state.db_pool,
@@ -458,6 +461,7 @@ pub async fn admin_reset_password(
     state
         .invalidate_all_for_user(user_id, Some(&updated.username))
         .await;
+    state.broadcast_user_invalidated(user_id).await;
 
     let _ = crate::db::audit_log::log_action(
         &state.db_pool,

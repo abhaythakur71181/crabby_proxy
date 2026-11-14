@@ -7,28 +7,14 @@ use tokio::io::{self, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
-/// Process-random key for the auth-cache HMAC. Generated once per process so
-/// cache keys are unforgeable, never stable across restarts, and reveal nothing
-/// about the credentials.
-static AUTH_CACHE_HMAC_KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
-
-/// Derive the opaque auth-cache key from credentials via HMAC-SHA256, so the
-/// in-memory cache never holds plaintext usernames/passwords as keys.
+/// Opaque auth-cache key for proxy credentials (HMAC-SHA256 under a
+/// process-random key, domain-separated from admin-API credentials).
 fn auth_cache_key(username: &str, password: &str) -> [u8; 32] {
-    use hmac::{Hmac, Mac};
-    use rand::RngCore;
-    use sha2::Sha256;
-
-    let key = AUTH_CACHE_HMAC_KEY.get_or_init(|| {
-        let mut k = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut k);
-        k
-    });
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
-    mac.update(username.as_bytes());
-    mac.update(&[0u8]); // domain separator so (a,b) != (ab,"")
-    mac.update(password.as_bytes());
-    mac.finalize().into_bytes().into()
+    crate::auth_cache::credential_key(
+        crate::auth_cache::CredentialDomain::Proxy,
+        username,
+        password,
+    )
 }
 
 // Variants are deliberately the wire protocol names (TCP/HTTP/HTTPS); they
@@ -295,15 +281,11 @@ impl ProxyProtocol {
     /// root_admin id), None on failure. Never returns a sentinel id.
     async fn validate_credentials(username: &str, password: &str, state: &AppState) -> Option<i64> {
         // ── In-process auth cache (avoids DB + argon2 on repeat connections) ──
-        // Key = HMAC-SHA256(username, password) under a process-random key, so
-        // plaintext credentials never live as map keys, while the full 256-bit
-        // digest keeps it collision-safe. 60-second TTL.
+        // Bounded, TTL-evicted, and invalidated per user on credential changes
+        // (see crate::auth_cache).
         let cache_key = auth_cache_key(username, password);
-        if let Some(entry) = state.auth_cache.get(&cache_key) {
-            let (uid, cached_at) = entry.value();
-            if cached_at.elapsed() < std::time::Duration::from_secs(60) {
-                return Some(*uid);
-            }
+        if let Some(uid) = state.auth_cache.get(&cache_key) {
+            return Some(uid);
         }
         // Negative cache: short-circuit known-bad credentials for 5s so a
         // burst of bad attempts hits argon2 only once.
@@ -330,9 +312,7 @@ impl ProxyProtocol {
                 if let Some(ref cache) = state.cache {
                     if let Some(verified) = cache.get_api_key_verified(user_id, password).await {
                         if verified {
-                            state
-                                .auth_cache
-                                .insert(cache_key, (user_id, std::time::Instant::now()));
+                            state.auth_cache.insert(cache_key, user_id);
                             return Some(user_id);
                         } else {
                             return None;
@@ -349,9 +329,7 @@ impl ProxyProtocol {
                         .await;
                 }
                 if verified {
-                    state
-                        .auth_cache
-                        .insert(cache_key, (user_id, std::time::Instant::now()));
+                    state.auth_cache.insert(cache_key, user_id);
                     return Some(user_id);
                 }
             }
@@ -363,9 +341,7 @@ impl ProxyProtocol {
             if let Ok(Some(user)) = users::verify_password(&state.db_pool, username, password).await
             {
                 state.populate_user_cache(&user).await;
-                state
-                    .auth_cache
-                    .insert(cache_key, (user.id, std::time::Instant::now()));
+                state.auth_cache.insert(cache_key, user.id);
                 return Some(user.id);
             }
         }
@@ -384,9 +360,7 @@ impl ProxyProtocol {
             // same way; reject if root_admin is missing rather than bypass.
             match users::get_user_by_username(&state.db_pool, "root_admin").await {
                 Ok(Some(user)) => {
-                    state
-                        .auth_cache
-                        .insert(cache_key, (user.id, std::time::Instant::now()));
+                    state.auth_cache.insert(cache_key, user.id);
                     return Some(user.id);
                 }
                 Ok(None) => {

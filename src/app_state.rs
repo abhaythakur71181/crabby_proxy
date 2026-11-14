@@ -74,7 +74,9 @@ pub struct AppState {
     // The key is an HMAC-SHA256 of (username, password) under a process-random
     // key, so plaintext credentials are never resident as map keys (heap dumps /
     // swap / cores) while remaining collision-safe (full 256-bit digest).
-    pub auth_cache: Arc<dashmap::DashMap<[u8; 32], (i64, std::time::Instant)>>,
+    // Bounded (10k entries) with a periodic TTL sweep, and invalidated per
+    // user on credential changes; see crate::auth_cache.
+    pub auth_cache: crate::auth_cache::AuthCache,
 
     // Negative auth cache: HMAC(failed creds) -> cached_at.
     // Short TTL (5s) absorbs credential-stuffing bursts so a flood of bad
@@ -349,7 +351,7 @@ impl AppState {
             quota_trackers: Arc::new(crate::quota_tracker::QuotaTrackerRegistry::new()),
             approval_cache: Arc::new(dashmap::DashMap::new()),
             parsed_schedule_cache: Arc::new(dashmap::DashMap::new()),
-            auth_cache: Arc::new(dashmap::DashMap::new()),
+            auth_cache: crate::auth_cache::AuthCache::default(),
             auth_negative_cache: Arc::new(dashmap::DashMap::new()),
             bandwidth_throttlers: Arc::new(crate::bandwidth::ThrottlerRegistry::new()),
             middleware: Arc::new(crate::middleware::MiddlewareChain::new()),
@@ -456,6 +458,10 @@ impl AppState {
 
         drop(current);
         self.config.store(Arc::new(new_config));
+        // Config credentials' usernames are hot-reloadable; drop cached
+        // credential checks so an old username stops working immediately.
+        self.auth_cache.clear();
+        self.auth_negative_cache.clear();
         tracing::info!("Configuration reloaded from {}", path);
         Ok(())
     }
@@ -592,9 +598,26 @@ impl AppState {
         }
     }
 
+    /// Call after an API key is revoked: drops the user's cached credential
+    /// checks here and on every other instance, so the revoked key stops
+    /// working immediately instead of at the end of the auth-cache TTL.
     pub async fn invalidate_api_key_cache(&self, user_id: i64) {
         if let Some(ref cache) = self.cache {
             cache.invalidate_api_keys_for_user(user_id).await;
+        }
+        self.auth_cache.invalidate_user(user_id);
+        self.broadcast_user_invalidated(user_id).await;
+    }
+
+    /// Tell other instances (via the Redis event bus, when present) to run
+    /// `invalidate_all_for_user` for this user. Handlers call this after a
+    /// credential or account change; the local instance must already have
+    /// invalidated its own caches. Not called from `invalidate_all_for_user`
+    /// itself, since the event-bus subscriber calls that and would re-publish.
+    pub async fn broadcast_user_invalidated(&self, user_id: i64) {
+        if let Some(ref bus) = self.event_bus {
+            bus.publish(&crate::event_bus::ProxyEvent::UserInvalidated(user_id))
+                .await;
         }
     }
 
@@ -616,11 +639,12 @@ impl AppState {
         self.invalidate_user_arc_cache(user_id);
         self.parsed_schedule_cache.remove(&user_id);
         self.quota_cache.remove(&user_id);
-        // The auth-result cache is keyed by an HMAC of credentials, so it can't
-        // be invalidated per user_id. Clear it wholesale on any user change so a
-        // disabled account / rotated password can't keep authenticating via a
-        // cached positive entry for the 60s TTL. It repopulates cheaply.
-        self.auth_cache.clear();
+        // Drop this user's cached credential checks so a disabled account,
+        // rotated password or revoked API key stops authenticating now rather
+        // than at the end of the cache TTL. The negative cache is not keyed
+        // by user, so clear it wholesale (it only holds 5s entries): a
+        // credential that was wrong a moment ago may be right now.
+        self.auth_cache.invalidate_user(user_id);
         self.auth_negative_cache.clear();
         // Refresh the live quota tracker's limit in place (preserve `used`).
         if let Ok(stats) = crate::db::quota::get_quota_stats(&self.db_pool, user_id).await {
