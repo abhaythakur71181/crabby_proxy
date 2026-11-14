@@ -43,7 +43,6 @@ impl ApiError {
             detail: None,
         }
     }
-    #[allow(dead_code)]
     pub fn conflict(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::CONFLICT,
@@ -75,8 +74,22 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// Whether a sqlx error is a UNIQUE / PRIMARY KEY constraint violation.
+pub fn is_unique_violation(e: &sqlx::Error) -> bool {
+    e.as_database_error()
+        .map(|d| d.is_unique_violation())
+        .unwrap_or(false)
+}
+
 impl From<sqlx::Error> for ApiError {
     fn from(e: sqlx::Error) -> Self {
+        // A uniqueness violation is a client conflict, not a server fault. The
+        // insert itself is the authoritative check, so handlers can skip racy
+        // check-then-insert pre-checks and still return 409.
+        if is_unique_violation(&e) {
+            tracing::debug!("Unique constraint violation: {}", e);
+            return Self::conflict("Resource already exists");
+        }
         tracing::error!("Database error: {}", e);
         Self::internal("Database error")
     }
@@ -406,5 +419,27 @@ mod tests {
         let req: CreateApiKeyRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.name, "prod-key");
         assert_eq!(req.expires_in_days, 90);
+    }
+
+    /// #23: a duplicate insert must surface as 409, not a generic 500.
+    #[tokio::test]
+    async fn test_unique_violation_maps_to_conflict() {
+        let pool = crate::db::create_pool("sqlite::memory:", 1).await.unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        let insert = "INSERT INTO users (username, password_hash, role, created_at, updated_at) VALUES ('dup','h','user',0,0)";
+        sqlx::query(insert).execute(&pool).await.unwrap();
+        let err = sqlx::query(insert).execute(&pool).await.unwrap_err();
+        assert!(is_unique_violation(&err));
+        assert_eq!(ApiError::from(err).status, StatusCode::CONFLICT);
+
+        let other = sqlx::query("SELECT * FROM no_such_table")
+            .execute(&pool)
+            .await
+            .unwrap_err();
+        assert!(!is_unique_violation(&other));
+        assert_eq!(
+            ApiError::from(other).status,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }
