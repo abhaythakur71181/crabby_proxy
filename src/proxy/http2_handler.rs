@@ -9,13 +9,14 @@
 //! the upstream tunnel.
 
 use crate::app_state::AppState;
+use crate::proxy::h2_io::{H2Body, H2Reader, H2Writer};
 use crate::proxy::pipeline::{ConnectionContext, Verdict};
 use crate::proxy::protocol::ProxyProtocol;
 use crate::proxy::validators;
 use base64::Engine;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
@@ -24,10 +25,10 @@ use tokio::time::timeout;
 /// task, evading the per-TCP-connection limit (DoS).
 const MAX_H2_CONCURRENT_STREAMS: u32 = 256;
 
-/// Hard cap on a buffered forward request/response body. The non-CONNECT
-/// forward path buffers bodies in memory, so an unbounded body would OOM the
-/// process; cap it and reject oversized payloads.
-const MAX_H2_FORWARD_BODY_BYTES: usize = 16 * 1024 * 1024;
+/// Cap on a forwarded (non-CONNECT) request body. Bodies are streamed, not
+/// buffered, so this is a policy limit rather than a memory guard; oversized
+/// uploads get 413. Responses are streamed with flow control and uncapped.
+const MAX_H2_FORWARD_BODY_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Handle a full HTTP/2 connection.
 ///
@@ -306,6 +307,16 @@ async fn handle_h2_connect_validated(
                 crate::metrics::ACTIVE_CONNECTIONS
                     .with_label_values(&["HTTP2"])
                     .dec();
+                // The record was inserted above; without this delete a denied
+                // h2 stream left it behind for good, permanently inflating
+                // the user's live connection count (and the admin list).
+                if let Err(e) = state.state.delete_connection(conn_id).await {
+                    tracing::warn!(
+                        "[HTTP2] state backend: delete_connection({}) failed: {}",
+                        conn_id,
+                        e
+                    );
+                }
                 let response = http::Response::builder()
                     .status(http::StatusCode::TOO_MANY_REQUESTS)
                     .body(())
@@ -330,18 +341,30 @@ async fn handle_h2_connect_validated(
         None
     };
     let started_at = chrono::Utc::now().timestamp();
-    let result = handle_h2_tunnel(
-        &authority,
-        client_addr,
-        host,
-        port,
-        request,
-        respond,
-        state,
-        quota_tracker,
-        ctx.is_admin,
-    )
-    .await;
+    // Register a cancel handle so DELETE /api/connections/:id can terminate a
+    // live h2 tunnel just like an HTTP/1 one.
+    let cancel = Arc::new(tokio::sync::Notify::new());
+    state.conn_cancel.insert(conn_id, cancel.clone());
+    let result = tokio::select! {
+        biased;
+        _ = cancel.notified() => {
+            tracing::info!(target: "audit", %conn_id, %client_addr, "h2 connection terminated by admin");
+            Err("terminated by admin".into())
+        }
+        r = handle_h2_tunnel(
+            &authority,
+            client_addr,
+            host,
+            port,
+            request,
+            respond,
+            state,
+            quota_tracker,
+            ctx.effective_uid(),
+            ctx.is_admin,
+        ) => r,
+    };
+    state.conn_cancel.remove(&conn_id);
 
     crate::metrics::ACTIVE_CONNECTIONS
         .with_label_values(&["HTTP2"])
@@ -530,6 +553,7 @@ async fn handle_h2_tunnel(
     mut respond: h2::server::SendResponse<bytes::Bytes>,
     state: &AppState,
     quota_tracker: Option<std::sync::Arc<crate::quota_tracker::UserQuotaTracker>>,
+    user_id: Option<i64>,
     is_admin: bool,
 ) -> Result<(u64, u64), Box<dyn std::error::Error + Send + Sync>> {
     // Resolve via DNS cache
@@ -631,7 +655,7 @@ async fn handle_h2_tunnel(
         .status(http::StatusCode::OK)
         .body(())
         .unwrap_or_else(|_| http::Response::new(()));
-    let mut send_stream = match respond.send_response(response, false) {
+    let send_stream = match respond.send_response(response, false) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("[HTTP2] Failed to send response for {}: {}", authority, e);
@@ -639,122 +663,30 @@ async fn handle_h2_tunnel(
         }
     };
 
-    let mut recv_stream = request.into_body();
-    let (mut upstream_reader, mut upstream_writer) = upstream.into_split();
-
     tracing::info!(
         "[HTTP2] Tunnel established: {} <-> {}",
         client_addr,
         authority
     );
 
-    // Use Arc+AtomicU64 to share byte counts between the two tasks
-    let sent_counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let recv_counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-
-    let sent_c = sent_counter.clone();
-    let recv_c = recv_counter.clone();
-
-    // Idle teardown: if a peer vanishes without FIN/RST (common for mobile/push
-    // clients), a plain read here would block forever, leaking the task, the
-    // upstream FD, the connection record, and the ACTIVE_CONNECTIONS gauge (#40).
-    // Bound each direction's read by the configured idle window; 0 disables.
-    let idle_secs = state.config.load().server.idle_timeout_secs;
-    let idle = std::time::Duration::from_secs(if idle_secs == 0 { u64::MAX } else { idle_secs });
-
-    // Bridge: h2 recv_stream -> upstream writer
-    let q_send = quota_tracker.clone();
-    let h2_to_upstream = async {
-        loop {
-            let data = match tokio::time::timeout(idle, recv_stream.data()).await {
-                Ok(inner) => inner,
-                Err(_) => {
-                    tracing::debug!("[HTTP2] idle timeout (client->upstream), closing tunnel");
-                    break;
-                }
-            };
-            match data {
-                Some(Ok(data)) => {
-                    if data.is_empty() {
-                        break;
-                    }
-                    let n = data.len();
-                    sent_c.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
-                    // Release flow control capacity
-                    let _ = recv_stream.flow_control().release_capacity(n);
-                    if let Err(e) = upstream_writer.write_all(&data).await {
-                        tracing::debug!("[HTTP2] upstream write error: {}", e);
-                        break;
-                    }
-                    if let Some(ref q) = q_send {
-                        let is_over = q.add_and_over(n as i64);
-                        if !is_admin && is_over {
-                            tracing::warn!(
-                                "[HTTP2] quota exceeded mid-tunnel (used={}, limit={})",
-                                q.used(),
-                                q.limit()
-                            );
-                            break;
-                        }
-                    }
-                }
-                Some(Err(e)) => {
-                    tracing::debug!("[HTTP2] h2 recv error: {}", e);
-                    break;
-                }
-                None => break, // Stream ended
-            }
-        }
+    let idle_timeout = match state.config.load().server.idle_timeout_secs {
+        0 => None,
+        secs => Some(std::time::Duration::from_secs(secs)),
     };
+    let throttler =
+        crate::proxy::listener::resolve_user_throttler(state, user_id, quota_tracker.as_ref())
+            .await;
 
-    // Bridge: upstream reader -> h2 send_stream
-    let q_recv = quota_tracker.clone();
-    let upstream_to_h2 = async {
-        let mut buf = vec![0u8; crate::constants::H2_RELAY_BUFFER_SIZE];
-        loop {
-            let read = match tokio::time::timeout(idle, upstream_reader.read(&mut buf)).await {
-                Ok(inner) => inner,
-                Err(_) => {
-                    tracing::debug!("[HTTP2] idle timeout (upstream->client), closing tunnel");
-                    break;
-                }
-            };
-            match read {
-                Ok(0) => break,
-                Ok(n) => {
-                    recv_c.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
-                    let data = bytes::Bytes::copy_from_slice(&buf[..n]);
-                    if let Err(e) = send_stream.send_data(data, false) {
-                        tracing::debug!("[HTTP2] h2 send error: {}", e);
-                        break;
-                    }
-                    if let Some(ref q) = q_recv {
-                        let is_over = q.add_and_over(n as i64);
-                        if !is_admin && is_over {
-                            tracing::warn!(
-                                "[HTTP2] quota exceeded mid-tunnel (used={}, limit={})",
-                                q.used(),
-                                q.limit()
-                            );
-                            break;
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::debug!("[HTTP2] upstream read error: {}", e);
-                    break;
-                }
-            }
-        }
-        // Signal end of stream
-        let _ = send_stream.send_data(bytes::Bytes::new(), true);
-    };
-
-    // Run both directions concurrently
-    tokio::join!(h2_to_upstream, upstream_to_h2);
-
-    let bytes_sent: u64 = sent_counter.load(std::sync::atomic::Ordering::Relaxed);
-    let bytes_received: u64 = recv_counter.load(std::sync::atomic::Ordering::Relaxed);
+    let (bytes_sent, bytes_received) = bridge_h2_stream(
+        request.into_body(),
+        send_stream,
+        upstream,
+        throttler,
+        quota_tracker,
+        !is_admin,
+        idle_timeout,
+    )
+    .await;
 
     tracing::info!(
         "[HTTP2] Tunnel closed: {} <-> {} (sent: {}, received: {})",
@@ -765,6 +697,45 @@ async fn handle_h2_tunnel(
     );
 
     Ok((bytes_sent, bytes_received))
+}
+
+/// Bridge one h2 CONNECT stream to an upstream byte stream.
+///
+/// Runs through the same relay as the HTTP/1 and SOCKS paths
+/// (`create_throttled_tunnel`), so the h2 tunnel gets the shared bidirectional
+/// idle clock (a vanished peer is reaped instead of leaking the task, upstream
+/// FD, connection record and gauge, #40), the per-user bandwidth throttle, the
+/// in-flight quota check, and the cross-direction abort flag. The h2 adapters
+/// honour flow control in both directions, so a slow reader stalls the
+/// upstream rather than growing the h2 send buffer (#42).
+///
+/// Returns (client->upstream bytes, upstream->client bytes).
+async fn bridge_h2_stream<U>(
+    recv_stream: h2::RecvStream,
+    send_stream: h2::SendStream<bytes::Bytes>,
+    upstream: U,
+    throttler: Option<crate::bandwidth::BandwidthThrottler>,
+    quota_tracker: Option<Arc<crate::quota_tracker::UserQuotaTracker>>,
+    enforce_quota: bool,
+    idle_timeout: Option<std::time::Duration>,
+) -> (u64, u64)
+where
+    U: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let client = (H2Reader::new(recv_stream), H2Writer::new(send_stream));
+    let upstream = tokio::io::split(upstream);
+    crate::stream::create_throttled_tunnel(
+        client,
+        upstream,
+        "h2-c2t",
+        "h2-t2c",
+        throttler,
+        quota_tracker,
+        enforce_quota,
+        idle_timeout,
+    )
+    .await
+    .unwrap_or((0, 0))
 }
 
 lazy_static::lazy_static! {
@@ -922,42 +893,8 @@ async fn handle_h2_forward_validated(
         client_addr
     );
 
-    // Read request body
-    let mut recv_stream = request.into_body();
-    let mut body_data = Vec::new();
-    while let Some(chunk) = recv_stream.data().await {
-        match chunk {
-            Ok(data) => {
-                let _ = recv_stream.flow_control().release_capacity(data.len());
-                if body_data.len() + data.len() > MAX_H2_FORWARD_BODY_BYTES {
-                    tracing::warn!(
-                        "[HTTP2-FWD] {} request body exceeds {} bytes — rejecting",
-                        client_addr,
-                        MAX_H2_FORWARD_BODY_BYTES
-                    );
-                    let resp = http::Response::builder()
-                        .status(http::StatusCode::PAYLOAD_TOO_LARGE)
-                        .body(())
-                        .unwrap_or_else(|_| http::Response::new(()));
-                    let _ = respond.send_response(resp, true);
-                    return;
-                }
-                body_data.extend_from_slice(&data);
-            }
-            Err(e) => {
-                tracing::error!("[HTTP2-FWD] Error reading request body: {}", e);
-                let resp = http::Response::builder()
-                    .status(http::StatusCode::BAD_REQUEST)
-                    .body(())
-                    .unwrap_or_else(|_| http::Response::new(()));
-                let _ = respond.send_response(resp, true);
-                return;
-            }
-        }
-    }
-
-    // Forward via dedicated HTTP client. Bound concurrency per upstream
-    // host so a slow/broken target can't soak up the entire worker pool.
+    // Gate on the per-host permit BEFORE touching the request body (#43), so
+    // queued streams hold at most their h2 receive window, not a buffered body.
     let host_for_limit = uri
         .authority()
         .map(|a| a.host().to_string())
@@ -976,12 +913,46 @@ async fn handle_h2_forward_validated(
         }
     };
 
-    let upstream_req = H2_FORWARD_CLIENT
-        .request(
-            reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET),
-            &target_url,
-        )
-        .body(body_data);
+    // Request body: streamed to the upstream (never buffered), still capped.
+    let declared_len = request
+        .headers()
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    if declared_len.is_some_and(|n| n > MAX_H2_FORWARD_BODY_BYTES) {
+        tracing::warn!(
+            "[HTTP2-FWD] {} declared request body exceeds {} bytes — rejecting",
+            client_addr,
+            MAX_H2_FORWARD_BODY_BYTES
+        );
+        let resp = http::Response::builder()
+            .status(http::StatusCode::PAYLOAD_TOO_LARGE)
+            .body(())
+            .unwrap_or_else(|_| http::Response::new(()));
+        let _ = respond.send_response(resp, true);
+        return;
+    }
+    let recv_stream = request.into_body();
+    let body_too_large = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let upstream_body = if recv_stream.is_end_stream() {
+        // No body (typical GET): send none rather than an empty chunked body.
+        None
+    } else {
+        Some(reqwest::Body::wrap(H2Body::new(
+            recv_stream,
+            MAX_H2_FORWARD_BODY_BYTES,
+            declared_len,
+            body_too_large.clone(),
+        )))
+    };
+
+    let mut upstream_req = H2_FORWARD_CLIENT.request(
+        reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET),
+        &target_url,
+    );
+    if let Some(body) = upstream_body {
+        upstream_req = upstream_req.body(body);
+    }
 
     let started_at = std::time::Instant::now();
     match upstream_req.send().await {
@@ -996,55 +967,40 @@ async fn handle_h2_forward_validated(
                 }
             }
 
-            // Read the response body with a hard cap so a large/chunked upstream
-            // response can't grow unbounded in memory.
-            let mut buf: Vec<u8> = Vec::new();
-            let mut too_large = false;
+            let response = builder.body(()).unwrap_or_else(|_| http::Response::new(()));
+            let send = match respond.send_response(response, false) {
+                Ok(send) => send,
+                Err(e) => {
+                    tracing::error!("[HTTP2-FWD] Failed to send response: {}", e);
+                    return;
+                }
+            };
+
+            // Stream the response body with h2 flow control (#43): a slow
+            // reader stalls the upstream read instead of the proxy buffering
+            // the whole response.
+            let mut writer = H2Writer::new(send);
+            let mut bytes_transferred: u64 = 0;
             loop {
                 match upstream_resp.chunk().await {
                     Ok(Some(chunk)) => {
-                        if buf.len() + chunk.len() > MAX_H2_FORWARD_BODY_BYTES {
-                            too_large = true;
+                        if let Err(e) = writer.write_all(&chunk).await {
+                            tracing::debug!("[HTTP2-FWD] client write error: {}", e);
                             break;
                         }
-                        buf.extend_from_slice(&chunk);
+                        bytes_transferred += chunk.len() as u64;
                     }
-                    Ok(None) => break,
+                    Ok(None) => {
+                        let _ = writer.shutdown().await;
+                        break;
+                    }
                     Err(e) => {
                         tracing::error!("[HTTP2-FWD] Error reading upstream body: {}", e);
-                        let resp = http::Response::builder()
-                            .status(http::StatusCode::BAD_GATEWAY)
-                            .body(())
-                            .unwrap_or_else(|_| http::Response::new(()));
-                        let _ = respond.send_response(resp, true);
-                        return;
+                        // Headers are already out; signal truncation with a
+                        // stream reset rather than a clean END_STREAM.
+                        writer.reset(h2::Reason::INTERNAL_ERROR);
+                        break;
                     }
-                }
-            }
-            if too_large {
-                tracing::warn!(
-                    "[HTTP2-FWD] upstream response exceeds {} bytes — rejecting",
-                    MAX_H2_FORWARD_BODY_BYTES
-                );
-                let resp = http::Response::builder()
-                    .status(http::StatusCode::BAD_GATEWAY)
-                    .body(())
-                    .unwrap_or_else(|_| http::Response::new(()));
-                let _ = respond.send_response(resp, true);
-                return;
-            }
-            let resp_body = bytes::Bytes::from(buf);
-            let bytes_transferred = resp_body.len() as u64;
-            let response = builder.body(()).unwrap_or_else(|_| http::Response::new(()));
-
-            match respond.send_response(response, resp_body.is_empty()) {
-                Ok(mut send) => {
-                    if !resp_body.is_empty() {
-                        let _ = send.send_data(resp_body, true);
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("[HTTP2-FWD] Failed to send response: {}", e);
                 }
             }
 
@@ -1074,14 +1030,24 @@ async fn handle_h2_forward_validated(
             );
         }
         Err(e) => {
-            tracing::error!(
-                "[HTTP2-FWD] Forward failed for {} {}: {}",
-                method,
-                target_url,
-                e
-            );
+            let status = if body_too_large.load(std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!(
+                    "[HTTP2-FWD] {} request body exceeds {} bytes — rejecting",
+                    client_addr,
+                    MAX_H2_FORWARD_BODY_BYTES
+                );
+                http::StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                tracing::error!(
+                    "[HTTP2-FWD] Forward failed for {} {}: {}",
+                    method,
+                    target_url,
+                    e
+                );
+                http::StatusCode::BAD_GATEWAY
+            };
             let resp = http::Response::builder()
-                .status(http::StatusCode::BAD_GATEWAY)
+                .status(status)
                 .body(())
                 .unwrap_or_else(|_| http::Response::new(()));
             let _ = respond.send_response(resp, true);
@@ -1177,6 +1143,71 @@ mod tests {
     fn test_auth_header_not_basic_returns_none() {
         let header = "Bearer some-token";
         assert!(!header.starts_with("Basic "));
+    }
+
+    /// #40: a CONNECT stream whose client and upstream both go silent must be
+    /// torn down by the idle window instead of blocking forever.
+    #[tokio::test]
+    async fn h2_bridge_reaps_idle_tunnel() {
+        let (_client, resp, _send, req, mut respond) = crate::proxy::h2_io::tests::pair().await;
+        let send = respond
+            .send_response(http::Response::new(()), false)
+            .unwrap();
+        let _resp = resp.await.unwrap();
+        let (upstream, _upstream_peer) = tokio::io::duplex(1024);
+
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            bridge_h2_stream(
+                req.into_body(),
+                send,
+                upstream,
+                None,
+                None,
+                true,
+                Some(std::time::Duration::from_millis(200)),
+            ),
+        )
+        .await;
+        assert_eq!(res.expect("idle h2 tunnel was not reaped"), (0, 0));
+    }
+
+    /// The bridge relays both directions and counts bytes.
+    #[tokio::test]
+    async fn h2_bridge_relays_both_directions() {
+        use tokio::io::AsyncReadExt;
+
+        let (_client, resp, mut send_up, req, mut respond) =
+            crate::proxy::h2_io::tests::pair().await;
+        let send = respond
+            .send_response(http::Response::new(()), false)
+            .unwrap();
+        let (upstream, mut upstream_peer) = tokio::io::duplex(1024);
+
+        let bridge = tokio::spawn(bridge_h2_stream(
+            req.into_body(),
+            send,
+            upstream,
+            None,
+            None,
+            true,
+            Some(std::time::Duration::from_secs(5)),
+        ));
+
+        send_up
+            .send_data(bytes::Bytes::from_static(b"ping"), true)
+            .unwrap();
+        let mut got = [0u8; 4];
+        upstream_peer.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"ping");
+        upstream_peer.write_all(b"pong!").await.unwrap();
+        drop(upstream_peer); // upstream EOF
+
+        let mut body = H2Reader::new(resp.await.unwrap().into_body());
+        let mut out = Vec::new();
+        body.read_to_end(&mut out).await.unwrap();
+        assert_eq!(out, b"pong!");
+        assert_eq!(bridge.await.unwrap(), (4, 5));
     }
 
     #[test]

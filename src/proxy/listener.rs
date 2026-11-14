@@ -565,6 +565,39 @@ async fn handle_client(
     }
 }
 
+/// Resolve the per-user bandwidth throttler for a relay. Shared by the TCP
+/// relay and the HTTP/2 CONNECT bridge so both enforce the same limit.
+pub(crate) async fn resolve_user_throttler(
+    state: &AppState,
+    user_id: Option<i64>,
+    quota_tracker: Option<&Arc<crate::quota_tracker::UserQuotaTracker>>,
+) -> Option<crate::bandwidth::BandwidthThrottler> {
+    match (user_id, quota_tracker) {
+        (Some(uid), Some(tracker)) => {
+            // Fast path: throttler already cached on the tracker.
+            if let Some(t) = tracker.throttler_cached() {
+                t
+            } else {
+                // Cold path: resolve once and stash on the tracker. Subsequent
+                // connections in the same quota window hit the cached arm above.
+                let resolved = if let Some(user) = state.cached_user_by_id(uid).await {
+                    if user.bandwidth_rate_bps > 0 {
+                        state
+                            .bandwidth_throttlers
+                            .get_or_create(uid, user.bandwidth_rate_bps as u64)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                tracker.throttler_or_init(|| resolved.clone())
+            }
+        }
+        _ => None,
+    }
+}
+
 async fn async_handle_client_with_target(
     client_stream: &mut ClientStream,
     client_addr: SocketAddr,
@@ -740,30 +773,7 @@ async fn async_handle_client_with_target(
     } else {
         None
     };
-    let throttler = match (user_id, quota_tracker.as_ref()) {
-        (Some(uid), Some(tracker)) => {
-            // Fast path: throttler already cached on the tracker.
-            if let Some(t) = tracker.throttler_cached() {
-                t
-            } else {
-                // Cold path: resolve once and stash on the tracker. Subsequent
-                // connections in the same quota window hit the cached arm above.
-                let resolved = if let Some(user) = state.cached_user_by_id(uid).await {
-                    if user.bandwidth_rate_bps > 0 {
-                        state
-                            .bandwidth_throttlers
-                            .get_or_create(uid, user.bandwidth_rate_bps as u64)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                tracker.throttler_or_init(|| resolved.clone())
-            }
-        }
-        _ => None,
-    };
+    let throttler = resolve_user_throttler(state, user_id, quota_tracker.as_ref()).await;
 
     // Idle timeout reaps half-open tunnels whose peer vanished without FIN/RST.
     // 0 in config disables it.
