@@ -1,8 +1,5 @@
+use crate::db::api_keys::api_key_digest;
 use crate::db::models::ApiKey;
-use argon2::{
-    password_hash::{PasswordHasher, SaltString},
-    Argon2,
-};
 use base64::Engine;
 use sqlx::SqlitePool;
 
@@ -24,9 +21,8 @@ pub async fn create_api_key(
         let full_key = format!("{}.{}", prefix, secret);
         (full_key, prefix)
     };
-    let key_hash = hash_api_key(&full_key)
-        .await
-        .map_err(|e| sqlx::Error::Protocol(format!("API key hashing failed: {}", e)))?;
+    // 256-bit random secret: a SHA-256 digest is enough (see db::api_keys).
+    let key_hash = api_key_digest(&full_key);
     let now = chrono::Utc::now().timestamp();
     let expires_at = expires_in_days.map(|days| now + (days * 86400));
     let result = sqlx::query(
@@ -80,19 +76,6 @@ pub async fn revoke_api_key(
         .execute(pool)
         .await?;
     Ok(())
-}
-
-async fn hash_api_key(key: &str) -> Result<String, argon2::password_hash::Error> {
-    let key = key.to_string();
-    tokio::task::spawn_blocking(move || {
-        use argon2::password_hash::rand_core::OsRng;
-        let salt = SaltString::generate(&mut OsRng);
-        let argon2 = Argon2::default();
-        let key_hash = argon2.hash_password(key.as_bytes(), &salt)?;
-        Ok(key_hash.to_string())
-    })
-    .await
-    .map_err(|_| argon2::password_hash::Error::Password)?
 }
 
 #[cfg(test)]
@@ -328,20 +311,15 @@ mod tests {
         assert!(key.is_active);
     }
 
-    // === hash_api_key Tests ===
+    // === stored hash ===
 
     #[tokio::test]
-    async fn test_hash_api_key_produces_argon2_hash() {
-        let hash = hash_api_key("test_key_value").await.unwrap();
-        assert!(hash.starts_with("$argon2"));
-        assert!(hash.len() > 50);
-    }
-
-    #[tokio::test]
-    async fn test_hash_api_key_different_hashes_for_same_input() {
-        let hash1 = hash_api_key("same_key").await.unwrap();
-        let hash2 = hash_api_key("same_key").await.unwrap();
-        // Different salts should produce different hashes
-        assert_ne!(hash1, hash2);
+    async fn test_create_api_key_stores_digest_not_plaintext() {
+        let pool = setup_test_db().await;
+        let (full_key, api_key) = create_api_key(&pool, 1, Some("d".to_string()), None)
+            .await
+            .unwrap();
+        assert_eq!(api_key.key_hash, api_key_digest(&full_key));
+        assert!(!api_key.key_hash.contains(&full_key));
     }
 }

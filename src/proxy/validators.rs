@@ -1,15 +1,21 @@
 //! Standalone validators for the connection pipeline.
 //! Each function takes a `ConnectionContext` and `AppState`, returns a `Verdict`.
 //! Adding a new validator = add one function here + one call in `handle_client`.
+//!
+//! Admin handling (#56): post-auth validators are evaluated for admin
+//! connections too. A denial is turned into an allow only when the rule is in
+//! `filtering.admin_bypass_rules`, and every such bypass is audit-logged and
+//! counted via `ConnectionContext::apply_admin_bypass`. Pre-auth (phase 1)
+//! validators run before the user is known and are never bypassed.
 
-use super::pipeline::{ConnectionContext, Verdict};
+use super::pipeline::{self, ConnectionContext, Verdict};
 use crate::app_state::AppState;
 
 // ─── Phase 1: Pre-Connection (IP only) ─────────────────────────────────────
 
 /// Check client IP against the configured allowlist/blocklist.
 pub async fn validate_ip_filter(ctx: &ConnectionContext, state: &AppState) -> Verdict {
-    if ctx.is_admin || !ctx.config.ip_filter_enabled {
+    if !ctx.config.ip_filter_enabled {
         return Verdict::Allow;
     }
     let ip_filter = state.ip_filter.read().await;
@@ -27,18 +33,33 @@ pub async fn validate_ip_filter(ctx: &ConnectionContext, state: &AppState) -> Ve
 
 /// Block or allow by country using the GeoIP database.
 pub async fn validate_geo_block(ctx: &ConnectionContext, state: &AppState) -> Verdict {
-    if ctx.is_admin || !ctx.config.geo_blocking_enabled {
+    if !ctx.config.geo_blocking_enabled {
         return Verdict::Allow;
     }
     let geo = match &state.geo_filter {
         Some(g) => g,
-        None => return Verdict::Allow,
+        None => {
+            // Enabled but no database loaded. Startup and config reload both
+            // refuse this state, so reaching here is a bug — fail closed
+            // rather than silently dropping every country restriction (#55).
+            tracing::error!(
+                "geo blocking enabled but no GeoIP database is loaded — denying {} (fail-closed)",
+                ctx.client_addr.ip()
+            );
+            crate::metrics::GEO_FILTER_ACTIONS
+                .with_label_values(&["unavailable"])
+                .inc();
+            return Verdict::Deny("Geo-filter unavailable (fail-closed)".to_string());
+        }
     };
     let (allowed, country) = geo.is_ip_allowed(
         ctx.client_addr.ip(),
         &ctx.config.blocked_countries,
         &ctx.config.allowed_countries,
     );
+    crate::metrics::GEO_FILTER_ACTIONS
+        .with_label_values(&[if allowed { "allowed" } else { "blocked" }])
+        .inc();
     if !allowed {
         return Verdict::Deny(format!(
             "IP {} blocked by geo-filter (country: {})",
@@ -51,7 +72,7 @@ pub async fn validate_geo_block(ctx: &ConnectionContext, state: &AppState) -> Ve
 
 /// Per-IP rate limiting via the global rate limiter.
 pub async fn validate_ip_rate_limit(ctx: &ConnectionContext, state: &AppState) -> Verdict {
-    if ctx.is_admin || !ctx.config.rate_limiting_enabled {
+    if !ctx.config.rate_limiting_enabled {
         return Verdict::Allow;
     }
     if !state.ip_rate_limiter.check_ip(ctx.client_addr.ip()).await {
@@ -68,48 +89,47 @@ pub async fn validate_ip_rate_limit(ctx: &ConnectionContext, state: &AppState) -
 
 // ─── Phase 2: Post-Auth (user_id + protocol available) ─────────────────────
 
-/// Enforce SOCKS4 protocol restrictions (disabled protocol with admin bypass).
+/// Enforce protocol restrictions: the global SOCKS4 switch and the per-user
+/// `allowed_protocols` list. Each is a separate admin-bypassable rule.
 pub async fn validate_protocol_restriction(ctx: &ConnectionContext, state: &AppState) -> Verdict {
-    let protocol = match &ctx.protocol {
-        Some(p) => p,
-        None => return Verdict::Allow,
-    };
-    // SOCKS4 disabled check
-    if *protocol == crate::proxy::protocol::ProxyProtocol::SOCKS4 && !ctx.config.socks4_enabled {
-        if ctx.is_admin {
-            tracing::info!(
-                target: "audit",
-                user_id = ?ctx.user_id,
-                client_addr = %ctx.client_addr,
-                rule = "socks4_disabled",
-                "admin bypass: SOCKS4 allowed for admin user"
-            );
-            crate::metrics::ADMIN_BYPASS_TOTAL
-                .with_label_values(&["socks4_disabled"])
-                .inc();
-            return Verdict::Allow;
-        }
+    let socks4 = ctx.apply_admin_bypass(pipeline::RULE_SOCKS4_DISABLED, check_socks4_enabled(ctx));
+    if socks4.is_denied() {
         crate::metrics::AUTH_FAILURES
             .with_label_values(&["socks4_disabled"])
             .inc();
+        return socks4;
+    }
+    ctx.apply_admin_bypass(
+        pipeline::RULE_ALLOWED_PROTOCOLS,
+        check_allowed_protocols(ctx, state).await,
+    )
+}
+
+fn check_socks4_enabled(ctx: &ConnectionContext) -> Verdict {
+    if ctx.protocol == Some(crate::proxy::protocol::ProxyProtocol::SOCKS4)
+        && !ctx.config.socks4_enabled
+    {
         return Verdict::Deny(format!(
-            "SOCKS4 protocol disabled for non-admin user from {}",
+            "SOCKS4 protocol disabled (client {})",
             ctx.client_addr
         ));
     }
-    // Per-user allowed_protocols check
-    if let Some(uid) = ctx.effective_uid() {
-        if !ctx.is_admin {
-            if let Some(cached) = state.cached_user_by_id(uid).await {
-                if let Some(ref protos) = cached.allowed_protocols {
-                    let proto_str = protocol.as_str_lower();
-                    if !protos.iter().any(|p| p.eq_ignore_ascii_case(proto_str)) {
-                        return Verdict::Deny(format!(
-                            "User {} not allowed protocol {} (allowed: {:?})",
-                            uid, protocol, protos
-                        ));
-                    }
-                }
+    Verdict::Allow
+}
+
+async fn check_allowed_protocols(ctx: &ConnectionContext, state: &AppState) -> Verdict {
+    let (protocol, uid) = match (&ctx.protocol, ctx.effective_uid()) {
+        (Some(p), Some(uid)) => (p, uid),
+        _ => return Verdict::Allow,
+    };
+    if let Some(cached) = state.cached_user_by_id(uid).await {
+        if let Some(ref protos) = cached.allowed_protocols {
+            let proto_str = protocol.as_str_lower();
+            if !protos.iter().any(|p| p.eq_ignore_ascii_case(proto_str)) {
+                return Verdict::Deny(format!(
+                    "User {} not allowed protocol {} (allowed: {:?})",
+                    uid, protocol, protos
+                ));
             }
         }
     }
@@ -118,7 +138,11 @@ pub async fn validate_protocol_restriction(ctx: &ConnectionContext, state: &AppS
 
 /// Require active IP approval for non-admin users when connection_approval is enabled.
 pub async fn validate_approval(ctx: &ConnectionContext, state: &AppState) -> Verdict {
-    if ctx.is_admin || !ctx.config.connection_approval {
+    ctx.apply_admin_bypass(pipeline::RULE_APPROVAL, check_approval(ctx, state).await)
+}
+
+async fn check_approval(ctx: &ConnectionContext, state: &AppState) -> Verdict {
+    if !ctx.config.connection_approval {
         return Verdict::Allow;
     }
     let uid = match ctx.effective_uid() {
@@ -141,9 +165,13 @@ pub async fn validate_approval(ctx: &ConnectionContext, state: &AppState) -> Ver
 
 /// Per-user RPS rate limiting. Also caches user config for later use.
 pub async fn validate_user_rate_limit(ctx: &ConnectionContext, state: &AppState) -> Verdict {
-    if ctx.is_admin {
-        return Verdict::Allow;
-    }
+    ctx.apply_admin_bypass(
+        pipeline::RULE_USER_RATE_LIMIT,
+        check_user_rate_limit(ctx, state).await,
+    )
+}
+
+async fn check_user_rate_limit(ctx: &ConnectionContext, state: &AppState) -> Verdict {
     let uid = match ctx.effective_uid() {
         Some(uid) => uid,
         None => return Verdict::Allow,
@@ -196,21 +224,50 @@ pub async fn validate_user_rate_limit(ctx: &ConnectionContext, state: &AppState)
 
 /// Check target domain against global + per-user allow/blocklists (union logic).
 pub async fn validate_target_domain(ctx: &ConnectionContext, state: &AppState) -> Verdict {
-    if ctx.is_admin {
-        return Verdict::Allow;
-    }
-    let uid = match ctx.effective_uid() {
-        Some(uid) => uid,
-        None => return Verdict::Allow,
-    };
+    ctx.apply_admin_bypass(
+        pipeline::RULE_TARGET_FILTER,
+        check_target_domain(ctx, state).await,
+    )
+}
+
+async fn check_target_domain(ctx: &ConnectionContext, state: &AppState) -> Verdict {
     let host = match &ctx.target_host {
         Some(h) => h,
         None => return Verdict::Allow,
     };
-    // Use cached user lookup (Redis -> in-memory -> DB) instead of direct DB query
+    let uid = match ctx.effective_uid() {
+        Some(uid) => uid,
+        None => {
+            // No DB user (auth disabled, or the config-file credential): the
+            // global allow/block lists still apply.
+            if !crate::target_filter::is_target_allowed(
+                host,
+                &ctx.config.global_allowed_targets,
+                &ctx.config.global_blocked_targets,
+                None,
+                None,
+            ) {
+                return Verdict::Deny(format!("Target {} blocked by global domain filter", host));
+            }
+            return Verdict::Allow;
+        }
+    };
+    // Use cached user lookup (Redis -> in-memory -> DB) instead of direct DB query.
+    // An authenticated user whose record cannot be loaded must not skip
+    // their per-user target lists: fail closed (#57).
     let cu = match state.cached_user_by_id(uid).await {
         Some(cu) => cu,
-        None => return Verdict::Allow, // Fail-open if user fetch fails
+        None => {
+            tracing::error!(
+                "Target filter: could not load user {} - denying {} (fail-closed)",
+                uid,
+                host
+            );
+            return Verdict::Deny(format!(
+                "Target filter unavailable for user {} (fail-closed)",
+                uid
+            ));
+        }
     };
     if !crate::target_filter::is_target_allowed(
         host,
@@ -229,9 +286,13 @@ pub async fn validate_target_domain(ctx: &ConnectionContext, state: &AppState) -
 
 /// Enforce time-based access restrictions (per-user schedule or global default).
 pub async fn validate_access_schedule(ctx: &ConnectionContext, state: &AppState) -> Verdict {
-    if ctx.is_admin {
-        return Verdict::Allow;
-    }
+    ctx.apply_admin_bypass(
+        pipeline::RULE_ACCESS_SCHEDULE,
+        check_access_schedule(ctx, state).await,
+    )
+}
+
+async fn check_access_schedule(ctx: &ConnectionContext, state: &AppState) -> Verdict {
     let uid = match ctx.effective_uid() {
         Some(uid) => uid,
         None => return Verdict::Allow,
@@ -270,9 +331,10 @@ pub async fn validate_access_schedule(ctx: &ConnectionContext, state: &AppState)
 /// enforcement always agree. There is no per-connection SUM() and no
 /// 30s staleness window.
 pub async fn validate_quota(ctx: &ConnectionContext, state: &AppState) -> Verdict {
-    if ctx.is_admin {
-        return Verdict::Allow;
-    }
+    ctx.apply_admin_bypass(pipeline::RULE_QUOTA, check_quota(ctx, state).await)
+}
+
+async fn check_quota(ctx: &ConnectionContext, state: &AppState) -> Verdict {
     let uid = match ctx.effective_uid() {
         Some(uid) => uid,
         None => return Verdict::Allow,
@@ -296,11 +358,38 @@ pub async fn validate_quota(ctx: &ConnectionContext, state: &AppState) -> Verdic
     }
 }
 
+/// Per-user limit decision.
+///
+/// Callers insert the connection record *before* counting (reserve, then
+/// check). With a linearizable backend that cannot overshoot: of N racing
+/// connections, the k-th insert is visible to its own count, so it sees at
+/// least k and only the first `max` can pass. The race can at worst
+/// over-reject a burst, never over-admit (#46).
+///
+/// If the record could not be stored (`self_tracked == false`) the count does
+/// not include this connection, so compare with `>=`; the old unconditional
+/// `>` let one extra connection through whenever `set_connection` failed.
+pub(crate) fn exceeds_connection_limit(
+    active_count: usize,
+    max_connections: usize,
+    self_tracked: bool,
+) -> bool {
+    if self_tracked {
+        active_count > max_connections
+    } else {
+        active_count >= max_connections
+    }
+}
+
 /// Enforce per-user concurrent connection limit.
 pub async fn validate_connection_limit(ctx: &ConnectionContext, state: &AppState) -> Verdict {
-    if ctx.is_admin {
-        return Verdict::Allow;
-    }
+    ctx.apply_admin_bypass(
+        pipeline::RULE_CONNECTION_LIMIT,
+        check_connection_limit(ctx, state).await,
+    )
+}
+
+async fn check_connection_limit(ctx: &ConnectionContext, state: &AppState) -> Verdict {
     let uid = match ctx.effective_uid() {
         Some(uid) => uid,
         None => return Verdict::Allow,
@@ -338,13 +427,73 @@ pub async fn validate_connection_limit(ctx: &ConnectionContext, state: &AppState
             None => 100,
         },
     };
-    // Note: the current connection is already tracked in state before this
-    // check runs, so we use `>` (not `>=`) to allow exactly `max_connections`.
-    if active_count > max_connections {
+    if exceeds_connection_limit(active_count, max_connections, ctx.conn_tracked) {
         return Verdict::Deny(format!(
             "User {} has {} active connections (max {})",
             uid, active_count, max_connections
         ));
     }
     Verdict::Allow
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exceeds_connection_limit;
+    use crate::state::backend::{ConnectionInfo, StateBackend};
+    use crate::state::memory::MemoryBackend;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn limit_counts_self_only_when_tracked() {
+        // Tracked: the count includes this connection.
+        assert!(!exceeds_connection_limit(3, 3, true));
+        assert!(exceeds_connection_limit(4, 3, true));
+        // Untracked: the count excludes it, so 3 others already fill max=3.
+        assert!(!exceeds_connection_limit(2, 3, false));
+        assert!(exceeds_connection_limit(3, 3, false));
+    }
+
+    /// #46: the reserve-then-count protocol never admits more than `max`
+    /// concurrent connections, however the inserts and counts interleave.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reserve_then_count_never_overshoots() {
+        const MAX: usize = 5;
+        let backend = Arc::new(MemoryBackend::new());
+        let admitted_now = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for i in 0..200u16 {
+            let backend = backend.clone();
+            let admitted_now = admitted_now.clone();
+            let peak = peak.clone();
+            tasks.push(tokio::spawn(async move {
+                let id = uuid::Uuid::new_v4();
+                let info = ConnectionInfo {
+                    id,
+                    client_addr: ([127, 0, 0, 1], 1000 + i).into(),
+                    target_addr: "example.com:443".into(),
+                    protocol: crate::proxy::protocol::ProxyProtocol::HTTP,
+                    state: crate::connection::ConnectionState::Active,
+                    user_id: Some(7),
+                    bytes_sent: 0,
+                    bytes_received: 0,
+                    created_at: 0,
+                };
+                backend.set_connection(id, info).await.unwrap();
+                let count = backend.count_user_connections(7).await.unwrap();
+                if !exceeds_connection_limit(count, MAX, true) {
+                    let now = admitted_now.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    tokio::task::yield_now().await;
+                    admitted_now.fetch_sub(1, Ordering::SeqCst);
+                }
+                backend.delete_connection(id).await.unwrap();
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+        assert!(peak.load(Ordering::SeqCst) <= MAX);
+    }
 }

@@ -5,7 +5,7 @@
 ## Context
 Migrations (`migrations/NNN_*.sql`) are applied at boot by
 `sqlx::migrate!` and are up-only. Some are destructive table rebuilds
-(013, 015, 021) or column drops (020), so a bad upgrade had no rollback path
+(013, 015, 018) or column drops (017), so a bad upgrade had no rollback path
 other than whatever backup the operator happened to take (#37).
 
 Reversible migrations were considered. With SQLite they buy little: most

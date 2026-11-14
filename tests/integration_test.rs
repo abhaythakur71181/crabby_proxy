@@ -130,6 +130,9 @@ dns_cache_ttl = 60
         let binary = env!("CARGO_BIN_EXE_crabby_proxy");
         let child = Command::new(binary)
             .args(["--config", config_path.to_str().unwrap()])
+            // Fixed root password so first boot doesn't write a generated
+            // one to initial_root_password.txt in the crate directory.
+            .env("CRABBY_ROOT_PASSWORD", "integration-test-root-password")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()

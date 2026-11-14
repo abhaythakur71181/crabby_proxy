@@ -230,13 +230,32 @@ mod migration_tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// #36: migration 021 rebuilds the user-owned tables with ON DELETE
+    /// Migration 018 rebuilds api_keys; the (user_id, key_prefix) lookup index
+    /// from 016 must survive and the redundant key_hash index must not return.
+    #[tokio::test]
+    async fn api_key_indexes_after_all_migrations() {
+        let pool = create_pool("sqlite::memory:", 1).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let names: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'api_keys'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(
+            names.iter().any(|n| n == "idx_api_keys_user_prefix"),
+            "{names:?}"
+        );
+        assert!(!names.iter().any(|n| n == "idx_api_keys_hash"), "{names:?}");
+    }
+
+    /// #36: migration 018 rebuilds the user-owned tables with ON DELETE
     /// CASCADE, keeps their rows and id high-water marks, and keeps actor /
     /// history references blocking.
     #[tokio::test]
-    async fn migration_021_cascades_user_owned_rows() {
+    async fn migration_018_cascades_user_owned_rows() {
         let pool = create_pool("sqlite::memory:", 1).await.unwrap();
-        migrate_up_to(&pool, 20).await;
+        migrate_up_to(&pool, 17).await;
         for stmt in [
             "INSERT INTO users (id, username, password_hash, role, created_at, updated_at) VALUES (1,'admin','h','admin',0,0),(2,'u','h','user',0,0)",
             "INSERT INTO user_groups (id, name) VALUES (1,'g')",
@@ -309,12 +328,12 @@ mod migration_tests {
         }
     }
 
-    /// #35: migration 020 folds `bandwidth_limit_mb` into
+    /// #35: migration 017 folds `bandwidth_limit_mb` into
     /// `monthly_bandwidth_quota` without changing anyone's effective quota.
     #[tokio::test]
-    async fn migration_020_preserves_effective_quota() {
+    async fn migration_017_preserves_effective_quota() {
         let pool = create_pool("sqlite::memory:", 1).await.unwrap();
-        migrate_up_to(&pool, 15).await;
+        migrate_up_to(&pool, 16).await;
         // (id, bandwidth_limit_mb, monthly_bandwidth_quota)
         let seed: [(i64, i64, Option<i64>); 5] = [
             (1, 1000, None),       // legacy MB only -> 1000 MiB

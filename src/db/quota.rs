@@ -48,7 +48,7 @@ pub async fn get_quota_stats(pool: &SqlitePool, user_id: i64) -> Result<QuotaSta
     let period = QuotaPeriod::Monthly;
     let window_start = period.window_start();
     // `monthly_bandwidth_quota` (bytes, NULL = unlimited) is the single source
-    // of truth; migration 020 folded the legacy `bandwidth_limit_mb` into it.
+    // of truth; migration 017 folded the legacy `bandwidth_limit_mb` into it.
     let row: (Option<i64>, i64) = sqlx::query_as(
         r#"
         SELECT

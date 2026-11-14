@@ -66,15 +66,14 @@ pub struct AppState {
     // DNS resolution cache (reduces upstream connect latency)
     pub dns_cache: Arc<crate::dns_cache::DnsCache>,
 
-    // Upstream connection pool (reuses idle TCP connections)
-    pub connection_pool: Option<Arc<crate::connection_pool::ConnectionPool>>,
-
     // Auth result cache: HMAC(creds) -> (user_id, cached_at).
     // Avoids DB + argon2 on every connection from the same user (60s TTL).
     // The key is an HMAC-SHA256 of (username, password) under a process-random
     // key, so plaintext credentials are never resident as map keys (heap dumps /
     // swap / cores) while remaining collision-safe (full 256-bit digest).
-    pub auth_cache: Arc<dashmap::DashMap<[u8; 32], (i64, std::time::Instant)>>,
+    // Bounded (10k entries) with a periodic TTL sweep, and invalidated per
+    // user on credential changes; see crate::auth_cache.
+    pub auth_cache: crate::auth_cache::AuthCache,
 
     // Negative auth cache: HMAC(failed creds) -> cached_at.
     // Short TTL (5s) absorbs credential-stuffing bursts so a flood of bad
@@ -146,7 +145,7 @@ pub struct AppState {
     // permit per multiplexed stream). Without per-stream accounting an h2
     // connection's single accept-permit covers up to 256 streams, defeating the
     // global limit by ~256x (#41).
-    pub global_conn_semaphore: Arc<tokio::sync::Semaphore>,
+    pub global_conn_limit: crate::conn_limiter::ConnLimiter,
 }
 
 impl AppState {
@@ -155,6 +154,7 @@ impl AppState {
         config_path: Option<String>,
         db_pool: sqlx::SqlitePool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        config.validate_access_control()?;
         let state: Arc<dyn StateBackend> = match config.state.backend.as_str() {
             "redis" => {
                 match RedisBackend::new(
@@ -246,9 +246,12 @@ impl AppState {
             Arc::new(RwLock::new(filter))
         };
 
-        // Initialize GeoIP filter (optional)
-        let geo_filter =
-            crate::geo_filter::init_geo_filter(config.filtering.geoip_database_path.as_deref());
+        // Initialize GeoIP filter. Mandatory when geo blocking is enabled:
+        // refuse to start rather than silently fail open (#55).
+        let geo_filter = crate::geo_filter::init_geo_filter(
+            config.filtering.geoip_database_path.as_deref(),
+            config.filtering.geo_blocking_enabled,
+        )?;
 
         // Build self-loop guard from the proxy bind address.
         let self_loop_guard = crate::self_loop::SelfLoopGuard::from_bind(&config.server.proxy_bind);
@@ -282,10 +285,36 @@ impl AppState {
             }
         };
 
+        // With the Redis state backend several instances usually sit behind a
+        // load balancer; per-instance buckets would make every limit N times
+        // larger. Share the buckets through Redis in that topology.
+        let (ip_rate_limiter, user_rate_limiter, login_rate_limiter) = match (
+            config.state.backend.as_str(),
+            cache.as_ref(),
+        ) {
+            ("redis", Some(layer)) => {
+                let shared = crate::rate_limit::RedisRateLimiter::new(
+                    layer.connection(),
+                    &config.state.redis_key_prefix,
+                );
+                tracing::info!("Rate limits are shared across instances via Redis");
+                (
+                    ip_rate_limiter.with_distributed(shared.clone()),
+                    user_rate_limiter.with_distributed(shared.clone()),
+                    login_rate_limiter.with_distributed(shared),
+                )
+            }
+            ("redis", None) => {
+                tracing::warn!(
+                        "State backend is redis but Redis is unreachable; rate limits are per-instance only"
+                    );
+                (ip_rate_limiter, user_rate_limiter, login_rate_limiter)
+            }
+            _ => (ip_rate_limiter, user_rate_limiter, login_rate_limiter),
+        };
+
         Ok(Self {
-            global_conn_semaphore: Arc::new(tokio::sync::Semaphore::new(
-                config.server.max_connections,
-            )),
+            global_conn_limit: crate::conn_limiter::ConnLimiter::new(config.server.max_connections),
             config: Arc::new(ArcSwap::from_pointee(config.clone())),
             state,
             db_pool: db_pool.clone(),
@@ -307,21 +336,13 @@ impl AppState {
             dns_cache: Arc::new(crate::dns_cache::DnsCache::new(
                 config.advanced.dns_cache_ttl,
             )),
-            connection_pool: if config.advanced.connection_pooling {
-                Some(Arc::new(crate::connection_pool::ConnectionPool::new(
-                    config.advanced.pool_max_idle_per_host,
-                    60, // 60s idle timeout
-                )))
-            } else {
-                None
-            },
             shutdown_tx,
             usage_writer: crate::usage_writer::UsageWriter::spawn(db_pool.clone()),
             quota_cache: Arc::new(dashmap::DashMap::new()),
             quota_trackers: Arc::new(crate::quota_tracker::QuotaTrackerRegistry::new()),
             approval_cache: Arc::new(dashmap::DashMap::new()),
             parsed_schedule_cache: Arc::new(dashmap::DashMap::new()),
-            auth_cache: Arc::new(dashmap::DashMap::new()),
+            auth_cache: crate::auth_cache::AuthCache::default(),
             auth_negative_cache: Arc::new(dashmap::DashMap::new()),
             bandwidth_throttlers: Arc::new(crate::bandwidth::ThrottlerRegistry::new()),
             middleware: Arc::new(crate::middleware::MiddlewareChain::new()),
@@ -375,6 +396,9 @@ impl AppState {
             .as_ref()
             .ok_or("Config path not available for reload")?;
         let mut new_config = Config::from_file(path)?;
+        new_config
+            .validate_access_control()
+            .map_err(|e| format!("config reload rejected: {}", e))?;
         let current = self.config.load();
 
         // Security-critical fields are NOT hot-reloadable: a runtime file edit
@@ -426,8 +450,26 @@ impl AppState {
             new_config.admin.auth_enabled = current.admin.auth_enabled;
         }
 
+        // The GeoIP database is loaded once at startup. A reload that turns
+        // geo blocking on without a loaded database would make every
+        // connection fail closed, so reject it with an actionable error (#55).
+        if new_config.filtering.geo_blocking_enabled && self.geo_filter.is_none() {
+            return Err(
+                "config reload rejected: filtering.geo_blocking_enabled = true but no \
+                 GeoIP database is loaded; set filtering.geoip_database_path and restart"
+                    .into(),
+            );
+        }
+
         drop(current);
+        let max_connections = new_config.server.max_connections;
         self.config.store(Arc::new(new_config));
+        // Config credentials' usernames are hot-reloadable; drop cached
+        // credential checks so an old username stops working immediately.
+        self.auth_cache.clear();
+        self.auth_negative_cache.clear();
+        // The global cap is a live semaphore, not a config read; resize it (#51).
+        self.global_conn_limit.resize(max_connections);
         tracing::info!("Configuration reloaded from {}", path);
         Ok(())
     }
@@ -564,9 +606,23 @@ impl AppState {
         }
     }
 
+    /// Call after an API key is revoked: drops the user's cached credential
+    /// checks here and on every other instance, so the revoked key stops
+    /// working immediately instead of at the end of the auth-cache TTL.
     pub async fn invalidate_api_key_cache(&self, user_id: i64) {
-        if let Some(ref cache) = self.cache {
-            cache.invalidate_api_keys_for_user(user_id).await;
+        self.auth_cache.invalidate_user(user_id);
+        self.broadcast_user_invalidated(user_id).await;
+    }
+
+    /// Tell other instances (via the Redis event bus, when present) to run
+    /// `invalidate_all_for_user` for this user. Handlers call this after a
+    /// credential or account change; the local instance must already have
+    /// invalidated its own caches. Not called from `invalidate_all_for_user`
+    /// itself, since the event-bus subscriber calls that and would re-publish.
+    pub async fn broadcast_user_invalidated(&self, user_id: i64) {
+        if let Some(ref bus) = self.event_bus {
+            bus.publish(&crate::event_bus::ProxyEvent::UserInvalidated(user_id))
+                .await;
         }
     }
 
@@ -580,7 +636,6 @@ impl AppState {
             if let Some(name) = username {
                 cache.invalidate_user(user_id, name).await;
             }
-            cache.invalidate_api_keys_for_user(user_id).await;
             cache.invalidate_approvals_for_user(user_id).await;
             cache.invalidate_quota(user_id).await;
         }
@@ -588,11 +643,12 @@ impl AppState {
         self.invalidate_user_arc_cache(user_id);
         self.parsed_schedule_cache.remove(&user_id);
         self.quota_cache.remove(&user_id);
-        // The auth-result cache is keyed by an HMAC of credentials, so it can't
-        // be invalidated per user_id. Clear it wholesale on any user change so a
-        // disabled account / rotated password can't keep authenticating via a
-        // cached positive entry for the 60s TTL. It repopulates cheaply.
-        self.auth_cache.clear();
+        // Drop this user's cached credential checks so a disabled account,
+        // rotated password or revoked API key stops authenticating now rather
+        // than at the end of the cache TTL. The negative cache is not keyed
+        // by user, so clear it wholesale (it only holds 5s entries): a
+        // credential that was wrong a moment ago may be right now.
+        self.auth_cache.invalidate_user(user_id);
         self.auth_negative_cache.clear();
         // Refresh the live quota tracker's limit in place (preserve `used`).
         if let Ok(stats) = crate::db::quota::get_quota_stats(&self.db_pool, user_id).await {
@@ -630,6 +686,9 @@ impl AppState {
         user_id: i64,
         client_ip: std::net::IpAddr,
     ) -> Result<bool, sqlx::Error> {
+        // Canonicalise so the cache key / DB match never depends on whether
+        // the client arrived as `::ffff:a.b.c.d` or `a.b.c.d` (#52).
+        let client_ip = crate::ip_filter::canonical_ip(client_ip);
         let cache_key = (user_id, client_ip);
         let ttl = std::time::Duration::from_secs(crate::constants::APPROVAL_CACHE_TTL_SECS);
 
