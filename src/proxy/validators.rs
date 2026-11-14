@@ -1,15 +1,21 @@
 //! Standalone validators for the connection pipeline.
 //! Each function takes a `ConnectionContext` and `AppState`, returns a `Verdict`.
 //! Adding a new validator = add one function here + one call in `handle_client`.
+//!
+//! Admin handling (#56): post-auth validators are evaluated for admin
+//! connections too. A denial is turned into an allow only when the rule is in
+//! `filtering.admin_bypass_rules`, and every such bypass is audit-logged and
+//! counted via `ConnectionContext::apply_admin_bypass`. Pre-auth (phase 1)
+//! validators run before the user is known and are never bypassed.
 
-use super::pipeline::{ConnectionContext, Verdict};
+use super::pipeline::{self, ConnectionContext, Verdict};
 use crate::app_state::AppState;
 
 // ─── Phase 1: Pre-Connection (IP only) ─────────────────────────────────────
 
 /// Check client IP against the configured allowlist/blocklist.
 pub async fn validate_ip_filter(ctx: &ConnectionContext, state: &AppState) -> Verdict {
-    if ctx.is_admin || !ctx.config.ip_filter_enabled {
+    if !ctx.config.ip_filter_enabled {
         return Verdict::Allow;
     }
     let ip_filter = state.ip_filter.read().await;
@@ -27,7 +33,7 @@ pub async fn validate_ip_filter(ctx: &ConnectionContext, state: &AppState) -> Ve
 
 /// Block or allow by country using the GeoIP database.
 pub async fn validate_geo_block(ctx: &ConnectionContext, state: &AppState) -> Verdict {
-    if ctx.is_admin || !ctx.config.geo_blocking_enabled {
+    if !ctx.config.geo_blocking_enabled {
         return Verdict::Allow;
     }
     let geo = match &state.geo_filter {
@@ -66,7 +72,7 @@ pub async fn validate_geo_block(ctx: &ConnectionContext, state: &AppState) -> Ve
 
 /// Per-IP rate limiting via the global rate limiter.
 pub async fn validate_ip_rate_limit(ctx: &ConnectionContext, state: &AppState) -> Verdict {
-    if ctx.is_admin || !ctx.config.rate_limiting_enabled {
+    if !ctx.config.rate_limiting_enabled {
         return Verdict::Allow;
     }
     if !state.ip_rate_limiter.check_ip(ctx.client_addr.ip()).await {
@@ -83,48 +89,47 @@ pub async fn validate_ip_rate_limit(ctx: &ConnectionContext, state: &AppState) -
 
 // ─── Phase 2: Post-Auth (user_id + protocol available) ─────────────────────
 
-/// Enforce SOCKS4 protocol restrictions (disabled protocol with admin bypass).
+/// Enforce protocol restrictions: the global SOCKS4 switch and the per-user
+/// `allowed_protocols` list. Each is a separate admin-bypassable rule.
 pub async fn validate_protocol_restriction(ctx: &ConnectionContext, state: &AppState) -> Verdict {
-    let protocol = match &ctx.protocol {
-        Some(p) => p,
-        None => return Verdict::Allow,
-    };
-    // SOCKS4 disabled check
-    if *protocol == crate::proxy::protocol::ProxyProtocol::SOCKS4 && !ctx.config.socks4_enabled {
-        if ctx.is_admin {
-            tracing::info!(
-                target: "audit",
-                user_id = ?ctx.user_id,
-                client_addr = %ctx.client_addr,
-                rule = "socks4_disabled",
-                "admin bypass: SOCKS4 allowed for admin user"
-            );
-            crate::metrics::ADMIN_BYPASS_TOTAL
-                .with_label_values(&["socks4_disabled"])
-                .inc();
-            return Verdict::Allow;
-        }
+    let socks4 = ctx.apply_admin_bypass(pipeline::RULE_SOCKS4_DISABLED, check_socks4_enabled(ctx));
+    if socks4.is_denied() {
         crate::metrics::AUTH_FAILURES
             .with_label_values(&["socks4_disabled"])
             .inc();
+        return socks4;
+    }
+    ctx.apply_admin_bypass(
+        pipeline::RULE_ALLOWED_PROTOCOLS,
+        check_allowed_protocols(ctx, state).await,
+    )
+}
+
+fn check_socks4_enabled(ctx: &ConnectionContext) -> Verdict {
+    if ctx.protocol == Some(crate::proxy::protocol::ProxyProtocol::SOCKS4)
+        && !ctx.config.socks4_enabled
+    {
         return Verdict::Deny(format!(
-            "SOCKS4 protocol disabled for non-admin user from {}",
+            "SOCKS4 protocol disabled (client {})",
             ctx.client_addr
         ));
     }
-    // Per-user allowed_protocols check
-    if let Some(uid) = ctx.effective_uid() {
-        if !ctx.is_admin {
-            if let Some(cached) = state.cached_user_by_id(uid).await {
-                if let Some(ref protos) = cached.allowed_protocols {
-                    let proto_str = protocol.as_str_lower();
-                    if !protos.iter().any(|p| p.eq_ignore_ascii_case(proto_str)) {
-                        return Verdict::Deny(format!(
-                            "User {} not allowed protocol {} (allowed: {:?})",
-                            uid, protocol, protos
-                        ));
-                    }
-                }
+    Verdict::Allow
+}
+
+async fn check_allowed_protocols(ctx: &ConnectionContext, state: &AppState) -> Verdict {
+    let (protocol, uid) = match (&ctx.protocol, ctx.effective_uid()) {
+        (Some(p), Some(uid)) => (p, uid),
+        _ => return Verdict::Allow,
+    };
+    if let Some(cached) = state.cached_user_by_id(uid).await {
+        if let Some(ref protos) = cached.allowed_protocols {
+            let proto_str = protocol.as_str_lower();
+            if !protos.iter().any(|p| p.eq_ignore_ascii_case(proto_str)) {
+                return Verdict::Deny(format!(
+                    "User {} not allowed protocol {} (allowed: {:?})",
+                    uid, protocol, protos
+                ));
             }
         }
     }
@@ -133,7 +138,11 @@ pub async fn validate_protocol_restriction(ctx: &ConnectionContext, state: &AppS
 
 /// Require active IP approval for non-admin users when connection_approval is enabled.
 pub async fn validate_approval(ctx: &ConnectionContext, state: &AppState) -> Verdict {
-    if ctx.is_admin || !ctx.config.connection_approval {
+    ctx.apply_admin_bypass(pipeline::RULE_APPROVAL, check_approval(ctx, state).await)
+}
+
+async fn check_approval(ctx: &ConnectionContext, state: &AppState) -> Verdict {
+    if !ctx.config.connection_approval {
         return Verdict::Allow;
     }
     let uid = match ctx.effective_uid() {
@@ -156,9 +165,13 @@ pub async fn validate_approval(ctx: &ConnectionContext, state: &AppState) -> Ver
 
 /// Per-user RPS rate limiting. Also caches user config for later use.
 pub async fn validate_user_rate_limit(ctx: &ConnectionContext, state: &AppState) -> Verdict {
-    if ctx.is_admin {
-        return Verdict::Allow;
-    }
+    ctx.apply_admin_bypass(
+        pipeline::RULE_USER_RATE_LIMIT,
+        check_user_rate_limit(ctx, state).await,
+    )
+}
+
+async fn check_user_rate_limit(ctx: &ConnectionContext, state: &AppState) -> Verdict {
     let uid = match ctx.effective_uid() {
         Some(uid) => uid,
         None => return Verdict::Allow,
@@ -211,9 +224,13 @@ pub async fn validate_user_rate_limit(ctx: &ConnectionContext, state: &AppState)
 
 /// Check target domain against global + per-user allow/blocklists (union logic).
 pub async fn validate_target_domain(ctx: &ConnectionContext, state: &AppState) -> Verdict {
-    if ctx.is_admin {
-        return Verdict::Allow;
-    }
+    ctx.apply_admin_bypass(
+        pipeline::RULE_TARGET_FILTER,
+        check_target_domain(ctx, state).await,
+    )
+}
+
+async fn check_target_domain(ctx: &ConnectionContext, state: &AppState) -> Verdict {
     let host = match &ctx.target_host {
         Some(h) => h,
         None => return Verdict::Allow,
@@ -269,9 +286,13 @@ pub async fn validate_target_domain(ctx: &ConnectionContext, state: &AppState) -
 
 /// Enforce time-based access restrictions (per-user schedule or global default).
 pub async fn validate_access_schedule(ctx: &ConnectionContext, state: &AppState) -> Verdict {
-    if ctx.is_admin {
-        return Verdict::Allow;
-    }
+    ctx.apply_admin_bypass(
+        pipeline::RULE_ACCESS_SCHEDULE,
+        check_access_schedule(ctx, state).await,
+    )
+}
+
+async fn check_access_schedule(ctx: &ConnectionContext, state: &AppState) -> Verdict {
     let uid = match ctx.effective_uid() {
         Some(uid) => uid,
         None => return Verdict::Allow,
@@ -310,9 +331,10 @@ pub async fn validate_access_schedule(ctx: &ConnectionContext, state: &AppState)
 /// enforcement always agree. There is no per-connection SUM() and no
 /// 30s staleness window.
 pub async fn validate_quota(ctx: &ConnectionContext, state: &AppState) -> Verdict {
-    if ctx.is_admin {
-        return Verdict::Allow;
-    }
+    ctx.apply_admin_bypass(pipeline::RULE_QUOTA, check_quota(ctx, state).await)
+}
+
+async fn check_quota(ctx: &ConnectionContext, state: &AppState) -> Verdict {
     let uid = match ctx.effective_uid() {
         Some(uid) => uid,
         None => return Verdict::Allow,
@@ -338,9 +360,13 @@ pub async fn validate_quota(ctx: &ConnectionContext, state: &AppState) -> Verdic
 
 /// Enforce per-user concurrent connection limit.
 pub async fn validate_connection_limit(ctx: &ConnectionContext, state: &AppState) -> Verdict {
-    if ctx.is_admin {
-        return Verdict::Allow;
-    }
+    ctx.apply_admin_bypass(
+        pipeline::RULE_CONNECTION_LIMIT,
+        check_connection_limit(ctx, state).await,
+    )
+}
+
+async fn check_connection_limit(ctx: &ConnectionContext, state: &AppState) -> Verdict {
     let uid = match ctx.effective_uid() {
         Some(uid) => uid,
         None => return Verdict::Allow,

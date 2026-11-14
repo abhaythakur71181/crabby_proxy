@@ -168,6 +168,21 @@ pub struct FilterConfig {
     // deployment that intentionally proxies to same-machine / internal targets.
     #[serde(default = "default_true")]
     pub block_private_targets: bool,
+    // Post-auth rules an admin / root_admin connection may bypass (#56).
+    // Every bypass that actually skips a denial is audit-logged and counted
+    // in proxy_admin_bypass_total{rule}. Defaults to all bypassable rules
+    // (the historical behaviour); remove entries to hold admins to them.
+    // Pre-auth rules (IP filter, geo, IP rate limit) and the SSRF egress
+    // guard always apply and cannot be listed here.
+    #[serde(default = "default_admin_bypass_rules")]
+    pub admin_bypass_rules: Vec<String>,
+}
+
+fn default_admin_bypass_rules() -> Vec<String> {
+    crate::proxy::pipeline::ADMIN_BYPASSABLE_RULES
+        .iter()
+        .map(|r| r.to_string())
+        .collect()
 }
 
 fn default_ip_filter_mode() -> String {
@@ -219,6 +234,22 @@ pub struct AdvancedConfig {
 }
 
 impl Config {
+    /// Semantic validation of the access-control / privacy settings, run at
+    /// startup and on config reload. Returns a human-readable error naming
+    /// the offending key.
+    pub fn validate_access_control(&self) -> Result<(), String> {
+        for rule in &self.filtering.admin_bypass_rules {
+            if !crate::proxy::pipeline::ADMIN_BYPASSABLE_RULES.contains(&rule.as_str()) {
+                return Err(format!(
+                    "filtering.admin_bypass_rules: unknown rule '{}' (valid: {})",
+                    rule,
+                    crate::proxy::pipeline::ADMIN_BYPASSABLE_RULES.join(", ")
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Load configuration from a TOML file with environment variable overrides
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, config::ConfigError> {
         let settings = config::Config::builder()
@@ -306,6 +337,7 @@ impl Default for Config {
                 global_blocked_targets: vec![],
                 default_access_schedule: None,
                 block_private_targets: true,
+                admin_bypass_rules: default_admin_bypass_rules(),
             },
             logging: LoggingConfig {
                 level: "info".to_string(),
@@ -423,6 +455,21 @@ mod tests {
         assert!(config.filtering.blocked_countries.is_empty());
         assert_eq!(config.filtering.ip_filter_mode, "blocklist");
         assert!(!config.filtering.ip_filter_enabled);
+    }
+
+    #[test]
+    fn test_admin_bypass_rules_default_and_validation() {
+        let mut config = Config::default();
+        assert_eq!(
+            config.filtering.admin_bypass_rules.len(),
+            crate::proxy::pipeline::ADMIN_BYPASSABLE_RULES.len()
+        );
+        assert!(config.validate_access_control().is_ok());
+        config.filtering.admin_bypass_rules = vec!["ip_filter".to_string()];
+        let err = config.validate_access_control().unwrap_err();
+        assert!(err.contains("unknown rule 'ip_filter'"));
+        config.filtering.admin_bypass_rules = vec![];
+        assert!(config.validate_access_control().is_ok());
     }
 
     #[test]

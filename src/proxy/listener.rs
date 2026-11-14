@@ -291,16 +291,14 @@ async fn handle_client(
             .unwrap_or(false);
     }
     // ── Phase 2: Post-Auth validators ───────────────────────────────────
-    if !ctx.is_admin {
-        for result in [
-            validators::validate_protocol_restriction(&ctx, state).await,
-            validators::validate_approval(&ctx, state).await,
-            validators::validate_user_rate_limit(&ctx, state).await,
-        ] {
-            if let Verdict::Deny(reason) = result {
-                tracing::warn!("{} denied: {}", client_addr, reason);
-                return;
-            }
+    for result in [
+        validators::validate_protocol_restriction(&ctx, state).await,
+        validators::validate_approval(&ctx, state).await,
+        validators::validate_user_rate_limit(&ctx, state).await,
+    ] {
+        if let Verdict::Deny(reason) = result {
+            tracing::warn!("{} denied: {}", client_addr, reason);
+            return;
         }
     }
     // Run PostAuth plugin middleware
@@ -363,15 +361,13 @@ async fn handle_client(
     // Update context with target
     ctx.target_host = Some(target.host.clone());
     // ── Phase 3: Post-Target validators ─────────────────────────────────
-    if !ctx.is_admin {
-        for result in [
-            validators::validate_target_domain(&ctx, state).await,
-            validators::validate_access_schedule(&ctx, state).await,
-        ] {
-            if let Verdict::Deny(reason) = result {
-                tracing::warn!("{} denied: {}", client_addr, reason);
-                return;
-            }
+    for result in [
+        validators::validate_target_domain(&ctx, state).await,
+        validators::validate_access_schedule(&ctx, state).await,
+    ] {
+        if let Verdict::Deny(reason) = result {
+            tracing::warn!("{} denied: {}", client_addr, reason);
+            return;
         }
     }
     // Run PostTarget plugin middleware
@@ -411,24 +407,22 @@ async fn handle_client(
         .with_label_values(&[proto_label, "started"])
         .inc();
     // ── Phase 4: Post-Setup validators (quota + connection limit) ───────
-    if !ctx.is_admin {
-        for result in [
-            validators::validate_quota(&ctx, state).await,
-            validators::validate_connection_limit(&ctx, state).await,
-        ] {
-            if let Verdict::Deny(reason) = result {
-                tracing::warn!("{} denied: {}", client_addr, reason);
-                crate::metrics::ACTIVE_CONNECTIONS
-                    .with_label_values(&[proto_label])
-                    .dec();
-                let _ = send_error_response(
-                    ctx.protocol.as_ref().unwrap(),
-                    &mut stream,
-                    ErrorType::QuotaExceeded,
-                )
-                .await;
-                return;
-            }
+    for result in [
+        validators::validate_quota(&ctx, state).await,
+        validators::validate_connection_limit(&ctx, state).await,
+    ] {
+        if let Verdict::Deny(reason) = result {
+            tracing::warn!("{} denied: {}", client_addr, reason);
+            crate::metrics::ACTIVE_CONNECTIONS
+                .with_label_values(&[proto_label])
+                .dec();
+            let _ = send_error_response(
+                ctx.protocol.as_ref().unwrap(),
+                &mut stream,
+                ErrorType::QuotaExceeded,
+            )
+            .await;
+            return;
         }
     }
     // ── Relay + record usage ────────────────────────────────────────────
@@ -457,7 +451,7 @@ async fn handle_client(
             target,
             state,
             ctx.user_id,
-            ctx.is_admin,
+            ctx.admin_bypasses(super::pipeline::RULE_QUOTA),
         ) => r,
     };
     state.conn_cancel.remove(&conn_id);
@@ -579,7 +573,7 @@ async fn async_handle_client_with_target(
     target: ProxyTarget,
     state: &AppState,
     user_id: Option<i64>,
-    is_admin: bool,
+    bypass_quota: bool,
 ) -> Result<(u64, u64), (io::Error, ErrorType)> {
     let target_addr = format!("{}:{}", target.host, target.port);
     let upstream_start = std::time::Instant::now();
@@ -786,7 +780,7 @@ async fn async_handle_client_with_target(
         "t2c",
         throttler,
         quota_tracker,
-        !is_admin,
+        !bypass_quota,
         idle_timeout,
     )
     .await

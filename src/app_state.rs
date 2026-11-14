@@ -155,6 +155,7 @@ impl AppState {
         config_path: Option<String>,
         db_pool: sqlx::SqlitePool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        config.validate_access_control()?;
         let state: Arc<dyn StateBackend> = match config.state.backend.as_str() {
             "redis" => {
                 match RedisBackend::new(
@@ -378,6 +379,9 @@ impl AppState {
             .as_ref()
             .ok_or("Config path not available for reload")?;
         let mut new_config = Config::from_file(path)?;
+        new_config
+            .validate_access_control()
+            .map_err(|e| format!("config reload rejected: {}", e))?;
         let current = self.config.load();
 
         // Security-critical fields are NOT hot-reloadable: a runtime file edit

@@ -34,7 +34,9 @@ Three independent rate limiters, all using the `governor` crate:
 | **User** | Per authenticated user (configurable per-user) | `DashMap` + cached config | 10 rps / 20 burst |
 | **Login** | Per IP on `/api/login` | `RwLock<LruCache>` (bounded) | 5/min / 10 burst |
 
-IPv4-mapped IPv6 addresses (`::ffff:x.x.x.x`) are normalized to prevent bypass.
+IPv4-mapped IPv6 addresses (`::ffff:x.x.x.x`) are normalized to plain IPv4 once at
+connection ingress, so the IP filter, geo filter, connection approvals, rate limiters,
+access log and usage records all see the same address on a dual-stack (`[::]`) bind.
 
 ### IP Filtering
 
@@ -56,14 +58,16 @@ IPv4-mapped IPv6 addresses (`::ffff:x.x.x.x`) are normalized to prevent bypass.
 - **Global allowlist/blocklist** in config (glob patterns: `*.example.com`, `api.github.com`)
 - **Per-user allowlist/blocklist** in DB (JSON arrays)
 - **Union logic**: global blocklist → per-user blocklist → union(global + per-user allowlists)
-- Admins bypass all restrictions
+- A per-user list that is not a valid JSON array of strings denies the target (fail-closed)
+- Connections without a DB user (auth disabled / config-file credential) are still checked against the global lists
+- Admins bypass the filter if `target_filter` is in `admin_bypass_rules` (see [Admin bypass](#admin-bypass))
 
 ### Time-Based Access Control
 
 - **Per-user access schedules** (JSON: `{"days":["mon","tue"...],"start_hour":9,"end_hour":18}`)
 - **Global default schedule** in config as fallback
 - Supports overnight ranges (e.g., 22:00-06:00)
-- Admins bypass schedule restrictions
+- Admins bypass schedule restrictions if `access_schedule` is in `admin_bypass_rules`
 
 ### Quota & Usage Tracking
 
@@ -83,7 +87,17 @@ IPv4-mapped IPv6 addresses (`::ffff:x.x.x.x`) are normalized to prevent bypass.
 - IP-based approval grants for non-admin users
 - Time-limited approvals with termination tracking
 - Enforced in proxy flow when `connection_approval` is enabled
-- Admins bypass approval checks; fail-closed on DB errors
+- Admins bypass approval checks if `approval` is in `admin_bypass_rules`; fail-closed on DB errors
+
+### Admin bypass
+
+Connections authenticated as `admin` / `root_admin` may skip post-auth rules listed in
+`[filtering] admin_bypass_rules` (default: all of `socks4_disabled`, `allowed_protocols`,
+`approval`, `user_rate_limit`, `target_filter`, `access_schedule`, `quota`,
+`connection_limit`). The rules are still evaluated for admins; whenever one would have
+denied the connection the bypass is logged on the `audit` target and counted in
+`proxy_admin_bypass_total{rule}`. Remove a rule from the list to hold admins to it.
+Pre-auth rules (IP filter, geo, IP rate limit) and the SSRF egress guard always apply.
 
 ### Caching (Three-Tier)
 

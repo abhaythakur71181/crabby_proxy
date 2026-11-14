@@ -69,6 +69,11 @@ blocked_countries = []
 # geoip_database_path = "/app/data/GeoLite2-Country.mmdb"
 # SSRF egress guard is ON by default in code (block_private_targets); leave it on
 # unless this instance intentionally proxies to internal/same-machine targets.
+# Post-auth rules admin/root_admin connections may bypass. Each bypass that skips
+# an actual denial is audit-logged and counted in proxy_admin_bypass_total{rule}.
+# Remove entries to hold admins to a rule. Default (when omitted) = all of these:
+# admin_bypass_rules = ["socks4_disabled", "allowed_protocols", "approval",
+#   "user_rate_limit", "target_filter", "access_schedule", "quota", "connection_limit"]
 
 [logging]
 level = "info"

@@ -209,21 +209,19 @@ async fn handle_h2_connect_validated(
     }
 
     // ── Phase 2: Post-Auth validators ──
-    if !ctx.is_admin {
-        for result in [
-            validators::validate_protocol_restriction(&ctx, state).await,
-            validators::validate_approval(&ctx, state).await,
-            validators::validate_user_rate_limit(&ctx, state).await,
-        ] {
-            if let Verdict::Deny(reason) = result {
-                tracing::warn!("[HTTP2] {} denied: {}", client_addr, reason);
-                let response = http::Response::builder()
-                    .status(http::StatusCode::FORBIDDEN)
-                    .body(())
-                    .unwrap_or_else(|_| http::Response::new(()));
-                let _ = respond.send_response(response, true);
-                return;
-            }
+    for result in [
+        validators::validate_protocol_restriction(&ctx, state).await,
+        validators::validate_approval(&ctx, state).await,
+        validators::validate_user_rate_limit(&ctx, state).await,
+    ] {
+        if let Verdict::Deny(reason) = result {
+            tracing::warn!("[HTTP2] {} denied: {}", client_addr, reason);
+            let response = http::Response::builder()
+                .status(http::StatusCode::FORBIDDEN)
+                .body(())
+                .unwrap_or_else(|_| http::Response::new(()));
+            let _ = respond.send_response(response, true);
+            return;
         }
     }
 
@@ -250,20 +248,18 @@ async fn handle_h2_connect_validated(
     ctx.target_host = Some(host.clone());
 
     // ── Phase 3: Post-Target validators ──
-    if !ctx.is_admin {
-        for result in [
-            validators::validate_target_domain(&ctx, state).await,
-            validators::validate_access_schedule(&ctx, state).await,
-        ] {
-            if let Verdict::Deny(reason) = result {
-                tracing::warn!("[HTTP2] {} denied: {}", client_addr, reason);
-                let response = http::Response::builder()
-                    .status(http::StatusCode::FORBIDDEN)
-                    .body(())
-                    .unwrap_or_else(|_| http::Response::new(()));
-                let _ = respond.send_response(response, true);
-                return;
-            }
+    for result in [
+        validators::validate_target_domain(&ctx, state).await,
+        validators::validate_access_schedule(&ctx, state).await,
+    ] {
+        if let Verdict::Deny(reason) = result {
+            tracing::warn!("[HTTP2] {} denied: {}", client_addr, reason);
+            let response = http::Response::builder()
+                .status(http::StatusCode::FORBIDDEN)
+                .body(())
+                .unwrap_or_else(|_| http::Response::new(()));
+            let _ = respond.send_response(response, true);
+            return;
         }
     }
 
@@ -296,23 +292,21 @@ async fn handle_h2_connect_validated(
         .inc();
 
     // ── Phase 4: Quota + connection limit ──
-    if !ctx.is_admin {
-        for result in [
-            validators::validate_quota(&ctx, state).await,
-            validators::validate_connection_limit(&ctx, state).await,
-        ] {
-            if let Verdict::Deny(reason) = result {
-                tracing::warn!("[HTTP2] {} denied: {}", client_addr, reason);
-                crate::metrics::ACTIVE_CONNECTIONS
-                    .with_label_values(&["HTTP2"])
-                    .dec();
-                let response = http::Response::builder()
-                    .status(http::StatusCode::TOO_MANY_REQUESTS)
-                    .body(())
-                    .unwrap_or_else(|_| http::Response::new(()));
-                let _ = respond.send_response(response, true);
-                return;
-            }
+    for result in [
+        validators::validate_quota(&ctx, state).await,
+        validators::validate_connection_limit(&ctx, state).await,
+    ] {
+        if let Verdict::Deny(reason) = result {
+            tracing::warn!("[HTTP2] {} denied: {}", client_addr, reason);
+            crate::metrics::ACTIVE_CONNECTIONS
+                .with_label_values(&["HTTP2"])
+                .dec();
+            let response = http::Response::builder()
+                .status(http::StatusCode::TOO_MANY_REQUESTS)
+                .body(())
+                .unwrap_or_else(|_| http::Response::new(()));
+            let _ = respond.send_response(response, true);
+            return;
         }
     }
 
@@ -339,7 +333,7 @@ async fn handle_h2_connect_validated(
         respond,
         state,
         quota_tracker,
-        ctx.is_admin,
+        ctx.admin_bypasses(super::pipeline::RULE_QUOTA),
     )
     .await;
 
@@ -530,7 +524,7 @@ async fn handle_h2_tunnel(
     mut respond: h2::server::SendResponse<bytes::Bytes>,
     state: &AppState,
     quota_tracker: Option<std::sync::Arc<crate::quota_tracker::UserQuotaTracker>>,
-    is_admin: bool,
+    bypass_quota: bool,
 ) -> Result<(u64, u64), Box<dyn std::error::Error + Send + Sync>> {
     // Resolve via DNS cache
     let resolved_addr = timeout(
@@ -688,7 +682,7 @@ async fn handle_h2_tunnel(
                     }
                     if let Some(ref q) = q_send {
                         let is_over = q.add_and_over(n as i64);
-                        if !is_admin && is_over {
+                        if !bypass_quota && is_over {
                             tracing::warn!(
                                 "[HTTP2] quota exceeded mid-tunnel (used={}, limit={})",
                                 q.used(),
@@ -730,7 +724,7 @@ async fn handle_h2_tunnel(
                     }
                     if let Some(ref q) = q_recv {
                         let is_over = q.add_and_over(n as i64);
-                        if !is_admin && is_over {
+                        if !bypass_quota && is_over {
                             tracing::warn!(
                                 "[HTTP2] quota exceeded mid-tunnel (used={}, limit={})",
                                 q.used(),
@@ -844,20 +838,18 @@ async fn handle_h2_forward_validated(
     }
 
     // ── Phase 2: Post-Auth validators ──
-    if !ctx.is_admin {
-        for result in [
-            validators::validate_protocol_restriction(&ctx, state).await,
-            validators::validate_user_rate_limit(&ctx, state).await,
-        ] {
-            if let Verdict::Deny(reason) = result {
-                tracing::warn!("[HTTP2-FWD] {} denied: {}", client_addr, reason);
-                let resp = http::Response::builder()
-                    .status(http::StatusCode::FORBIDDEN)
-                    .body(())
-                    .unwrap_or_else(|_| http::Response::new(()));
-                let _ = respond.send_response(resp, true);
-                return;
-            }
+    for result in [
+        validators::validate_protocol_restriction(&ctx, state).await,
+        validators::validate_user_rate_limit(&ctx, state).await,
+    ] {
+        if let Verdict::Deny(reason) = result {
+            tracing::warn!("[HTTP2-FWD] {} denied: {}", client_addr, reason);
+            let resp = http::Response::builder()
+                .status(http::StatusCode::FORBIDDEN)
+                .body(())
+                .unwrap_or_else(|_| http::Response::new(()));
+            let _ = respond.send_response(resp, true);
+            return;
         }
     }
 
@@ -887,32 +879,30 @@ async fn handle_h2_forward_validated(
     }
 
     // ── Phase 3: Post-Target validators ──
-    if !ctx.is_admin {
-        for result in [
-            validators::validate_target_domain(&ctx, state).await,
-            validators::validate_access_schedule(&ctx, state).await,
-        ] {
-            if let Verdict::Deny(reason) = result {
-                tracing::warn!("[HTTP2-FWD] {} denied: {}", client_addr, reason);
-                let resp = http::Response::builder()
-                    .status(http::StatusCode::FORBIDDEN)
-                    .body(())
-                    .unwrap_or_else(|_| http::Response::new(()));
-                let _ = respond.send_response(resp, true);
-                return;
-            }
-        }
-
-        // ── Phase 4: Quota check ──
-        if let Verdict::Deny(reason) = validators::validate_quota(&ctx, state).await {
+    for result in [
+        validators::validate_target_domain(&ctx, state).await,
+        validators::validate_access_schedule(&ctx, state).await,
+    ] {
+        if let Verdict::Deny(reason) = result {
             tracing::warn!("[HTTP2-FWD] {} denied: {}", client_addr, reason);
             let resp = http::Response::builder()
-                .status(http::StatusCode::TOO_MANY_REQUESTS)
+                .status(http::StatusCode::FORBIDDEN)
                 .body(())
                 .unwrap_or_else(|_| http::Response::new(()));
             let _ = respond.send_response(resp, true);
             return;
         }
+    }
+
+    // ── Phase 4: Quota check ──
+    if let Verdict::Deny(reason) = validators::validate_quota(&ctx, state).await {
+        tracing::warn!("[HTTP2-FWD] {} denied: {}", client_addr, reason);
+        let resp = http::Response::builder()
+            .status(http::StatusCode::TOO_MANY_REQUESTS)
+            .body(())
+            .unwrap_or_else(|_| http::Response::new(()));
+        let _ = respond.send_response(resp, true);
+        return;
     }
 
     tracing::debug!(
