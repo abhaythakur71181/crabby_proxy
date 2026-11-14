@@ -67,11 +67,12 @@ export function ApprovalsPage() {
         .sort((a, b) => (b.decided_at ?? 0) - (a.decided_at ?? 0)),
     [requests.data],
   );
-  const now = Math.floor(Date.now() / 1000);
-  const activeGrants = useMemo(
-    () => (grants.data ?? []).filter((g) => g.expires_at > now).sort((a, b) => b.approved_at - a.approved_at),
-    [grants.data, now],
-  );
+  // `now` is read inside the memo (not a dep) so the list is only re-filtered
+  // when the grants data changes — i.e. on every refetch — not every render.
+  const activeGrants = useMemo(() => {
+    const now = Math.floor(Date.now() / 1000);
+    return (grants.data ?? []).filter((g) => g.expires_at > now).sort((a, b) => b.approved_at - a.approved_at);
+  }, [grants.data]);
 
   const refresh = () => invalidate(keys.approvalRequests, keys.approvals);
 
