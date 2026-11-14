@@ -84,6 +84,11 @@ pub async fn run_proxy_server(state: Arc<AppState>, addr: SocketAddr) {
                         client_addr
                     }
                 };
+                // Canonicalise once at ingress (#52): on a dual-stack listener
+                // IPv4 clients arrive as `::ffff:a.b.c.d`, and every downstream
+                // consumer (IP filter, geo filter, approvals, rate limiting,
+                // access log, usage records) must see the plain IPv4 address.
+                let real_addr = crate::ip_filter::canonical_socket_addr(real_addr);
 
                 let state = state.clone();
                 tokio::spawn(async move {
@@ -122,12 +127,14 @@ pub async fn run_proxy_server(state: Arc<AppState>, addr: SocketAddr) {
 /// Invalid CIDR entries are skipped (logged once at parse). Returns false on an
 /// empty list, so an enabled-but-unconfigured PROXY protocol trusts nobody.
 fn peer_is_trusted_proxy(peer: std::net::IpAddr, trusted_cidrs: &[String]) -> bool {
+    use crate::ip_filter::{canonical_ip, net_contains};
+    let peer = canonical_ip(peer);
     trusted_cidrs.iter().any(|c| {
         match c.parse::<ipnet::IpNet>() {
-            Ok(net) => net.contains(&peer),
+            Ok(net) => net_contains(&net, peer),
             Err(_) => match c.parse::<std::net::IpAddr>() {
                 // Bare IP (no prefix) — exact match.
-                Ok(ip) => ip == peer,
+                Ok(ip) => canonical_ip(ip) == peer,
                 Err(_) => {
                     tracing::warn!("Invalid proxy_protocol_trusted_cidrs entry '{}'", c);
                     false
@@ -284,16 +291,14 @@ async fn handle_client(
             .unwrap_or(false);
     }
     // ── Phase 2: Post-Auth validators ───────────────────────────────────
-    if !ctx.is_admin {
-        for result in [
-            validators::validate_protocol_restriction(&ctx, state).await,
-            validators::validate_approval(&ctx, state).await,
-            validators::validate_user_rate_limit(&ctx, state).await,
-        ] {
-            if let Verdict::Deny(reason) = result {
-                tracing::warn!("{} denied: {}", client_addr, reason);
-                return;
-            }
+    for result in [
+        validators::validate_protocol_restriction(&ctx, state).await,
+        validators::validate_approval(&ctx, state).await,
+        validators::validate_user_rate_limit(&ctx, state).await,
+    ] {
+        if let Verdict::Deny(reason) = result {
+            tracing::warn!("{} denied: {}", client_addr, reason);
+            return;
         }
     }
     // Run PostAuth plugin middleware
@@ -356,15 +361,13 @@ async fn handle_client(
     // Update context with target
     ctx.target_host = Some(target.host.clone());
     // ── Phase 3: Post-Target validators ─────────────────────────────────
-    if !ctx.is_admin {
-        for result in [
-            validators::validate_target_domain(&ctx, state).await,
-            validators::validate_access_schedule(&ctx, state).await,
-        ] {
-            if let Verdict::Deny(reason) = result {
-                tracing::warn!("{} denied: {}", client_addr, reason);
-                return;
-            }
+    for result in [
+        validators::validate_target_domain(&ctx, state).await,
+        validators::validate_access_schedule(&ctx, state).await,
+    ] {
+        if let Verdict::Deny(reason) = result {
+            tracing::warn!("{} denied: {}", client_addr, reason);
+            return;
         }
     }
     // Run PostTarget plugin middleware
@@ -406,24 +409,22 @@ async fn handle_client(
         .with_label_values(&[proto_label, "started"])
         .inc();
     // ── Phase 4: Post-Setup validators (quota + connection limit) ───────
-    if !ctx.is_admin {
-        for result in [
-            validators::validate_quota(&ctx, state).await,
-            validators::validate_connection_limit(&ctx, state).await,
-        ] {
-            if let Verdict::Deny(reason) = result {
-                tracing::warn!("{} denied: {}", client_addr, reason);
-                crate::metrics::ACTIVE_CONNECTIONS
-                    .with_label_values(&[proto_label])
-                    .dec();
-                let _ = send_error_response(
-                    ctx.protocol.as_ref().unwrap(),
-                    &mut stream,
-                    ErrorType::QuotaExceeded,
-                )
-                .await;
-                return;
-            }
+    for result in [
+        validators::validate_quota(&ctx, state).await,
+        validators::validate_connection_limit(&ctx, state).await,
+    ] {
+        if let Verdict::Deny(reason) = result {
+            tracing::warn!("{} denied: {}", client_addr, reason);
+            crate::metrics::ACTIVE_CONNECTIONS
+                .with_label_values(&[proto_label])
+                .dec();
+            let _ = send_error_response(
+                ctx.protocol.as_ref().unwrap(),
+                &mut stream,
+                ErrorType::QuotaExceeded,
+            )
+            .await;
+            return;
         }
     }
     // ── Relay + record usage ────────────────────────────────────────────
@@ -452,7 +453,7 @@ async fn handle_client(
             target,
             state,
             ctx.user_id,
-            ctx.is_admin,
+            ctx.admin_bypasses(super::pipeline::RULE_QUOTA),
         ) => r,
     };
     state.conn_cancel.remove(&conn_id);
@@ -499,19 +500,22 @@ async fn handle_client(
                 .with_label_values(&[proto_label, "success"])
                 .inc();
 
-            // Structured access log
-            tracing::info!(
-                target: "access_log",
-                client_ip = %client_addr.ip(),
-                target = %target_addr_str,
-                protocol = proto_label,
-                user_id = ?ctx.effective_uid(),
-                bytes_sent = bytes_sent,
-                bytes_received = bytes_received,
-                duration_ms = relay_start.elapsed().as_millis() as u64,
-                status = "success",
-                "connection completed"
-            );
+            // Structured access log (gated by logging.access_log_enabled;
+            // client IP rendered per logging.access_log_client_ip).
+            if ctx.config.access_log_enabled {
+                tracing::info!(
+                    target: "access_log",
+                    client_ip = %ctx.access_log_ip(),
+                    target = %target_addr_str,
+                    protocol = proto_label,
+                    user_id = ?ctx.effective_uid(),
+                    bytes_sent = bytes_sent,
+                    bytes_received = bytes_received,
+                    duration_ms = relay_start.elapsed().as_millis() as u64,
+                    status = "success",
+                    "connection completed"
+                );
+            }
         }
         Err((e, error_type)) => {
             // Map the failure to the canonical ConnectionStatus (single source
@@ -531,18 +535,20 @@ async fn handle_client(
                 .inc();
 
             // Structured access log
-            tracing::info!(
-                target: "access_log",
-                client_ip = %client_addr.ip(),
-                target = %target_addr_str,
-                protocol = proto_label,
-                user_id = ?ctx.effective_uid(),
-                duration_ms = relay_start.elapsed().as_millis() as u64,
-                status = "failed",
-                error_type = error_label,
-                error = %e,
-                "connection failed"
-            );
+            if ctx.config.access_log_enabled {
+                tracing::info!(
+                    target: "access_log",
+                    client_ip = %ctx.access_log_ip(),
+                    target = %target_addr_str,
+                    protocol = proto_label,
+                    user_id = ?ctx.effective_uid(),
+                    duration_ms = relay_start.elapsed().as_millis() as u64,
+                    status = "failed",
+                    error_type = error_label,
+                    error = %e,
+                    "connection failed"
+                );
+            }
             if let Some(uid) = ctx.effective_uid() {
                 state
                     .usage_writer
@@ -607,7 +613,7 @@ async fn async_handle_client_with_target(
     target: ProxyTarget,
     state: &AppState,
     user_id: Option<i64>,
-    is_admin: bool,
+    bypass_quota: bool,
 ) -> Result<(u64, u64), (io::Error, ErrorType)> {
     let target_addr = format!("{}:{}", target.host, target.port);
     let upstream_start = std::time::Instant::now();
@@ -693,7 +699,9 @@ async fn async_handle_client_with_target(
         .observe(upstream_start.elapsed().as_secs_f64());
     let _ = target_stream.set_nodelay(true);
     utils::enable_tcp_keepalive(&target_stream);
-    tracing::info!(
+    // debug, not info: per-connection client+destination belongs in the
+    // (configurable) access log, not the default operational log (#59).
+    tracing::debug!(
         "[{}]: Connection established to {} by {}",
         &protocol,
         target_addr,
@@ -760,13 +768,13 @@ async fn async_handle_client_with_target(
         "t2c",
         throttler,
         quota_tracker,
-        !is_admin,
+        !bypass_quota,
         idle_timeout,
     )
     .await
     {
         Ok((c2t, t2c)) => {
-            tracing::info!(
+            tracing::debug!(
                 "[{}]: Closed tunnel {} <-> {} (sent: {}, received: {})",
                 &protocol,
                 client_addr,
@@ -804,6 +812,14 @@ mod tests {
         assert!(peer_is_trusted_proxy(ip("192.168.1.5"), &cidrs)); // bare IP
         assert!(!peer_is_trusted_proxy(ip("192.168.1.6"), &cidrs));
         assert!(!peer_is_trusted_proxy(ip("8.8.8.8"), &cidrs));
+    }
+
+    #[test]
+    fn mapped_peer_matches_v4_trusted_cidr() {
+        let cidrs = vec!["10.0.0.0/8".to_string(), "192.168.1.5".to_string()];
+        assert!(peer_is_trusted_proxy(ip("::ffff:10.1.2.3"), &cidrs));
+        assert!(peer_is_trusted_proxy(ip("::ffff:192.168.1.5"), &cidrs));
+        assert!(!peer_is_trusted_proxy(ip("::ffff:8.8.8.8"), &cidrs));
     }
 
     #[test]

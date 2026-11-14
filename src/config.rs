@@ -132,8 +132,18 @@ pub struct FeatureConfig {
     /// Max concurrent relayed connections per tunnel (0 = unlimited).
     #[serde(default = "default_tunnel_max_connections")]
     pub tunnel_max_connections: usize,
+    // Must be https and (unless webhook_allow_private_targets) must not point
+    // at an internal / non-routable address (#58). Validated at startup.
     pub webhook_url: Option<String>,
     pub webhook_events: Vec<String>, // e.g. ["quota_exceeded", "rate_limit", "auth_failure"]
+    // Allow webhook_url to target private / loopback / link-local addresses
+    // (e.g. an in-cluster receiver). Off by default: SSRF guard.
+    #[serde(default)]
+    pub webhook_allow_private_targets: bool,
+    // Include per-connection PII (client IPs, destinations) in webhook
+    // payloads. Off by default: those keys are stripped before sending.
+    #[serde(default)]
+    pub webhook_include_pii: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -190,6 +200,21 @@ pub struct FilterConfig {
     // deployment that intentionally proxies to same-machine / internal targets.
     #[serde(default = "default_true")]
     pub block_private_targets: bool,
+    // Post-auth rules an admin / root_admin connection may bypass (#56).
+    // Every bypass that actually skips a denial is audit-logged and counted
+    // in proxy_admin_bypass_total{rule}. Defaults to all bypassable rules
+    // (the historical behaviour); remove entries to hold admins to them.
+    // Pre-auth rules (IP filter, geo, IP rate limit) and the SSRF egress
+    // guard always apply and cannot be listed here.
+    #[serde(default = "default_admin_bypass_rules")]
+    pub admin_bypass_rules: Vec<String>,
+}
+
+fn default_admin_bypass_rules() -> Vec<String> {
+    crate::proxy::pipeline::ADMIN_BYPASSABLE_RULES
+        .iter()
+        .map(|r| r.to_string())
+        .collect()
 }
 
 fn default_ip_filter_mode() -> String {
@@ -202,8 +227,52 @@ pub struct LoggingConfig {
     pub format: LogFormat,
     pub file_enabled: bool,
     pub file_path: String,
+    // Per-connection access log (target "access_log": client IP, destination,
+    // user, bytes). This is effectively per-user browsing history; disable it
+    // or reduce the client IP with access_log_client_ip where that matters.
     pub access_log_enabled: bool,
+    // Reserved: access-log events currently go to the process log output
+    // (filter with RUST_LOG, e.g. "info,access_log=off"); not a separate file.
     pub access_log_path: String,
+    // How the client IP appears in access-log events: "full" (default),
+    // "truncated" (IPv4 /24, IPv6 /48) or "omit".
+    #[serde(default)]
+    pub access_log_client_ip: AccessLogIpMode,
+}
+
+/// Client-IP handling for access-log events (#59).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AccessLogIpMode {
+    /// Log the full client IP.
+    #[default]
+    Full,
+    /// Log only the network: IPv4 /24, IPv6 /48.
+    Truncated,
+    /// Do not log the client IP at all.
+    Omit,
+}
+
+impl AccessLogIpMode {
+    /// Render `ip` for an access-log event according to this mode.
+    pub fn render(self, ip: std::net::IpAddr) -> String {
+        use std::net::IpAddr;
+        match self {
+            AccessLogIpMode::Full => ip.to_string(),
+            AccessLogIpMode::Omit => "-".to_string(),
+            AccessLogIpMode::Truncated => match ip {
+                IpAddr::V4(v4) => {
+                    let o = v4.octets();
+                    format!("{}.{}.{}.0/24", o[0], o[1], o[2])
+                }
+                IpAddr::V6(v6) => {
+                    let s = v6.segments();
+                    let net = std::net::Ipv6Addr::new(s[0], s[1], s[2], 0, 0, 0, 0, 0);
+                    format!("{}/48", net)
+                }
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -248,6 +317,31 @@ pub struct AdvancedConfig {
 }
 
 impl Config {
+    /// Semantic validation of the access-control / privacy settings, run at
+    /// startup and on config reload. Returns a human-readable error naming
+    /// the offending key.
+    pub fn validate_access_control(&self) -> Result<(), String> {
+        for rule in &self.filtering.admin_bypass_rules {
+            if !crate::proxy::pipeline::ADMIN_BYPASSABLE_RULES.contains(&rule.as_str()) {
+                return Err(format!(
+                    "filtering.admin_bypass_rules: unknown rule '{}' (valid: {})",
+                    rule,
+                    crate::proxy::pipeline::ADMIN_BYPASSABLE_RULES.join(", ")
+                ));
+            }
+        }
+        if let Some(url) = self
+            .features
+            .webhook_url
+            .as_deref()
+            .filter(|u| !u.trim().is_empty())
+        {
+            crate::webhook::validate_webhook_url(url, self.features.webhook_allow_private_targets)
+                .map_err(|e| format!("features.webhook_url: {}", e))?;
+        }
+        Ok(())
+    }
+
     /// Load configuration from a TOML file with environment variable overrides
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, config::ConfigError> {
         let settings = config::Config::builder()
@@ -310,6 +404,8 @@ impl Default for Config {
                 tunnel_max_connections: default_tunnel_max_connections(),
                 webhook_url: None,
                 webhook_events: vec![],
+                webhook_allow_private_targets: false,
+                webhook_include_pii: false,
             },
             state: StateConfig {
                 backend: "memory".to_string(),
@@ -338,6 +434,7 @@ impl Default for Config {
                 global_blocked_targets: vec![],
                 default_access_schedule: None,
                 block_private_targets: true,
+                admin_bypass_rules: default_admin_bypass_rules(),
             },
             logging: LoggingConfig {
                 level: "info".to_string(),
@@ -346,6 +443,7 @@ impl Default for Config {
                 file_path: "proxy.log".to_string(),
                 access_log_enabled: true,
                 access_log_path: "access.log".to_string(),
+                access_log_client_ip: AccessLogIpMode::Full,
             },
             metrics: MetricsConfig {
                 enabled: true,
@@ -455,6 +553,51 @@ mod tests {
         assert!(config.filtering.blocked_countries.is_empty());
         assert_eq!(config.filtering.ip_filter_mode, "blocklist");
         assert!(!config.filtering.ip_filter_enabled);
+    }
+
+    #[test]
+    fn test_admin_bypass_rules_default_and_validation() {
+        let mut config = Config::default();
+        assert_eq!(
+            config.filtering.admin_bypass_rules.len(),
+            crate::proxy::pipeline::ADMIN_BYPASSABLE_RULES.len()
+        );
+        assert!(config.validate_access_control().is_ok());
+        config.filtering.admin_bypass_rules = vec!["ip_filter".to_string()];
+        let err = config.validate_access_control().unwrap_err();
+        assert!(err.contains("unknown rule 'ip_filter'"));
+        config.filtering.admin_bypass_rules = vec![];
+        assert!(config.validate_access_control().is_ok());
+    }
+
+    #[test]
+    fn test_webhook_url_validated() {
+        let mut config = Config::default();
+        config.features.webhook_url = Some("http://hooks.example.com/x".into());
+        assert!(config.validate_access_control().is_err());
+        config.features.webhook_url = Some("https://169.254.169.254/".into());
+        assert!(config.validate_access_control().is_err());
+        config.features.webhook_allow_private_targets = true;
+        assert!(config.validate_access_control().is_ok());
+        config.features.webhook_url = Some("https://hooks.example.com/x".into());
+        config.features.webhook_allow_private_targets = false;
+        assert!(config.validate_access_control().is_ok());
+        config.features.webhook_url = Some(String::new());
+        assert!(config.validate_access_control().is_ok());
+    }
+
+    #[test]
+    fn test_access_log_ip_modes() {
+        let v4: std::net::IpAddr = "203.0.113.77".parse().unwrap();
+        let v6: std::net::IpAddr = "2001:db8:abcd:12::1".parse().unwrap();
+        assert_eq!(AccessLogIpMode::Full.render(v4), "203.0.113.77");
+        assert_eq!(AccessLogIpMode::Truncated.render(v4), "203.0.113.0/24");
+        assert_eq!(AccessLogIpMode::Truncated.render(v6), "2001:db8:abcd::/48");
+        assert_eq!(AccessLogIpMode::Omit.render(v4), "-");
+        assert_eq!(
+            Config::default().logging.access_log_client_ip,
+            AccessLogIpMode::Full
+        );
     }
 
     #[test]
