@@ -282,6 +282,34 @@ impl AppState {
             }
         };
 
+        // With the Redis state backend several instances usually sit behind a
+        // load balancer; per-instance buckets would make every limit N times
+        // larger. Share the buckets through Redis in that topology.
+        let (ip_rate_limiter, user_rate_limiter, login_rate_limiter) = match (
+            config.state.backend.as_str(),
+            cache.as_ref(),
+        ) {
+            ("redis", Some(layer)) => {
+                let shared = crate::rate_limit::RedisRateLimiter::new(
+                    layer.connection(),
+                    &config.state.redis_key_prefix,
+                );
+                tracing::info!("Rate limits are shared across instances via Redis");
+                (
+                    ip_rate_limiter.with_distributed(shared.clone()),
+                    user_rate_limiter.with_distributed(shared.clone()),
+                    login_rate_limiter.with_distributed(shared),
+                )
+            }
+            ("redis", None) => {
+                tracing::warn!(
+                        "State backend is redis but Redis is unreachable; rate limits are per-instance only"
+                    );
+                (ip_rate_limiter, user_rate_limiter, login_rate_limiter)
+            }
+            _ => (ip_rate_limiter, user_rate_limiter, login_rate_limiter),
+        };
+
         Ok(Self {
             global_conn_semaphore: Arc::new(tokio::sync::Semaphore::new(
                 config.server.max_connections,

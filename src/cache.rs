@@ -38,6 +38,12 @@ impl CacheLayer {
         &self.prefix
     }
 
+    /// A handle to the shared Redis connection (cheap clone of a multiplexed
+    /// connection manager), for components such as the distributed limiter.
+    pub fn connection(&self) -> ConnectionManager {
+        self.conn.clone()
+    }
+
     // ─── Generic helpers ───────────────────────────────────────────────
 
     async fn get_json<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
