@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-ARG RUST_VERSION=1.90
+ARG RUST_VERSION=1.97
 ARG DEBIAN_CODENAME=bookworm
 
 ########################################
