@@ -67,10 +67,56 @@ resumes when Redis returns. Single-instance deployments are unaffected.
 
 ## Backup & restore (SQLite)
 
-State lives in the `crabby-data` volume (`proxy.db`). **No automated backup is
-configured** — add one (e.g. `sqlite3 proxy.db ".backup"` on a schedule, or
-litestream). Migrations run automatically at boot with no down-migration path;
-snapshot the DB before deploying a new version.
+All durable state (users, approvals, usage, API keys) lives in one SQLite file,
+`proxy.db`, in the `crabby-data` volume. Losing the volume loses everything, so
+run backups.
+
+**Taking backups.** `scripts/backup-sqlite.sh` takes an online snapshot with
+SQLite's backup API (safe while the proxy runs in WAL mode), runs
+`PRAGMA integrity_check` on it, gzips it to `proxy-<UTC timestamp>.db.gz` and
+prunes snapshots older than `RETENTION_DAYS` (default 14). Ways to run it:
+
+- **Compose sidecar** (every 6 h by default, into `./backups`):
+  ```sh
+  docker compose --profile backup up -d
+  ```
+  Tune with `BACKUP_DIR`, `BACKUP_INTERVAL_SECONDS`, `BACKUP_RETENTION_DAYS`
+  in `.env`. The sidecar chowns `BACKUP_DIR` to the app uid (10001).
+- **Host cron, one shot** (no long-running sidecar):
+  ```cron
+  15 */6 * * * cd /srv/crabby_proxy && docker compose --profile backup run --rm --no-deps -e INTERVAL_SECONDS= crabby-backup
+  ```
+- **Bare metal**: `scripts/backup-sqlite.sh /path/to/proxy.db /path/to/backups`
+  (needs the `sqlite3` CLI). Equivalent one-liner without the script:
+  `sqlite3 proxy.db "VACUUM INTO '/backups/proxy-$(date +%F).db'"`.
+
+Snapshots on the same disk as the volume do not survive losing that disk: copy
+`BACKUP_DIR` off-host (restic, rclone to object storage, rsync) on its own
+schedule.
+
+**Before every deploy** take a one-shot snapshot: migrations run automatically
+at boot and have no down path, so the pre-deploy snapshot is the only way to
+roll back across a schema change.
+
+**Restore.**
+
+```sh
+docker compose stop crabby-proxy
+docker compose --profile backup run --rm --no-deps --entrypoint sh crabby-backup -c '
+  set -e
+  rm -f /app/data/proxy.db-wal /app/data/proxy.db-shm
+  gunzip -c /backups/proxy-YYYYMMDDTHHMMSSZ.db.gz > /app/data/proxy.db
+  chown 10001:10001 /app/data/proxy.db'
+docker compose start crabby-proxy
+```
+
+Delete the old `-wal`/`-shm` files as shown: a stale WAL replayed over the
+restored file corrupts it.
+
+**Test restores** at least monthly: gunzip the newest snapshot somewhere
+scratch, run `sqlite3 restored.db "PRAGMA integrity_check; SELECT count(*) FROM users;"`,
+or boot a throwaway proxy container against it. An untested backup is not a
+backup.
 
 ## Monitoring
 

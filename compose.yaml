@@ -126,6 +126,49 @@ services:
         max-size: "10m"
         max-file: "5"
 
+  # Optional SQLite backup sidecar. Off by default; enable with
+  #   docker compose --profile backup up -d
+  # Takes an online, integrity-checked `.backup` snapshot of proxy.db every
+  # BACKUP_INTERVAL_SECONDS into BACKUP_DIR on the host, pruning snapshots
+  # older than BACKUP_RETENTION_DAYS. Ship BACKUP_DIR off-host yourself
+  # (restic/rclone/rsync): a backup on the same disk is not disaster recovery.
+  # One-shot (e.g. from host cron):
+  #   docker compose --profile backup run --rm --no-deps -e INTERVAL_SECONDS= crabby-backup
+  # Restore procedure: docs/RUNBOOK.md, "Backup & restore".
+  crabby-backup:
+    image: alpine:3.20
+    profiles: ["backup"]
+    container_name: crabby-proxy-backup
+    restart: unless-stopped
+    # Starts as root only to install sqlite3 and hand BACKUP_DIR to the app
+    # uid, then drops to that uid so any -wal/-shm file it touches in the
+    # shared volume stays owned by the proxy user.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        apk add --no-cache sqlite su-exec >/dev/null &&
+        mkdir -p /backups && chown 10001:10001 /backups &&
+        exec su-exec 10001:10001 /bin/sh /usr/local/bin/backup-sqlite.sh
+    environment:
+      DB_PATH: /app/data/proxy.db
+      BACKUP_DIR: /backups
+      INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-21600}
+      RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+    volumes:
+      - crabby-data:/app/data
+      - ./scripts/backup-sqlite.sh:/usr/local/bin/backup-sqlite.sh:ro
+      - ${BACKUP_DIR:-./backups}:/backups
+    mem_limit: 128m
+    cpus: 0.5
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   crabby-data:
     driver: local
