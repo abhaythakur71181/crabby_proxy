@@ -68,9 +68,7 @@ pub async fn list_user_sessions(
     axum::extract::Path(user_id): axum::extract::Path<i64>,
     Query(page): Query<super::models::PageQuery>,
 ) -> Result<Json<Vec<SessionInfo>>, ApiError> {
-    if !current_user.can_access_user(user_id) {
-        return Err(ApiError::forbidden("Cannot access another user's sessions"));
-    }
+    current_user.authorize_target(&state, user_id).await?;
     let sessions = crate::db::sessions::list_user_sessions(&state.db_pool, user_id, page.page())
         .await
         .map_err(|e| {
@@ -108,9 +106,7 @@ pub async fn delete_user_sessions(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(user_id): axum::extract::Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    if !current_user.can_access_user(user_id) {
-        return Err(ApiError::forbidden("Cannot modify another user's sessions"));
-    }
+    current_user.authorize_target(&state, user_id).await?;
     let deleted = crate::db::sessions::delete_user_sessions(&state.db_pool, user_id)
         .await
         .map_err(|e| {

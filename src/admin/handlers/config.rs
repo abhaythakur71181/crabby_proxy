@@ -1,5 +1,5 @@
 use super::models::ApiError;
-use crate::admin::auth::AdminUser;
+use crate::admin::auth::{AdminUser, RootAdminUser};
 use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
 
@@ -76,17 +76,11 @@ pub struct UpdateConfigRequest {
 /// file. Security-critical fields (binds, secrets, auth toggle) are NOT editable
 /// here — they require a restart by design.
 pub async fn update_config(
+    RootAdminUser(current_user): RootAdminUser,
     State(state): State<Arc<AppState>>,
-    axum::Extension(current_user_id): axum::Extension<i64>,
     Json(body): Json<UpdateConfigRequest>,
 ) -> Result<Json<ConfigResponse>, ApiError> {
-    let current_user =
-        crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
-    if current_user.role != "root_admin" {
-        return Err(ApiError::forbidden(
-            "Only root_admin can edit configuration",
-        ));
-    }
+    let current_user_id = current_user.id;
 
     let path = state
         .config_path
@@ -189,12 +183,10 @@ fn write_file_atomic(path: &std::path::Path, contents: &[u8]) -> std::io::Result
 
 /// Reload configuration from file
 pub async fn reload_config(
+    AdminUser(current_user): AdminUser,
     State(state): State<Arc<AppState>>,
-    axum::Extension(current_user_id): axum::Extension<i64>,
 ) -> Result<Json<ReloadResponse>, ApiError> {
-    let current_user =
-        crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
-    current_user.require_admin()?;
+    let current_user_id = current_user.id;
     tracing::info!(
         "Configuration reload requested by admin user {}",
         current_user_id

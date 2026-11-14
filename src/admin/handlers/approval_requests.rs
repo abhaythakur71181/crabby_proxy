@@ -1,4 +1,5 @@
 use super::models::ApiError;
+use crate::admin::auth::{AdminUser, CurrentUser};
 use crate::app_state::AppState;
 use crate::db::approval_requests;
 use axum::{
@@ -65,10 +66,11 @@ impl From<approval_requests::ApprovalRequestWithUser> for RequestResponse {
 
 /// POST /api/approval-requests — Any authenticated user can request approval (for themselves)
 pub async fn create_request(
+    current_user: CurrentUser,
     State(state): State<Arc<AppState>>,
-    axum::Extension(current_user_id): axum::Extension<i64>,
     Json(payload): Json<CreateRequestPayload>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let current_user_id = current_user.id;
     // Bound the requested duration (1..=8760 hours); a user-supplied value must
     // not create a past-dated or effectively permanent grant.
     if !(1..=8760).contains(&payload.duration_hours) {
@@ -131,12 +133,11 @@ pub async fn create_request(
 
 /// GET /api/approval-requests — Admin sees all, regular user sees only their own
 pub async fn list_requests(
+    current_user: CurrentUser,
     State(state): State<Arc<AppState>>,
-    axum::Extension(current_user_id): axum::Extension<i64>,
     Query(params): Query<ListQuery>,
 ) -> Result<Json<Vec<RequestResponse>>, ApiError> {
-    let current_user =
-        crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
+    let current_user_id = current_user.id;
 
     let page = crate::db::Page::new(params.limit, params.offset);
     let records = if current_user.role == "root_admin" || current_user.role == "admin" {
@@ -157,14 +158,12 @@ pub async fn list_requests(
 
 /// POST /api/approval-requests/:id/approve — Admin only
 pub async fn approve_request(
+    AdminUser(current_user): AdminUser,
     State(state): State<Arc<AppState>>,
     Path(request_id): Path<i64>,
-    axum::Extension(current_user_id): axum::Extension<i64>,
     Json(payload): Json<DecisionPayload>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let current_user =
-        crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
-    current_user.require_admin()?;
+    let current_user_id = current_user.id;
 
     let req = approval_requests::approve_request(
         &state.db_pool,
@@ -205,14 +204,12 @@ pub async fn approve_request(
 
 /// POST /api/approval-requests/:id/reject — Admin only
 pub async fn reject_request(
+    AdminUser(current_user): AdminUser,
     State(state): State<Arc<AppState>>,
     Path(request_id): Path<i64>,
-    axum::Extension(current_user_id): axum::Extension<i64>,
     Json(payload): Json<DecisionPayload>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let current_user =
-        crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
-    current_user.require_admin()?;
+    let current_user_id = current_user.id;
 
     let rejected = approval_requests::reject_request(
         &state.db_pool,

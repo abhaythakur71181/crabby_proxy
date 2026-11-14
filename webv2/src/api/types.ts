@@ -8,9 +8,15 @@ export type { Role };
 
 // ── Auth ──────────────────────────────────────────────────────────
 export interface LoginResponse {
-  token: string;
+  /** Only for bearer (non-cookie) logins; webv2 uses the HttpOnly cookie. */
+  token?: string;
   expires_in: number;
   role: Role;
+  user_id: number;
+  username: string;
+  expires_at: number;
+  /** Cookie logins: echo in X-CSRF-Token on state-changing requests. */
+  csrf_token?: string;
 }
 
 // ── Users ─────────────────────────────────────────────────────────

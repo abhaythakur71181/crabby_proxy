@@ -232,7 +232,8 @@ Exposed at `GET /metrics` in Prometheus text format:
 |--------|------|-------------|
 | `GET` | `/health` | Health check (status, uptime, version) |
 | `GET` | `/metrics` | Prometheus metrics |
-| `POST` | `/api/login` | Login, returns JWT token |
+| `POST` | `/api/login` | Login, returns a session-backed JWT |
+| `POST` | `/api/logout` | Revoke the presented token's session (idempotent, 204) |
 
 ### Protected Endpoints (JWT Bearer or Basic auth)
 
@@ -240,6 +241,7 @@ Exposed at `GET /metrics` in Prometheus text format:
 
 | Method | Path | Description |
 |--------|------|-------------|
+| `GET` | `/api/session` | Identity behind the presented credentials |
 | `GET` | `/stats` | Uptime, active/total connections, bandwidth |
 | `GET` | `/api/dashboard` | Aggregate dashboard (connections, bandwidth, top users, tunnels) |
 | `GET` | `/api/config` | Current config (secrets redacted) |

@@ -25,7 +25,7 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
 import { reloadConfig } from "@/api/endpoints";
-import { clearSession } from "@/lib/auth";
+import { signOut } from "@/api/http";
 import { useIsAdmin, useUsers } from "@/hooks/queries";
 import { useTheme } from "@/hooks/use-theme";
 import { RoleBadge } from "@/components/ui/badge";
@@ -158,7 +158,7 @@ export function CommandPalette() {
           <Item
             onSelect={() =>
               go(() => {
-                clearSession();
+                void signOut();
                 navigate("/login");
               })
             }

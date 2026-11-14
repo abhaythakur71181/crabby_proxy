@@ -304,6 +304,11 @@ pub struct MetricsConfig {
     pub enabled: bool,
     pub prometheus_path: String,
     pub update_interval: u64,
+    /// Bearer token required to scrape `/metrics`. Unset (default) keeps the
+    /// endpoint unauthenticated, which is only safe on a loopback / private
+    /// admin bind; the server warns at boot otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scrape_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -315,6 +320,12 @@ pub struct AdminConfig {
     pub websocket_enabled: bool,
     pub cors_enabled: bool,
     pub cors_origins: Vec<String>,
+    /// Set the `Secure` attribute on the browser session cookie (webv2).
+    /// Keep this on whenever the UI is served over HTTPS; turn it off only
+    /// for a plain-HTTP deployment on a trusted network, where browsers would
+    /// otherwise drop the cookie (http://localhost is exempt either way).
+    #[serde(default = "default_true")]
+    pub session_cookie_secure: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -468,6 +479,7 @@ impl Default for Config {
                 enabled: true,
                 prometheus_path: "/metrics".to_string(),
                 update_interval: 10,
+                scrape_token: None,
             },
             admin: AdminConfig {
                 enabled: true,
@@ -477,6 +489,7 @@ impl Default for Config {
                 websocket_enabled: true,
                 cors_enabled: true,
                 cors_origins: vec!["http://localhost:3000".to_string()],
+                session_cookie_secure: true,
             },
             advanced: AdvancedConfig {
                 buffer_size: 8192,
