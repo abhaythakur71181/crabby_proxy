@@ -45,6 +45,23 @@ lazy_static! {
     )
     .unwrap();
 
+    /// Geo-filter decisions. "unavailable" counts connections denied because
+    /// geo blocking is enabled but no GeoIP database is loaded (fail-closed).
+    pub static ref GEO_FILTER_ACTIONS: IntCounterVec = register_int_counter_vec!(
+        "proxy_geo_filter_actions_total",
+        "Total geo-filter actions",
+        &["action"] // "allowed", "blocked" or "unavailable"
+    )
+    .unwrap();
+
+    /// 1 when a GeoIP database is loaded, 0 otherwise. Alert on
+    /// geo_blocking_enabled deployments where this reads 0.
+    pub static ref GEO_FILTER_LOADED: IntGauge = register_int_gauge!(
+        "proxy_geo_filter_loaded",
+        "Whether a GeoIP database is loaded (1 = loaded)"
+    )
+    .unwrap();
+
     /// Rate limit exceeded events
     pub static ref RATE_LIMIT_EXCEEDED: IntCounterVec = register_int_counter_vec!(
         "proxy_rate_limit_exceeded_total",

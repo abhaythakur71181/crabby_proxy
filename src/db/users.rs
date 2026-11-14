@@ -7,6 +7,37 @@ use sqlx::SqlitePool;
 use super::models::{CreateUserRequest, Role, User};
 
 /// Create a new user
+/// Bytes per MiB, the unit of the API-facing `bandwidth_limit_mb` field.
+pub const MIB: i64 = 1024 * 1024;
+
+/// Convert an API `bandwidth_limit_mb` value into the canonical
+/// `monthly_bandwidth_quota` byte value (0 or negative = unlimited = NULL).
+pub fn mb_to_quota_bytes(mb: i64) -> Option<i64> {
+    (mb > 0).then(|| mb.saturating_mul(MIB))
+}
+
+/// Columns for a `User` row. `monthly_bandwidth_quota` (bytes) is the single
+/// stored quota (#35); `bandwidth_limit_mb` is derived from it, rounded up to
+/// whole MiB so a non-zero quota never reads back as 0 ("unlimited").
+///
+/// `password_hash` is deliberately NOT selected here (#36): only
+/// [`verify_password`] needs it, so ordinary reads (list pages, lookups,
+/// caches) never pull the hash into memory. The field is filled with "".
+const USER_COLUMNS_NO_HASH: &str = "id, username, '' AS password_hash, role, created_by, created_at, updated_at, is_active, \
+     max_connections, \
+     CAST((COALESCE(monthly_bandwidth_quota, 0) + 1048575) / 1048576 AS INTEGER) AS bandwidth_limit_mb, \
+     bandwidth_rate_bps, rate_limit_enabled, rate_limit_rps, rate_limit_burst, \
+     allowed_protocols, ip_whitelist, allowed_targets, blocked_targets, access_schedule, \
+     notes, last_login_at";
+
+/// Same as [`USER_COLUMNS_NO_HASH`] but including the real password hash.
+const USER_COLUMNS_WITH_HASH: &str = "id, username, password_hash, role, created_by, created_at, updated_at, is_active, \
+     max_connections, \
+     CAST((COALESCE(monthly_bandwidth_quota, 0) + 1048575) / 1048576 AS INTEGER) AS bandwidth_limit_mb, \
+     bandwidth_rate_bps, rate_limit_enabled, rate_limit_rps, rate_limit_burst, \
+     allowed_protocols, ip_whitelist, allowed_targets, blocked_targets, access_schedule, \
+     notes, last_login_at";
+
 pub async fn create_user(
     pool: &SqlitePool,
     request: &CreateUserRequest,
@@ -25,7 +56,7 @@ pub async fn create_user(
     };
 
     let max_connections = request.max_connections.unwrap_or(100);
-    let bandwidth_limit_mb = request.bandwidth_limit_mb.unwrap_or(1000);
+    let monthly_quota = mb_to_quota_bytes(request.bandwidth_limit_mb.unwrap_or(1000));
     let rate_limit_enabled = request.rate_limit_enabled.unwrap_or(true);
     let rate_limit_rps = request.rate_limit_rps.unwrap_or(10);
     let rate_limit_burst = rate_limit_rps * 2;
@@ -39,7 +70,7 @@ pub async fn create_user(
         r#"
         INSERT INTO users (
             username, password_hash, role, created_by, created_at, updated_at,
-            max_connections, bandwidth_limit_mb, rate_limit_enabled,
+            max_connections, monthly_bandwidth_quota, rate_limit_enabled,
             rate_limit_rps, rate_limit_burst, allowed_protocols, notes
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -52,7 +83,7 @@ pub async fn create_user(
     .bind(now)
     .bind(now)
     .bind(max_connections)
-    .bind(bandwidth_limit_mb)
+    .bind(monthly_quota)
     .bind(rate_limit_enabled)
     .bind(rate_limit_rps)
     .bind(rate_limit_burst)
@@ -64,55 +95,126 @@ pub async fn create_user(
     Ok(result.last_insert_rowid())
 }
 
-/// Get user by username
+/// Get user by username (without the password hash; see [`verify_password`]).
 pub async fn get_user_by_username(
     pool: &SqlitePool,
     username: &str,
 ) -> Result<Option<User>, sqlx::Error> {
-    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = ?")
+    let sql = format!("SELECT {USER_COLUMNS_NO_HASH} FROM users WHERE username = ?");
+    sqlx::query_as::<_, User>(&sql)
         .bind(username)
         .fetch_optional(pool)
-        .await?;
+        .await
+}
 
-    Ok(user)
+/// The (first, active) root_admin account. Config-file credentials resolve to
+/// this user. Looked up by role, since the bootstrap account is named "root"
+/// (see `ensure_root_admin`), not "root_admin".
+pub async fn get_root_admin(pool: &SqlitePool) -> Result<Option<User>, sqlx::Error> {
+    let sql = format!(
+        "SELECT {USER_COLUMNS_NO_HASH} FROM users WHERE role = 'root_admin' AND is_active = 1 ORDER BY id LIMIT 1"
+    );
+    sqlx::query_as::<_, User>(&sql).fetch_optional(pool).await
 }
 
 /// Get user by ID
 pub async fn get_user_by_id(pool: &SqlitePool, id: i64) -> Result<Option<User>, sqlx::Error> {
-    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = ?")
+    let sql = format!("SELECT {USER_COLUMNS_NO_HASH} FROM users WHERE id = ?");
+    sqlx::query_as::<_, User>(&sql)
         .bind(id)
         .fetch_optional(pool)
-        .await?;
-
-    Ok(user)
+        .await
 }
 
-/// Verify user password
+/// Verify user password.
+///
+/// Does the same Argon2 work whether or not the username exists: on the
+/// not-found path it verifies against a fixed dummy hash, so response timing
+/// does not reveal which usernames exist (the generic "invalid credentials"
+/// message would otherwise be undone by a measurable timing gap).
+///
+/// On success, a hash made with older or different Argon2 parameters is
+/// transparently re-hashed with the current ones.
 pub async fn verify_password(
     pool: &SqlitePool,
     username: &str,
     password: &str,
 ) -> Result<Option<User>, sqlx::Error> {
-    let user = get_user_by_username(pool, username).await?;
+    let sql = format!("SELECT {USER_COLUMNS_WITH_HASH} FROM users WHERE username = ?");
+    let user = sqlx::query_as::<_, User>(&sql)
+        .bind(username)
+        .fetch_optional(pool)
+        .await?;
 
-    if let Some(user) = user {
-        if verify_password_hash(password, &user.password_hash).await {
-            Ok(Some(user))
-        } else {
-            Ok(None)
+    let Some(mut user) = user else {
+        let _ = verify_password_hash(password, dummy_password_hash().await).await;
+        return Ok(None);
+    };
+    if !verify_password_hash(password, &user.password_hash).await {
+        return Ok(None);
+    }
+    if needs_rehash(&user.password_hash) {
+        upgrade_password_hash(pool, &user, password).await;
+    }
+    // Callers only need the identity; don't hand the hash onward.
+    user.password_hash.clear();
+    Ok(Some(user))
+}
+
+/// Re-hash a verified password with the current parameters. Best effort: a
+/// failure just leaves the old (still valid) hash in place. The `WHERE` on the
+/// old hash avoids clobbering a password change that raced with this login.
+async fn upgrade_password_hash(pool: &SqlitePool, user: &User, password: &str) {
+    let new_hash = match hash_password(password).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!("Password re-hash for user {} failed: {}", user.id, e);
+            return;
         }
-    } else {
-        Ok(None)
+    };
+    match sqlx::query("UPDATE users SET password_hash = ? WHERE id = ? AND password_hash = ?")
+        .bind(&new_hash)
+        .bind(user.id)
+        .bind(&user.password_hash)
+        .execute(pool)
+        .await
+    {
+        Ok(_) => tracing::info!("Upgraded password hash parameters for user {}", user.id),
+        Err(e) => tracing::warn!("Storing re-hashed password for {} failed: {}", user.id, e),
     }
 }
+
+/// A valid Argon2 hash of a random, never-disclosed password, made with the
+/// current parameters. Used only to equalise timing on the user-not-found
+/// path; nothing can ever verify against it.
+async fn dummy_password_hash() -> &'static str {
+    static DUMMY: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
+    DUMMY
+        .get_or_init(|| async {
+            let secret = generate_secure_password(32);
+            hash_password(&secret)
+                .await
+                .unwrap_or_else(|_| String::from("$argon2id$v=19$m=19456,t=2,p=1$invalid"))
+        })
+        .await
+}
+
+/// Minimum spacing between `last_login_at` writes for the same user.
+const LAST_LOGIN_WRITE_INTERVAL_SECS: i64 = 60;
 
 /// Update last login time
 pub async fn update_last_login(pool: &SqlitePool, user_id: i64) -> Result<(), sqlx::Error> {
     let now = chrono::Utc::now().timestamp();
 
-    sqlx::query("UPDATE users SET last_login_at = ? WHERE id = ?")
-        .bind(now)
-        .bind(user_id)
+    // Throttled: skip the write (and the WAL write lock) when the timestamp was
+    // refreshed within the last minute; minute precision is plenty for a
+    // "last login" display and repeated logins no longer queue writers.
+    sqlx::query(
+        "UPDATE users SET last_login_at = ? WHERE id = ? AND (last_login_at IS NULL OR last_login_at < ?)",
+    )
+    .bind(now)
+    .bind(user_id)
+    .bind(now - LAST_LOGIN_WRITE_INTERVAL_SECS)
         .execute(pool)
         .await?;
 
@@ -144,6 +246,73 @@ fn generate_secure_password(length: usize) -> String {
     String::from_utf8(password).unwrap_or_else(|_| "Fallback_P@ss1".to_string())
 }
 
+/// Default file the generated first-boot root password is written to when
+/// there is no interactive terminal. Override with CRABBY_ROOT_PASSWORD_FILE.
+#[cfg(not(test))]
+const ROOT_PASSWORD_FILE: &str = "initial_root_password.txt";
+
+/// Hand a generated root password to the operator WITHOUT going through the
+/// `tracing` pipeline: anything logged there ends up in log shippers /
+/// journald / container logs, in cleartext, for as long as logs are kept.
+///
+/// - Interactive terminal on stderr: print it there directly.
+/// - Otherwise (service, container): write it to a new file readable only by
+///   the service user (0600) and log only the file's path. The file is never
+///   overwritten; delete it after saving the password.
+/// - If the file cannot be written, fall back to raw stderr (still outside
+///   the structured log pipeline).
+#[cfg(not(test))]
+fn disclose_generated_root_password(password: &str) {
+    use std::io::{IsTerminal, Write};
+
+    let banner = format!(
+        "\n\
+         ==============================================================\n\
+         ROOT ADMIN ACCOUNT CREATED\n\
+         Username: root\n\
+         Password: {password}\n\
+         Save this password now; it will not be shown again.\n\
+         To choose it yourself, set CRABBY_ROOT_PASSWORD before first start.\n\
+         ==============================================================\n"
+    );
+    if std::io::stderr().is_terminal() {
+        eprint!("{}", banner);
+        tracing::warn!("Root admin account 'root' created; the generated password was printed to the terminal (not to the logs)");
+        return;
+    }
+
+    let path = std::env::var("CRABBY_ROOT_PASSWORD_FILE")
+        .unwrap_or_else(|_| ROOT_PASSWORD_FILE.to_string());
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    match opts
+        .open(&path)
+        .and_then(|mut f| writeln!(f, "username: root\npassword: {}", password))
+    {
+        Ok(()) => tracing::warn!(
+            "Root admin account 'root' created; the generated password was written to {} (mode 0600). Save it and delete the file.",
+            path
+        ),
+        Err(e) => {
+            tracing::warn!(
+                "Root admin account 'root' created; could not write the password file {} ({}), printing the password to stderr instead",
+                path,
+                e
+            );
+            eprint!("{}", banner);
+        }
+    }
+}
+
+/// Unit tests create many throwaway databases; don't litter files or stderr.
+#[cfg(test)]
+fn disclose_generated_root_password(_password: &str) {}
+
 /// Create root admin if none exists
 pub async fn ensure_root_admin(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
     let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE role = 'root_admin'")
@@ -151,8 +320,9 @@ pub async fn ensure_root_admin(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
         .await?;
     if count.0 == 0 {
         // Try env var first, then generate random password
-        let password =
-            std::env::var("CRABBY_ROOT_PASSWORD").unwrap_or_else(|_| generate_secure_password(16));
+        let from_env = std::env::var("CRABBY_ROOT_PASSWORD").ok();
+        let generated = from_env.is_none();
+        let password = from_env.unwrap_or_else(|| generate_secure_password(16));
 
         let request = CreateUserRequest {
             username: "root".to_string(),
@@ -167,16 +337,13 @@ pub async fn ensure_root_admin(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
         };
         create_user(pool, &request, None).await?;
 
-        tracing::warn!("╔════════════════════════════════════════════════════════════╗");
-        tracing::warn!("║          ROOT ADMIN ACCOUNT CREATED                        ║");
-        tracing::warn!("╠════════════════════════════════════════════════════════════╣");
-        tracing::warn!("║  Username: root                                            ║");
-        tracing::warn!("║  Password: {:<48}║", password);
-        tracing::warn!("╠════════════════════════════════════════════════════════════╣");
-        tracing::warn!("║  *** SAVE THIS PASSWORD - IT WON'T BE SHOWN AGAIN ***      ║");
-        tracing::warn!("║  To set a custom password, use env var:                    ║");
-        tracing::warn!("║  CRABBY_ROOT_PASSWORD=yourpassword                         ║");
-        tracing::warn!("╚════════════════════════════════════════════════════════════╝");
+        if generated {
+            disclose_generated_root_password(&password);
+        } else {
+            tracing::warn!(
+                "Root admin account 'root' created with the password from CRABBY_ROOT_PASSWORD"
+            );
+        }
 
         Ok(true)
     } else {
@@ -185,20 +352,62 @@ pub async fn ensure_root_admin(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
 }
 
 // Password hashing helpers
-async fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
+//
+// Argon2 parameters are pinned explicitly rather than taken from
+// `Argon2::default()`, so a change of crate defaults can never silently
+// weaken (or change) hashing. Values are the OWASP-recommended Argon2id
+// baseline (19 MiB, 2 passes, 1 lane), which is also what the 0.5 crate
+// default was when existing hashes were created. Raising them later is safe:
+// `verify_password` re-hashes on the next successful login.
+
+/// Argon2id memory cost in KiB.
+pub(crate) const ARGON2_M_COST: u32 = 19 * 1024;
+/// Argon2id iterations.
+pub(crate) const ARGON2_T_COST: u32 = 2;
+/// Argon2id parallelism.
+pub(crate) const ARGON2_P_COST: u32 = 1;
+
+/// The Argon2id instance used for every new password hash.
+pub(crate) fn argon2_hasher() -> Argon2<'static> {
+    let params = argon2::Params::new(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST, None)
+        .expect("pinned Argon2 parameters are valid");
+    Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
+}
+
+/// True if `hash` is not an Argon2id v19 hash with exactly the current
+/// parameters (and should therefore be re-hashed once the password is known).
+pub(crate) fn needs_rehash(hash: &str) -> bool {
+    let Ok(parsed) = PasswordHash::new(hash) else {
+        return false; // not a PHC string; nothing we can upgrade
+    };
+    if parsed.algorithm != argon2::Algorithm::Argon2id.ident() || parsed.version != Some(0x13) {
+        return true;
+    }
+    match argon2::Params::try_from(&parsed) {
+        Ok(p) => {
+            p.m_cost() != ARGON2_M_COST
+                || p.t_cost() != ARGON2_T_COST
+                || p.p_cost() != ARGON2_P_COST
+        }
+        Err(_) => true,
+    }
+}
+
+pub(crate) async fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
     let password = password.to_string();
     tokio::task::spawn_blocking(move || {
         use argon2::password_hash::rand_core::OsRng;
         let salt = SaltString::generate(&mut OsRng);
-        let argon2 = Argon2::default();
-        let password_hash = argon2.hash_password(password.as_bytes(), &salt)?;
+        let password_hash = argon2_hasher().hash_password(password.as_bytes(), &salt)?;
         Ok(password_hash.to_string())
     })
     .await
     .map_err(|_| argon2::password_hash::Error::Password)?
 }
 
-async fn verify_password_hash(password: &str, hash: &str) -> bool {
+/// Verify `password` against a PHC-format Argon2 hash. The parameters are
+/// read from the hash itself, so older hashes keep verifying.
+pub(crate) async fn verify_password_hash(password: &str, hash: &str) -> bool {
     let password = password.to_string();
     let hash = hash.to_string();
     tokio::task::spawn_blocking(move || {
@@ -206,7 +415,7 @@ async fn verify_password_hash(password: &str, hash: &str) -> bool {
             Ok(h) => h,
             Err(_) => return false,
         };
-        Argon2::default()
+        argon2_hasher()
             .verify_password(password.as_bytes(), &parsed_hash)
             .is_ok()
     })
@@ -255,7 +464,7 @@ pub async fn update_user(
             password_hash = COALESCE(?, password_hash),
             role = COALESCE(?, role),
             max_connections = COALESCE(?, max_connections),
-            bandwidth_limit_mb = COALESCE(?, bandwidth_limit_mb),
+            monthly_bandwidth_quota = CASE WHEN ? THEN ? ELSE monthly_bandwidth_quota END,
             is_active = COALESCE(?, is_active),
             updated_at = ?
         WHERE id = ?
@@ -264,7 +473,8 @@ pub async fn update_user(
     .bind(password_hash)
     .bind(role_str)
     .bind(max_connections)
-    .bind(bandwidth_limit_mb)
+    .bind(bandwidth_limit_mb.is_some())
+    .bind(bandwidth_limit_mb.and_then(mb_to_quota_bytes))
     .bind(is_active)
     .bind(now)
     .bind(user_id)
@@ -276,7 +486,8 @@ pub async fn update_user(
         return Err(sqlx::Error::RowNotFound);
     }
 
-    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = ?")
+    let sql = format!("SELECT {USER_COLUMNS_NO_HASH} FROM users WHERE id = ?");
+    let user = sqlx::query_as::<_, User>(&sql)
         .bind(user_id)
         .fetch_one(&mut *tx)
         .await?;
@@ -317,13 +528,14 @@ pub async fn list_users_paginated(
     limit: i32,
     offset: i32,
 ) -> Result<Vec<User>, sqlx::Error> {
-    let users =
-        sqlx::query_as::<_, User>("SELECT * FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?")
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(pool)
-            .await?;
-    Ok(users)
+    let sql = format!(
+        "SELECT {USER_COLUMNS_NO_HASH} FROM users ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+    );
+    sqlx::query_as::<_, User>(&sql)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await
 }
 
 /// Count total users.
@@ -348,75 +560,9 @@ mod tests {
     use sqlx::SqlitePool;
 
     async fn setup_test_db() -> SqlitePool {
-        let pool = SqlitePool::connect(":memory:").await.unwrap();
-        sqlx::query(
-            r#"
-            CREATE TABLE users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL UNIQUE,
-                password_hash TEXT NOT NULL,
-                role TEXT NOT NULL DEFAULT 'user',
-                created_by INTEGER,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                is_active BOOLEAN NOT NULL DEFAULT 1,
-                max_connections INTEGER NOT NULL DEFAULT 100,
-                bandwidth_limit_mb INTEGER NOT NULL DEFAULT 1000,
-                rate_limit_enabled BOOLEAN NOT NULL DEFAULT 1,
-                rate_limit_rps INTEGER NOT NULL DEFAULT 10,
-                rate_limit_burst INTEGER NOT NULL DEFAULT 20,
-                allowed_protocols TEXT,
-                ip_whitelist TEXT,
-                allowed_targets TEXT,
-                blocked_targets TEXT,
-                access_schedule TEXT,
-                notes TEXT,
-                last_login_at INTEGER,
-                monthly_bandwidth_quota INTEGER,
-                bandwidth_rate_bps INTEGER NOT NULL DEFAULT 0
-            )
-            "#,
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        sqlx::query(
-            r#"
-            CREATE TABLE api_keys (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                key_hash TEXT NOT NULL,
-                key_prefix TEXT NOT NULL,
-                name TEXT NOT NULL DEFAULT '',
-                created_at INTEGER NOT NULL,
-                expires_at INTEGER,
-                last_used_at INTEGER,
-                is_active BOOLEAN NOT NULL DEFAULT 1
-            )
-            "#,
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        sqlx::query(
-            r#"
-            CREATE TABLE sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                token_hash TEXT,
-                created_at INTEGER NOT NULL DEFAULT 0,
-                expires_at INTEGER NOT NULL DEFAULT 0,
-                ip_address TEXT,
-                user_agent TEXT
-            )
-            "#,
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
+        // Real migrations, so the tests exercise the shipped schema.
+        let pool = crate::db::create_pool("sqlite::memory:", 1).await.unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
         pool
     }
 
@@ -598,6 +744,86 @@ mod tests {
         assert!(result.is_none());
     }
 
+    #[tokio::test]
+    async fn test_dummy_hash_is_a_real_current_hash() {
+        // The not-found path must cost a full Argon2 verify, so the dummy has
+        // to be a parseable hash with the current parameters.
+        let dummy = dummy_password_hash().await;
+        assert!(PasswordHash::new(dummy).is_ok());
+        assert!(!needs_rehash(dummy));
+        assert!(!verify_password_hash("password123", dummy).await);
+    }
+
+    #[tokio::test]
+    async fn test_new_hashes_use_pinned_params() {
+        let hash = hash_password("pw").await.unwrap();
+        assert!(
+            hash.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"),
+            "{}",
+            hash
+        );
+        assert!(!needs_rehash(&hash));
+    }
+
+    #[test]
+    fn test_needs_rehash_detects_other_params() {
+        use argon2::password_hash::rand_core::OsRng;
+        let weak = Argon2::new(
+            argon2::Algorithm::Argon2id,
+            argon2::Version::V0x13,
+            argon2::Params::new(8 * 1024, 1, 1, None).unwrap(),
+        )
+        .hash_password(b"pw", &SaltString::generate(&mut OsRng))
+        .unwrap()
+        .to_string();
+        assert!(needs_rehash(&weak));
+        let argon2i = Argon2::new(
+            argon2::Algorithm::Argon2i,
+            argon2::Version::V0x13,
+            argon2::Params::new(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST, None).unwrap(),
+        )
+        .hash_password(b"pw", &SaltString::generate(&mut OsRng))
+        .unwrap()
+        .to_string();
+        assert!(needs_rehash(&argon2i));
+        assert!(!needs_rehash("not-a-phc-string"));
+    }
+
+    #[tokio::test]
+    async fn test_verify_password_rehashes_outdated_hash() {
+        use argon2::password_hash::rand_core::OsRng;
+        let pool = setup_test_db().await;
+        let req = test_create_user_request("rehash_user");
+        let id = create_user(&pool, &req, None).await.unwrap();
+        let weak = Argon2::new(
+            argon2::Algorithm::Argon2id,
+            argon2::Version::V0x13,
+            argon2::Params::new(8 * 1024, 1, 1, None).unwrap(),
+        )
+        .hash_password(b"TestPass123!", &SaltString::generate(&mut OsRng))
+        .unwrap()
+        .to_string();
+        sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
+            .bind(&weak)
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(verify_password(&pool, "rehash_user", "TestPass123!")
+            .await
+            .unwrap()
+            .is_some());
+        let stored = get_user_by_id(&pool, id).await.unwrap().unwrap();
+        assert_ne!(stored.password_hash, weak);
+        assert!(!needs_rehash(&stored.password_hash));
+        // And the upgraded hash still verifies.
+        assert!(verify_password(&pool, "rehash_user", "TestPass123!")
+            .await
+            .unwrap()
+            .is_some());
+    }
+
     // === update_last_login Tests ===
 
     #[tokio::test]
@@ -615,6 +841,34 @@ mod tests {
 
         let user = get_user_by_id(&pool, id).await.unwrap().unwrap();
         assert!(user.last_login_at.is_some());
+    }
+
+    /// #34: a recent last_login_at is not rewritten; a stale one is.
+    #[tokio::test]
+    async fn test_update_last_login_is_throttled() {
+        let pool = setup_test_db().await;
+        let id = create_user(&pool, &test_create_user_request("throttle"), None)
+            .await
+            .unwrap();
+        let recent = chrono::Utc::now().timestamp() - 5;
+        sqlx::query("UPDATE users SET last_login_at = ? WHERE id = ?")
+            .bind(recent)
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        update_last_login(&pool, id).await.unwrap();
+        let user = get_user_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!(user.last_login_at, Some(recent));
+
+        sqlx::query("UPDATE users SET last_login_at = 1 WHERE id = ?")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        update_last_login(&pool, id).await.unwrap();
+        let user = get_user_by_id(&pool, id).await.unwrap().unwrap();
+        assert!(user.last_login_at.unwrap() > 1);
     }
 
     // === update_user Tests ===
@@ -652,6 +906,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(updated.role, "admin");
+    }
+
+    /// #35: the API's bandwidth_limit_mb writes and reads the single byte quota.
+    #[tokio::test]
+    async fn test_update_user_bandwidth_limit_writes_byte_quota() {
+        let pool = setup_test_db().await;
+        let req = test_create_user_request("update_bw");
+        let id = create_user(&pool, &req, None).await.unwrap();
+
+        let updated = update_user(&pool, id, None, None, None, Some(250), None)
+            .await
+            .unwrap();
+        assert_eq!(updated.bandwidth_limit_mb, 250);
+        let stats = crate::db::quota::get_quota_stats(&pool, id).await.unwrap();
+        assert_eq!(stats.quota_bytes, Some(250 * MIB));
+
+        // Leaving it unset keeps the quota.
+        update_user(&pool, id, None, None, Some(3), None, None)
+            .await
+            .unwrap();
+        let stats = crate::db::quota::get_quota_stats(&pool, id).await.unwrap();
+        assert_eq!(stats.quota_bytes, Some(250 * MIB));
+
+        // 0 means unlimited.
+        let updated = update_user(&pool, id, None, None, None, Some(0), None)
+            .await
+            .unwrap();
+        assert_eq!(updated.bandwidth_limit_mb, 0);
+        let stats = crate::db::quota::get_quota_stats(&pool, id).await.unwrap();
+        assert_eq!(stats.quota_bytes, None);
     }
 
     #[tokio::test]

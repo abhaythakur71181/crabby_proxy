@@ -88,7 +88,7 @@ behind each decision.
 
 - JWT revocation covers disable/delete (per-request `is_active` recheck) but
   not yet logout/password-rotation (`token_version` is a tracked follow-up).
-- Connection pool (`src/connection_pool.rs`) is currently inert (never returns
-  sockets) — pending a keep-alive-or-remove decision.
+- Upstream connection pooling was removed (it was inert and unsound for raw
+  tunnels); `advanced.connection_pooling` is accepted but ignored.
 - HTTP/2 non-CONNECT forward path doesn't persist `usage` rows yet.
 - See `task.md` (Audit Round 3) for the full remaining list.

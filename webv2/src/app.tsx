@@ -5,6 +5,7 @@ import { getSession, isAdminRole } from "@/lib/auth";
 import { useSession } from "@/hooks/queries";
 import { AppShell } from "@/components/layout/app-shell";
 import { LoginPage } from "@/pages/login";
+import { NotFoundPage } from "@/pages/not-found";
 
 // Route-level code splitting — the old app shipped one ~670 KB chunk.
 const DashboardPage = lazy(() => import("@/pages/dashboard").then((m) => ({ default: m.DashboardPage })));
@@ -77,7 +78,7 @@ export function App() {
         <Route path="/system-health" element={<RequireAdmin><HealthPage /></RequireAdmin>} />
         <Route path="/config" element={<RequireAdmin><ConfigPage /></RequireAdmin>} />
         <Route path="/account" element={<AccountPage />} />
-        <Route path="*" element={<HomeRedirect />} />
+        <Route path="*" element={<NotFoundPage />} />
       </Route>
     </Routes>
   );

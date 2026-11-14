@@ -14,7 +14,20 @@
 //! - A `limit` of `NO_LIMIT` (`i64::MAX`) disables enforcement for that user.
 //! - Admin updates to a user's quota fire through the existing event bus and
 //!   call `invalidate`/`update_limit` to reseed on the next access.
+//! - Entries are bounded: `evict_idle` (run periodically) drops trackers that no
+//!   live connection holds and that have not been looked up recently. The
+//!   evicted counter is kept as a compact per-window "floor" so a later reseed
+//!   from the (possibly lagging) `usage` table can never under-count (#30).
+//! - Concurrent first-use seeds race only on the database read; the map insert
+//!   is first-writer-wins, so every connection for a user shares one counter.
+//!
+//! Known limits (#30): enforcement is per process. Admission (`is_over`) and
+//! accounting (`add_and_over`) are separate steps, so N connections admitted
+//! together can overshoot by at most about one relay buffer each before the
+//! relay loop tears them down. A hard global quota across replicas needs a
+//! shared counter (e.g. Redis INCRBY + limit check) and is not implemented.
 
+use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use sqlx::SqlitePool;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -22,6 +35,15 @@ use std::sync::Arc;
 
 /// Sentinel value meaning "no quota configured" (effectively unlimited).
 pub const NO_LIMIT: i64 = i64::MAX;
+
+/// A tracker no connection holds is evicted after this long without a lookup.
+pub const IDLE_EVICT_SECS: i64 = 600;
+/// How often the background sweep calls [`QuotaTrackerRegistry::evict_idle`].
+pub const EVICT_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn now_secs() -> i64 {
+    chrono::Utc::now().timestamp()
+}
 
 /// Per-user live bandwidth counter for the current quota window.
 ///
@@ -33,6 +55,9 @@ pub struct UserQuotaTracker {
     used: AtomicI64,
     limit: AtomicI64,
     window_start: AtomicI64,
+    /// Unix seconds of the last registry lookup (not touched on the relay hot
+    /// path; a held `Arc` already pins the entry against eviction).
+    last_access: AtomicI64,
     throttler: std::sync::OnceLock<Option<crate::bandwidth::BandwidthThrottler>>,
 }
 
@@ -42,6 +67,7 @@ impl UserQuotaTracker {
             used: AtomicI64::new(used),
             limit: AtomicI64::new(limit.unwrap_or(NO_LIMIT)),
             window_start: AtomicI64::new(window_start),
+            last_access: AtomicI64::new(now_secs()),
             throttler: std::sync::OnceLock::new(),
         }
     }
@@ -101,6 +127,14 @@ impl UserQuotaTracker {
         self.window_start.load(Ordering::Relaxed)
     }
 
+    fn touch(&self) {
+        self.last_access.store(now_secs(), Ordering::Relaxed);
+    }
+
+    fn last_access(&self) -> i64 {
+        self.last_access.load(Ordering::Relaxed)
+    }
+
     fn set_limit(&self, limit: Option<i64>) {
         self.limit
             .store(limit.unwrap_or(NO_LIMIT), Ordering::Relaxed);
@@ -110,13 +144,72 @@ impl UserQuotaTracker {
 /// Process-wide registry of per-user quota trackers.
 pub struct QuotaTrackerRegistry {
     entries: DashMap<i64, Arc<UserQuotaTracker>>,
+    /// `user_id -> (window_start, used)` remembered from evicted trackers, so a
+    /// reseed in the same window starts from at least what was counted live.
+    floors: DashMap<i64, (i64, i64)>,
 }
 
 impl QuotaTrackerRegistry {
     pub fn new() -> Self {
         Self {
             entries: DashMap::new(),
+            floors: DashMap::new(),
         }
+    }
+
+    /// Number of live tracker entries (for tests / metrics).
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Insert a freshly seeded tracker unless another task won the race, in
+    /// which case the existing current-window tracker is returned instead. A
+    /// stale-window entry is replaced.
+    fn install(&self, user_id: i64, fresh: Arc<UserQuotaTracker>) -> Arc<UserQuotaTracker> {
+        let window = fresh.window_start();
+        let tracker = match self.entries.entry(user_id) {
+            Entry::Occupied(mut o) => {
+                if o.get().window_start() == window {
+                    o.get().clone()
+                } else {
+                    o.insert(fresh.clone());
+                    fresh
+                }
+            }
+            Entry::Vacant(v) => {
+                v.insert(fresh.clone());
+                fresh
+            }
+        };
+        self.floors.remove(&user_id);
+        tracker.touch();
+        tracker
+    }
+
+    /// Drop trackers that no connection currently holds and that have not been
+    /// looked up for `idle_secs`. Their counters are kept as per-window floors
+    /// (cheap `(i64, i64)` pairs, cleared when the window rolls over) so the
+    /// next reseed cannot fall below what was already counted. Returns the
+    /// number of trackers evicted.
+    pub fn evict_idle(&self, idle_secs: i64) -> usize {
+        let now = now_secs();
+        let window = crate::db::quota::QuotaPeriod::Monthly.window_start();
+        let mut evicted = 0usize;
+        self.entries.retain(|uid, t| {
+            // strong_count == 1 means only the map holds it: no live relay or
+            // in-progress admission check. Checked under the shard write lock,
+            // so no lookup can clone it concurrently.
+            let keep = Arc::strong_count(t) > 1 || now - t.last_access() < idle_secs;
+            if !keep {
+                evicted += 1;
+                if t.window_start() == window && t.used() > 0 {
+                    self.floors.insert(*uid, (window, t.used()));
+                }
+            }
+            keep
+        });
+        self.floors.retain(|_, (w, _)| *w == window);
+        evicted
     }
 
     /// Get the tracker for `user_id`, seeding it from the database if
@@ -131,21 +224,25 @@ impl QuotaTrackerRegistry {
 
         if let Some(entry) = self.entries.get(&user_id) {
             if entry.window_start() == current_window {
+                entry.touch();
                 return Ok(entry.clone());
             }
-            // Window rolled over — drop the stale entry and reseed below.
-            drop(entry);
-            self.entries.remove(&user_id);
+            // Window rolled over — reseed below; `install` replaces it.
         }
 
         let stats = crate::db::quota::get_quota_stats(pool, user_id).await?;
-        let tracker = Arc::new(UserQuotaTracker::new(
-            stats.used_bytes,
+        let floor = self
+            .floors
+            .get(&user_id)
+            .filter(|f| f.0 == current_window)
+            .map(|f| f.1)
+            .unwrap_or(0);
+        let fresh = Arc::new(UserQuotaTracker::new(
+            stats.used_bytes.max(floor),
             stats.quota_bytes,
             current_window,
         ));
-        self.entries.insert(user_id, tracker.clone());
-        Ok(tracker)
+        Ok(self.install(user_id, fresh))
     }
 
     /// Drop the cached tracker for a user. The next access will reseed
@@ -153,6 +250,7 @@ impl QuotaTrackerRegistry {
     /// `monthly_bandwidth_quota` or zero out their usage.
     pub fn invalidate(&self, user_id: i64) {
         self.entries.remove(&user_id);
+        self.floors.remove(&user_id);
     }
 
     /// Update only the limit on an existing tracker, without touching
@@ -189,6 +287,77 @@ mod tests {
         assert!(!t.is_over());
         assert!(t.add_and_over(600_000));
         assert!(t.is_over());
+    }
+
+    fn current_window() -> i64 {
+        crate::db::quota::QuotaPeriod::Monthly.window_start()
+    }
+
+    #[test]
+    fn install_is_first_writer_wins() {
+        let reg = QuotaTrackerRegistry::new();
+        let w = current_window();
+        let a = reg.install(1, Arc::new(UserQuotaTracker::new(0, Some(100), w)));
+        let b = reg.install(1, Arc::new(UserQuotaTracker::new(0, Some(100), w)));
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "concurrent seeds must share one counter"
+        );
+        // A stale-window entry is replaced.
+        let reg2 = QuotaTrackerRegistry::new();
+        let old = reg2.install(1, Arc::new(UserQuotaTracker::new(5, None, w - 1)));
+        let new = reg2.install(1, Arc::new(UserQuotaTracker::new(0, None, w)));
+        assert!(!Arc::ptr_eq(&old, &new));
+    }
+
+    #[test]
+    fn evict_idle_skips_held_and_recent_entries_and_keeps_floor() {
+        let reg = QuotaTrackerRegistry::new();
+        let w = current_window();
+        let held = reg.install(1, Arc::new(UserQuotaTracker::new(0, None, w)));
+        let idle = reg.install(2, Arc::new(UserQuotaTracker::new(0, None, w)));
+        idle.add_and_over(4242);
+        drop(idle);
+        reg.install(3, Arc::new(UserQuotaTracker::new(0, None, w)));
+
+        // Nothing is idle long enough yet.
+        assert_eq!(reg.evict_idle(IDLE_EVICT_SECS), 0);
+        assert_eq!(reg.len(), 3);
+
+        // With a zero idle threshold, only the held entry survives.
+        assert_eq!(reg.evict_idle(0), 2);
+        assert_eq!(reg.len(), 1);
+        assert!(reg.entries.contains_key(&1));
+        drop(held);
+
+        // The evicted counter is remembered as a floor for this window.
+        assert_eq!(reg.floors.get(&2).map(|f| *f), Some((w, 4242)));
+        assert!(!reg.floors.contains_key(&3), "zero usage needs no floor");
+    }
+
+    /// Reseeding after eviction never drops below the live count, even when
+    /// the usage table lags (rows still queued or dropped by the writer).
+    #[tokio::test]
+    async fn reseed_after_eviction_uses_floor() {
+        let pool = crate::db::create_pool("sqlite::memory:", 1).await.unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, role, created_at, updated_at, monthly_bandwidth_quota) VALUES (1,'u','h','user',0,0,10000)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let reg = QuotaTrackerRegistry::new();
+        let t = reg.get_or_seed(&pool, 1).await.unwrap();
+        assert_eq!(t.used(), 0);
+        t.add_and_over(700); // live bytes not (yet) in the usage table
+        drop(t);
+        assert_eq!(reg.evict_idle(0), 1);
+
+        let t = reg.get_or_seed(&pool, 1).await.unwrap();
+        assert_eq!(t.used(), 700);
+        assert_eq!(t.limit(), 10000);
+        assert!(reg.floors.is_empty(), "floor is consumed on reseed");
     }
 
     #[test]

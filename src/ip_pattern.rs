@@ -84,13 +84,18 @@ impl IpPattern {
         }
     }
 
-    /// True if `ip` falls in this pattern. An IPv4 pattern never matches an
+    /// True if `ip` falls in this pattern. Both the address and an exact
+    /// pattern are canonicalised first, so an IPv4-mapped IPv6 client
+    /// (`::ffff:a.b.c.d`, as seen on a dual-stack listener) matches an IPv4
+    /// pattern (#52). Apart from that, an IPv4 pattern never matches a native
     /// IPv6 address and vice versa.
     pub fn matches(&self, ip: IpAddr) -> bool {
+        use crate::ip_filter::{canonical_ip, net_contains};
+        let ip = canonical_ip(ip);
         match self {
             IpPattern::Any => true,
-            IpPattern::Exact(a) => *a == ip,
-            IpPattern::Cidr(net) => net.contains(&ip),
+            IpPattern::Exact(a) => canonical_ip(*a) == ip,
+            IpPattern::Cidr(net) => net_contains(net, ip),
             IpPattern::V4Octets(pat) => match ip {
                 IpAddr::V4(v4) => {
                     let actual = v4.octets();
@@ -213,6 +218,22 @@ mod tests {
         assert!(p.matches(ip("140.11.99.99")));
         assert!(!p.matches(ip("140.12.0.1")));
         assert!(!p.matches(ip("2401:4900::1"))); // v4 net, v6 ip
+    }
+
+    #[test]
+    fn mapped_v6_client_matches_v4_patterns() {
+        let mapped = ip("::ffff:140.11.11.5");
+        assert!(IpPattern::parse("140.11.11.*").unwrap().matches(mapped));
+        assert!(IpPattern::parse("140.11.0.0/16").unwrap().matches(mapped));
+        assert!(IpPattern::parse("140.11.11.5").unwrap().matches(mapped));
+        assert!(!IpPattern::parse("140.11.12.*").unwrap().matches(mapped));
+        // A grant written in mapped form matches the plain v4 client too.
+        assert!(IpPattern::parse("::ffff:140.11.11.5")
+            .unwrap()
+            .matches(ip("140.11.11.5")));
+        assert!(IpPattern::parse("::ffff:140.11.0.0/112")
+            .unwrap()
+            .matches(ip("140.11.3.4")));
     }
 
     #[test]

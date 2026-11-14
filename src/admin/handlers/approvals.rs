@@ -1,9 +1,9 @@
-use super::models::ApiError;
+use super::models::{ApiError, PageQuery};
 use crate::admin::auth::{AdminUser, CurrentUser};
 use crate::app_state::AppState;
 use crate::db::approvals;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
@@ -117,8 +117,9 @@ pub async fn create_approval(
 pub async fn list_approvals(
     _admin: AdminUser,
     State(state): State<Arc<AppState>>,
+    Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<ApprovalResponse>>, ApiError> {
-    let records = approvals::list_all_approvals(&state.db_pool)
+    let records = approvals::list_all_approvals(&state.db_pool, page.page())
         .await
         .map_err(|e| {
             tracing::error!("Failed to list approvals: {}", e);
@@ -148,12 +149,13 @@ pub async fn list_user_approvals(
     current_user: CurrentUser,
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
+    Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<ApprovalResponse>>, ApiError> {
     if !current_user.can_access_user(user_id) {
         return Err(ApiError::forbidden("Cannot access other users' approvals"));
     }
 
-    let records = approvals::list_user_approvals(&state.db_pool, user_id)
+    let records = approvals::list_user_approvals(&state.db_pool, user_id, page.page())
         .await
         .map_err(|e| {
             tracing::error!("Failed to list user approvals: {}", e);

@@ -26,6 +26,8 @@ pub struct DecisionPayload {
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
     pub status: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -43,12 +45,13 @@ pub struct RequestResponse {
     pub decision_reason: Option<String>,
 }
 
-impl RequestResponse {
-    fn from_record(r: approval_requests::ApprovalRequest, username: Option<String>) -> Self {
+impl From<approval_requests::ApprovalRequestWithUser> for RequestResponse {
+    fn from(row: approval_requests::ApprovalRequestWithUser) -> Self {
+        let r = row.request;
         Self {
             id: r.id,
             user_id: r.user_id,
-            username,
+            username: row.username,
             client_ip: r.client_ip,
             duration_hours: r.duration_hours,
             reason: r.reason,
@@ -59,22 +62,6 @@ impl RequestResponse {
             decision_reason: r.decision_reason,
         }
     }
-}
-
-async fn enrich_with_username(
-    state: &AppState,
-    records: Vec<approval_requests::ApprovalRequest>,
-) -> Vec<RequestResponse> {
-    let mut result = Vec::with_capacity(records.len());
-    for r in records {
-        let username = crate::db::users::get_user_by_id(&state.db_pool, r.user_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|u| u.username);
-        result.push(RequestResponse::from_record(r, username));
-    }
-    result
 }
 
 /// POST /api/approval-requests — Any authenticated user can request approval (for themselves)
@@ -152,17 +139,21 @@ pub async fn list_requests(
 ) -> Result<Json<Vec<RequestResponse>>, ApiError> {
     let current_user_id = current_user.id;
 
+    let page = crate::db::Page::new(params.limit, params.offset);
     let records = if current_user.role == "root_admin" || current_user.role == "admin" {
-        approval_requests::list_all_requests(&state.db_pool, params.status.as_deref()).await
+        approval_requests::list_all_requests(&state.db_pool, params.status.as_deref(), page).await
     } else {
-        approval_requests::list_user_requests(&state.db_pool, current_user_id).await
+        approval_requests::list_user_requests(&state.db_pool, current_user_id, page).await
     }
     .map_err(|e| {
         tracing::error!("Failed to list approval requests: {}", e);
         ApiError::internal("Failed to list approval requests")
     })?;
 
-    Ok(Json(enrich_with_username(&state, records).await))
+    // Usernames come from the JOIN in the listing query (no per-row lookup).
+    Ok(Json(
+        records.into_iter().map(RequestResponse::from).collect(),
+    ))
 }
 
 /// POST /api/approval-requests/:id/approve — Admin only

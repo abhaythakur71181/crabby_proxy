@@ -1,3 +1,4 @@
+pub mod h2_io;
 pub mod http2_handler;
 pub mod listener;
 pub mod pipeline;

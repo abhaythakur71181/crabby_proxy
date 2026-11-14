@@ -91,12 +91,10 @@ pub async fn create_user(
     authorize_create_user(&current_user.role_enum(), &request.role).map_err(ApiError::forbidden)?;
     crate::validation::validate_username(&request.username).map_err(ApiError::bad_request)?;
     crate::validation::validate_password(&request.password).map_err(ApiError::bad_request)?;
-    if let Ok(Some(_)) = users::get_user_by_username(&state.db_pool, &request.username).await {
-        return Err(ApiError::conflict(format!(
-            "Username '{}' already exists",
-            request.username
-        )));
-    }
+    // No pre-check: the UNIQUE(username) constraint is the single source of
+    // truth, so concurrent creates cannot both pass a check-then-insert race.
+    // A violation is mapped to 409 below.
+    let username = request.username.clone();
     let db_request = crate::db::models::CreateUserRequest {
         username: request.username,
         password: request.password,
@@ -108,7 +106,15 @@ pub async fn create_user(
         allowed_protocols: None,
         notes: None,
     };
-    let user_id = users::create_user(&state.db_pool, &db_request, Some(current_user_id)).await?;
+    let user_id = users::create_user(&state.db_pool, &db_request, Some(current_user_id))
+        .await
+        .map_err(|e| {
+            if super::models::is_unique_violation(&e) {
+                ApiError::conflict(format!("Username '{}' already exists", username))
+            } else {
+                ApiError::from(e)
+            }
+        })?;
     let user = users::get_user_by_id(&state.db_pool, user_id)
         .await?
         .ok_or_else(|| ApiError::internal("Failed to retrieve created user"))?;
@@ -235,6 +241,7 @@ pub async fn update_user(
     state
         .invalidate_all_for_user(user_id, Some(&updated_user.username))
         .await;
+    state.broadcast_user_invalidated(user_id).await;
 
     // A password change or deactivation ends the account's other sessions.
     if request.password.is_some() || request.is_active == Some(false) {
@@ -267,6 +274,7 @@ pub async fn delete_user(
     state
         .invalidate_all_for_user(user_id, Some(&username))
         .await;
+    state.broadcast_user_invalidated(user_id).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -350,10 +358,11 @@ pub async fn list_api_keys(
     current_user: CurrentUser,
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
+    Query(page): Query<super::models::PageQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     current_user.authorize_target(&state, user_id).await?;
 
-    let keys = api_keys_crud::list_api_keys(&state.db_pool, user_id).await?;
+    let keys = api_keys_crud::list_api_keys(&state.db_pool, user_id, page.page()).await?;
 
     let response: Vec<ApiKeyResponse> = keys.into_iter().map(ApiKeyResponse::from).collect();
 
@@ -426,6 +435,7 @@ pub async fn change_own_password(
         .invalidate_all_for_user(current_user_id, Some(&updated.username))
         .await;
     revoke_sessions(&state, current_user_id, current_user_id, session.as_deref()).await?;
+    state.broadcast_user_invalidated(current_user_id).await;
 
     let _ = crate::db::audit_log::log_action(
         &state.db_pool,
@@ -476,6 +486,7 @@ pub async fn admin_reset_password(
         .invalidate_all_for_user(user_id, Some(&updated.username))
         .await;
     revoke_sessions(&state, user_id, current_user_id, session.as_deref()).await?;
+    state.broadcast_user_invalidated(user_id).await;
 
     let _ = crate::db::audit_log::log_action(
         &state.db_pool,

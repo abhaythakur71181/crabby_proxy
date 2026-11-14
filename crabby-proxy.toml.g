@@ -17,9 +17,15 @@ usage_retention_days = 90
 enabled = true
 method = "basic"
 username = "admin"
-password = "changeme"
-jwt_secret= "change_me_to_a_secure_random_string"
-jwt_expiration= 86400
+# Static proxy credential (resolves to the root_admin account). Leave empty to
+# disable it and use per-user accounts only. Otherwise set
+# CRABBY_BASIC_AUTH_PASSWORD, or put a strong value (12+ chars) or an Argon2
+# hash ("$argon2id$...") here. Weak values are refused at startup.
+password = ""
+# Leave empty to auto-generate per start (sessions then end on restart), or
+# set CRABBY_JWT_SECRET to a random value of at least 32 bytes.
+jwt_secret = ""
+jwt_expiration = 86400
 
 [protocols]
 enable_http = true
@@ -71,7 +77,10 @@ update_interval = 10
 enabled = true
 auth_enabled = true
 admin_username = "admin"
-admin_password = "secure_admin_password"
+# Static admin-API credential (resolves to root_admin). Leave empty to disable
+# it and log in with the "root" account created on first boot. Otherwise set
+# CRABBY_ADMIN_PASSWORD, or a strong value / Argon2 hash here.
+admin_password = ""
 websocket_enabled = true
 cors_enabled = true
 cors_origins = ["http://localhost:3000"]

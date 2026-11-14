@@ -1,15 +1,17 @@
 mod admin;
 mod app_state;
 mod auth;
+mod auth_cache;
 mod bandwidth;
 mod cache;
 mod config;
 mod config_env;
+mod conn_limiter;
 #[allow(dead_code)]
 mod connection;
-mod connection_pool;
 #[allow(dead_code)]
 mod constants;
+mod credentials;
 mod db;
 mod dns_cache;
 #[allow(dead_code)]
@@ -126,7 +128,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize database
     tracing::info!("Initializing database...");
-    let db_pool = db::create_pool(&config.database.path, config.database.max_connections).await?;
+    let db_pool = db::connection::create_pool_with(
+        &config.database.path,
+        db::connection::PoolSettings::from(&config.database),
+    )
+    .await?;
 
     // Run migrations
     tracing::info!("Running database migrations...");
@@ -182,13 +188,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Background: Connection pool cleanup (every 30s, if pooling enabled)
-    if let Some(ref pool) = state.connection_pool {
-        let pool_ref = pool.clone();
+    if state.config.load().advanced.connection_pooling {
+        tracing::warn!(
+            "advanced.connection_pooling is set but ignored: upstream pooling was \
+             removed (raw CONNECT/SOCKS tunnels cannot safely reuse sockets)"
+        );
+    }
+
+    // Background: evict idle per-user quota trackers so the registry does not
+    // grow with every user ever seen (#30).
+    {
+        let trackers = state.quota_trackers.clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(constants::POOL_CLEANUP_INTERVAL).await;
-                pool_ref.cleanup_expired();
+                tokio::time::sleep(crate::quota_tracker::EVICT_SWEEP_INTERVAL).await;
+                let n = trackers.evict_idle(crate::quota_tracker::IDLE_EVICT_SECS);
+                if n > 0 {
+                    tracing::debug!("quota tracker sweep: evicted {} idle entries", n);
+                }
             }
         });
     }

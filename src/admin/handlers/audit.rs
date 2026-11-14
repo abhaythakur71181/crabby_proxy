@@ -66,9 +66,10 @@ pub async fn list_user_sessions(
     current_user: CurrentUser,
     State(state): State<Arc<AppState>>,
     axum::extract::Path(user_id): axum::extract::Path<i64>,
+    Query(page): Query<super::models::PageQuery>,
 ) -> Result<Json<Vec<SessionInfo>>, ApiError> {
     current_user.authorize_target(&state, user_id).await?;
-    let sessions = crate::db::sessions::list_user_sessions(&state.db_pool, user_id)
+    let sessions = crate::db::sessions::list_user_sessions(&state.db_pool, user_id, page.page())
         .await
         .map_err(|e| {
             tracing::error!("Failed to list sessions: {}", e);

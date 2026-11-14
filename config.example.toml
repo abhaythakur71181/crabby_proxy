@@ -20,6 +20,11 @@ max_connections = 10
 # Delete usage rows older than this many days (per-user destination history is
 # sensitive PII and grows without bound). 0 disables purging.
 usage_retention_days = 90
+# SQLite allows one writer at a time (WAL). Writers wait up to busy_timeout_ms
+# for the write lock; requests wait up to acquire_timeout_secs for a pooled
+# connection. Keep acquire_timeout_secs * 1000 above busy_timeout_ms.
+busy_timeout_ms = 5000
+acquire_timeout_secs = 10
 
 [authentication]
 enabled = true
@@ -42,8 +47,30 @@ approval_timeout = 300
 reverse_tunnels = false
 tunnel_port_start = 10000
 tunnel_port_end = 10999
+# Interface tunnel listeners bind to (tunnels relay raw TCP without auth).
+tunnel_bind_addr = "127.0.0.1"
+# Internal targets (CIDRs/IPs) tunnels may reach; loopback/private/link-local
+# targets are refused unless listed. Non-empty = strict allow-list.
+tunnel_allowed_targets = []
+# Max concurrent connections per tunnel (0 = unlimited).
+tunnel_max_connections = 100
+# Optional event webhook. Must be https; internal / non-routable targets are
+# refused (startup error) unless webhook_allow_private_targets = true. Client
+# IPs and destinations are stripped from payloads unless webhook_include_pii.
+# webhook_url = "https://hooks.example.com/crabby"
+webhook_events = []
+# webhook_allow_private_targets = false
+# webhook_include_pii = false
 
 [state]
+# Where live connection state, pending approvals and counters are kept.
+#   "memory" (default): in-process. Correct for the supported topology, ONE
+#     proxy instance per SQLite database; nothing extra to run.
+#   "redis": shares that state through redis_url. This alone does NOT make the
+#     proxy horizontally scalable: rate limiting stays in-process, SQLite is a
+#     single-writer local file, and an unreachable Redis at boot silently falls
+#     back to "memory". Do not run more than one replica. See docs/RUNBOOK.md,
+#     "Scaling (single-instance constraint)".
 backend = "memory"
 redis_url = "redis://localhost:6379"
 redis_pool_size = 10
@@ -59,18 +86,38 @@ ban_duration = 300
 [filtering]
 ip_allowlist = []
 ip_blocklist = []
+# Geo blocking needs a MaxMind GeoLite2-Country database. When
+# geo_blocking_enabled = true the database is mandatory: the proxy refuses to
+# start (and a config reload is rejected) if geoip_database_path is unset or the
+# file cannot be loaded, instead of silently allowing every country.
 geo_blocking_enabled = false
 blocked_countries = []
+# allowed_countries = []          # if non-empty, ONLY these countries may connect
+# geoip_database_path = "/app/data/GeoLite2-Country.mmdb"
 # SSRF egress guard is ON by default in code (block_private_targets); leave it on
 # unless this instance intentionally proxies to internal/same-machine targets.
+# Post-auth rules admin/root_admin connections may bypass. Each bypass that skips
+# an actual denial is audit-logged and counted in proxy_admin_bypass_total{rule}.
+# Remove entries to hold admins to a rule. Default (when omitted) = all of these:
+# admin_bypass_rules = ["socks4_disabled", "allowed_protocols", "approval",
+#   "user_rate_limit", "target_filter", "access_schedule", "quota", "connection_limit"]
 
 [logging]
 level = "info"
 format = "pretty"
 file_enabled = false
 file_path = "proxy.log"
+# Per-connection access log (target "access_log"): client IP, destination
+# host:port, user id, bytes, duration. This is effectively per-user browsing
+# history -- set access_log_enabled = false, or reduce the client IP with
+# access_log_client_ip = "truncated" (IPv4 /24, IPv6 /48) or "omit", where
+# privacy rules require it. Events go to the process log output; route or drop
+# them with RUST_LOG (e.g. "info,access_log=off") or your log collector, and
+# apply a retention period there. Security decisions are logged separately on
+# the "audit" target. access_log_path is reserved (not yet used).
 access_log_enabled = true
 access_log_path = "access.log"
+# access_log_client_ip = "full"
 
 [metrics]
 enabled = true
@@ -95,6 +142,7 @@ session_cookie_secure = true
 
 [advanced]
 buffer_size = 8192
+# connection_pooling / pool_max_idle_per_host are deprecated and ignored.
 connection_pooling = false
 pool_max_idle_per_host = 10
 http2_enabled = false
