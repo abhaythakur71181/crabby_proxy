@@ -1,6 +1,7 @@
 mod admin;
 mod app_state;
 mod auth;
+mod auth_cache;
 mod bandwidth;
 mod cache;
 mod config;
@@ -10,6 +11,7 @@ mod conn_limiter;
 mod connection;
 #[allow(dead_code)]
 mod constants;
+mod credentials;
 mod db;
 mod dns_cache;
 #[allow(dead_code)]

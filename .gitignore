@@ -32,3 +32,6 @@ Thumbs.db
 # Temporary files
 /tmp/
 *.tmp
+
+# First-boot generated root password (see db::users::ensure_root_admin)
+initial_root_password.txt
