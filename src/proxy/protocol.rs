@@ -324,6 +324,13 @@ impl ProxyProtocol {
             // is intentionally excluded from CachedUser for security).
             if let Ok(Some(user)) = users::verify_password(&state.db_pool, username, password).await
             {
+                // A correct password for a disabled account is still a
+                // failure (the API-key path already rejects these, because
+                // cached_user_by_username filters inactive users).
+                if !user.is_active {
+                    tracing::warn!("Proxy auth rejected for disabled user {}", user.id);
+                    return None;
+                }
                 state.populate_user_cache(&user).await;
                 state.auth_cache.insert(cache_key, user.id);
                 return Some(user.id);
