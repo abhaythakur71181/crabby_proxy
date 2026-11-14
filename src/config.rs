@@ -11,6 +11,14 @@ fn default_usage_retention_days() -> u32 {
     90
 }
 
+fn default_db_busy_timeout_ms() -> u64 {
+    5000
+}
+
+fn default_db_acquire_timeout_secs() -> u64 {
+    10
+}
+
 fn default_idle_timeout_secs() -> u64 {
     900
 }
@@ -75,6 +83,15 @@ pub struct DatabaseConfig {
     /// history is sensitive PII and grows without bound). 0 disables purging.
     #[serde(default = "default_usage_retention_days")]
     pub usage_retention_days: u32,
+    /// How long a connection waits for SQLite's single WAL write lock before
+    /// failing with SQLITE_BUSY. Writers queue on this rather than erroring.
+    #[serde(default = "default_db_busy_timeout_ms")]
+    pub busy_timeout_ms: u64,
+    /// How long a request waits for a free pooled connection. Kept above the
+    /// busy timeout so a burst of writers degrades into queueing instead of
+    /// failing pool acquisition while the lock holder is still within its wait.
+    #[serde(default = "default_db_acquire_timeout_secs")]
+    pub acquire_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -254,6 +271,8 @@ impl Default for Config {
                 path: "sqlite:proxy.db".to_string(),
                 max_connections: 10,
                 usage_retention_days: default_usage_retention_days(),
+                busy_timeout_ms: default_db_busy_timeout_ms(),
+                acquire_timeout_secs: default_db_acquire_timeout_secs(),
             },
             authentication: AuthConfig {
                 enabled: true,

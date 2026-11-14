@@ -141,13 +141,22 @@ pub async fn verify_password(
     }
 }
 
+/// Minimum spacing between `last_login_at` writes for the same user.
+const LAST_LOGIN_WRITE_INTERVAL_SECS: i64 = 60;
+
 /// Update last login time
 pub async fn update_last_login(pool: &SqlitePool, user_id: i64) -> Result<(), sqlx::Error> {
     let now = chrono::Utc::now().timestamp();
 
-    sqlx::query("UPDATE users SET last_login_at = ? WHERE id = ?")
-        .bind(now)
-        .bind(user_id)
+    // Throttled: skip the write (and the WAL write lock) when the timestamp was
+    // refreshed within the last minute; minute precision is plenty for a
+    // "last login" display and repeated logins no longer queue writers.
+    sqlx::query(
+        "UPDATE users SET last_login_at = ? WHERE id = ? AND (last_login_at IS NULL OR last_login_at < ?)",
+    )
+    .bind(now)
+    .bind(user_id)
+    .bind(now - LAST_LOGIN_WRITE_INTERVAL_SECS)
         .execute(pool)
         .await?;
 
@@ -587,6 +596,34 @@ mod tests {
 
         let user = get_user_by_id(&pool, id).await.unwrap().unwrap();
         assert!(user.last_login_at.is_some());
+    }
+
+    /// #34: a recent last_login_at is not rewritten; a stale one is.
+    #[tokio::test]
+    async fn test_update_last_login_is_throttled() {
+        let pool = setup_test_db().await;
+        let id = create_user(&pool, &test_create_user_request("throttle"), None)
+            .await
+            .unwrap();
+        let recent = chrono::Utc::now().timestamp() - 5;
+        sqlx::query("UPDATE users SET last_login_at = ? WHERE id = ?")
+            .bind(recent)
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        update_last_login(&pool, id).await.unwrap();
+        let user = get_user_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!(user.last_login_at, Some(recent));
+
+        sqlx::query("UPDATE users SET last_login_at = 1 WHERE id = ?")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        update_last_login(&pool, id).await.unwrap();
+        let user = get_user_by_id(&pool, id).await.unwrap().unwrap();
+        assert!(user.last_login_at.unwrap() > 1);
     }
 
     // === update_user Tests ===

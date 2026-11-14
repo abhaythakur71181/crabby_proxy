@@ -4,9 +4,43 @@ use sqlx::sqlite::{
 use std::str::FromStr;
 use std::time::Duration;
 
+/// Pool sizing and lock-wait settings.
+#[derive(Debug, Clone, Copy)]
+pub struct PoolSettings {
+    pub max_connections: u32,
+    pub busy_timeout: Duration,
+    pub acquire_timeout: Duration,
+}
+
+impl From<&crate::config::DatabaseConfig> for PoolSettings {
+    fn from(c: &crate::config::DatabaseConfig) -> Self {
+        Self {
+            max_connections: c.max_connections.max(1),
+            busy_timeout: Duration::from_millis(c.busy_timeout_ms),
+            acquire_timeout: Duration::from_secs(c.acquire_timeout_secs.max(1)),
+        }
+    }
+}
+
+/// Create a pool with default lock-wait settings (5s busy, 10s acquire).
 pub async fn create_pool(
     database_url: &str,
     max_connections: u32,
+) -> Result<SqlitePool, sqlx::Error> {
+    create_pool_with(
+        database_url,
+        PoolSettings {
+            max_connections,
+            busy_timeout: Duration::from_secs(5),
+            acquire_timeout: Duration::from_secs(10),
+        },
+    )
+    .await
+}
+
+pub async fn create_pool_with(
+    database_url: &str,
+    settings: PoolSettings,
 ) -> Result<SqlitePool, sqlx::Error> {
     // Configure PRAGMAs on the *connect options* so EVERY pooled connection gets
     // them. `foreign_keys` and `busy_timeout` are per-connection state in SQLite
@@ -19,16 +53,19 @@ pub async fn create_pool(
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
         .foreign_keys(true)
-        .busy_timeout(Duration::from_secs(5));
+        .busy_timeout(settings.busy_timeout);
 
     let pool = SqlitePoolOptions::new()
-        .max_connections(max_connections)
-        .acquire_timeout(Duration::from_secs(5))
+        .max_connections(settings.max_connections)
+        .acquire_timeout(settings.acquire_timeout)
         .connect_with(connect_opts)
         .await?;
 
     tracing::info!(
-        "SQLite pool ready (per-connection): WAL, busy_timeout=5s, synchronous=NORMAL, foreign_keys=ON"
+        max_connections = settings.max_connections,
+        busy_timeout_ms = settings.busy_timeout.as_millis() as u64,
+        acquire_timeout_ms = settings.acquire_timeout.as_millis() as u64,
+        "SQLite pool ready (per-connection): WAL, synchronous=NORMAL, foreign_keys=ON"
     );
 
     Ok(pool)

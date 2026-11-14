@@ -126,7 +126,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize database
     tracing::info!("Initializing database...");
-    let db_pool = db::create_pool(&config.database.path, config.database.max_connections).await?;
+    let db_pool = db::connection::create_pool_with(
+        &config.database.path,
+        db::connection::PoolSettings::from(&config.database),
+    )
+    .await?;
 
     // Run migrations
     tracing::info!("Running database migrations...");
