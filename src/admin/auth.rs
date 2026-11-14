@@ -34,35 +34,14 @@ pub async fn auth_middleware(
     match auth_header {
         Some(auth) if auth.starts_with("Bearer ") => {
             let token = auth.trim_start_matches("Bearer ");
-            match jwt::validate_jwt(token, &jwt_secret) {
-                Ok(claims) => {
-                    let user_id = claims.user_id;
-                    // Re-validate the account on every request (cache-aside, cheap).
-                    // A valid signature is not enough: a disabled or deleted user
-                    // must lose access immediately rather than keep a 24h token
-                    // working until natural expiry.
-                    match state.cached_user_role(user_id).await {
-                        Some(u) if u.is_active => {}
-                        Some(_) => {
-                            tracing::warn!("Rejecting token for disabled user {}", user_id);
-                            return Err(StatusCode::UNAUTHORIZED);
-                        }
-                        None => {
-                            tracing::warn!("Rejecting token for unknown user {}", user_id);
-                            return Err(StatusCode::UNAUTHORIZED);
-                        }
-                    }
-                    request.extensions_mut().insert(user_id);
-                    if let Err(e) = check_user_rate_limit(&state, user_id).await {
-                        tracing::warn!("Rate limit exceeded for user {}: {}", user_id, e);
-                        return Err(StatusCode::TOO_MANY_REQUESTS);
-                    }
-                    return Ok(next.run(request).await);
-                }
-                Err(_) => {
-                    return Err(StatusCode::UNAUTHORIZED);
-                }
+            let (user_id, session) = authenticate_token(&state, token, &jwt_secret).await?;
+            request.extensions_mut().insert(user_id);
+            request.extensions_mut().insert(session);
+            if let Err(e) = check_user_rate_limit(&state, user_id).await {
+                tracing::warn!("Rate limit exceeded for user {}: {}", user_id, e);
+                return Err(StatusCode::TOO_MANY_REQUESTS);
             }
+            return Ok(next.run(request).await);
         }
         Some(auth) if auth.starts_with("Basic ") => {
             let encoded = auth.trim_start_matches("Basic ");
@@ -130,6 +109,62 @@ pub async fn auth_middleware(
     }
 
     Err(StatusCode::UNAUTHORIZED)
+}
+
+/// The server-side session behind an authenticated JWT request. Inserted into
+/// request extensions by `auth_middleware` (absent for Basic-auth requests and
+/// when admin auth is disabled).
+#[derive(Debug, Clone)]
+pub struct AuthSession {
+    /// JWT id; the key of the backing `sessions` row.
+    pub jti: String,
+    /// Unix seconds when the token expires.
+    pub expires_at: i64,
+}
+
+/// Validate an admin JWT and its backing session.
+///
+/// A valid signature is not enough:
+/// - the token's `jti` must still have a live row in `sessions`, so logout,
+///   "sign out everywhere" and credential resets revoke it immediately;
+/// - the account must still exist and be active (re-checked per request via
+///   the role cache) rather than keeping a token working until expiry.
+pub(crate) async fn authenticate_token(
+    state: &AppState,
+    token: &str,
+    jwt_secret: &str,
+) -> Result<(i64, AuthSession), StatusCode> {
+    let claims = jwt::validate_jwt(token, jwt_secret).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let user_id = claims.user_id;
+    match crate::db::sessions::get_session_by_token(&state.db_pool, &claims.jti).await {
+        Ok(Some(s)) if s.user_id == user_id => {}
+        Ok(_) => {
+            tracing::debug!("Rejecting revoked or unknown session for user {}", user_id);
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        Err(e) => {
+            tracing::error!("Session lookup failed: {}", e);
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    }
+    match state.cached_user_role(user_id).await {
+        Some(u) if u.is_active => {}
+        Some(_) => {
+            tracing::warn!("Rejecting token for disabled user {}", user_id);
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        None => {
+            tracing::warn!("Rejecting token for unknown user {}", user_id);
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
+    Ok((
+        user_id,
+        AuthSession {
+            jti: claims.jti,
+            expires_at: claims.exp as i64,
+        },
+    ))
 }
 
 /// Check if user has exceeded their rate limit (optimized with cache)

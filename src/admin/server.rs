@@ -19,6 +19,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/health/deep", get(handlers::health::deep_health_check))
         .route("/metrics", get(handlers::metrics::prometheus_metrics))
         .route("/api/login", post(handlers::auth::login))
+        .route("/api/logout", post(handlers::auth::logout))
         // Authorized by a one-time ticket (minted at /api/connections/live-ticket),
         // since a browser can't put a bearer on the WS handshake.
         .route(
@@ -29,6 +30,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // Protected routes (auth required)
     let protected_routes = Router::new()
         .route("/stats", get(handlers::health::stats))
+        .route("/api/session", get(handlers::auth::current_session))
         .route("/api/dashboard", get(handlers::health::dashboard))
         .route("/api/metrics", get(handlers::health::json_metrics))
         .route(

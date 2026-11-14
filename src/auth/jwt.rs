@@ -1,5 +1,5 @@
 use chrono::{Duration, Utc};
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 
 /// Minimum acceptable JWT signing secret length, in bytes.
@@ -11,6 +11,16 @@ use serde::{Deserialize, Serialize};
 /// fall through to a weak signing key.
 pub const MIN_JWT_SECRET_LEN: usize = 32;
 
+/// `iss` claim stamped on every admin token and required on validation.
+pub const JWT_ISSUER: &str = "crabby_proxy";
+/// `aud` claim: tokens are only valid for the admin API. Binding the audience
+/// means a token minted by some other HS256 service that happens to share the
+/// secret (or a future token type from this service) is not accepted here.
+pub const JWT_AUDIENCE: &str = "crabby_proxy-admin";
+/// The only accepted signing algorithm. Pinned explicitly instead of relying
+/// on `Header::default()` / `Validation::default()` happening to agree.
+const JWT_ALGORITHM: Algorithm = Algorithm::HS256;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Claims {
     pub sub: String,  // Subject (username)
@@ -18,6 +28,11 @@ pub struct Claims {
     pub role: String, // User Role
     pub exp: usize,   // Expiration time (timestamp)
     pub iat: usize,   // Issued at
+    /// Unique token id. Every admin token is backed by a row in `sessions`
+    /// keyed by (a hash of) this id, so a single token can be revoked.
+    pub jti: String,
+    pub iss: String,
+    pub aud: String,
 }
 
 #[derive(Debug, Clone)]
@@ -43,13 +58,15 @@ fn ensure_strong_secret(secret: &str) -> Result<(), AuthError> {
     Ok(())
 }
 
-pub fn create_jwt(
+/// Mint a token and return it together with its claims (the caller needs
+/// `jti` / `exp` to persist the backing session row).
+pub fn issue_jwt(
     user_id: i64,
     username: &str,
     role: &str,
     secret: &str,
     expiration_seconds: u64,
-) -> Result<String, AuthError> {
+) -> Result<(String, Claims), AuthError> {
     ensure_strong_secret(secret)?;
     let now = Utc::now();
     let expiration = now + Duration::seconds(expiration_seconds as i64);
@@ -59,25 +76,48 @@ pub fn create_jwt(
         role: role.to_owned(),
         exp: expiration.timestamp() as usize,
         iat: now.timestamp() as usize,
+        jti: uuid::Uuid::new_v4().simple().to_string(),
+        iss: JWT_ISSUER.to_owned(),
+        aud: JWT_AUDIENCE.to_owned(),
     };
-    let header = Header::default();
-    encode(
-        &header,
+    let token = encode(
+        &Header::new(JWT_ALGORITHM),
         &claims,
         &EncodingKey::from_secret(secret.as_bytes()),
     )
-    .map_err(|e| AuthError(format!("Token creation failed: {}", e)))
+    .map_err(|e| AuthError(format!("Token creation failed: {}", e)))?;
+    Ok((token, claims))
 }
 
+#[cfg(test)]
+pub fn create_jwt(
+    user_id: i64,
+    username: &str,
+    role: &str,
+    secret: &str,
+    expiration_seconds: u64,
+) -> Result<String, AuthError> {
+    issue_jwt(user_id, username, role, secret, expiration_seconds).map(|(token, _)| token)
+}
+
+/// Verify signature (HS256 only), expiry, issuer and audience. Note this is
+/// only the cryptographic half of authentication: the admin middleware also
+/// requires a live `sessions` row for `claims.jti` so revoked tokens fail.
 pub fn validate_jwt(token: &str, secret: &str) -> Result<Claims, AuthError> {
     ensure_strong_secret(secret)?;
-    let validation = Validation::default();
+    let mut validation = Validation::new(JWT_ALGORITHM);
+    validation.set_issuer(&[JWT_ISSUER]);
+    validation.set_audience(&[JWT_AUDIENCE]);
+    validation.set_required_spec_claims(&["exp", "iss", "aud"]);
     let token_data = decode::<Claims>(
         token,
         &DecodingKey::from_secret(secret.as_bytes()),
         &validation,
     )
     .map_err(|e| AuthError(format!("Token validation failed: {}", e)))?;
+    if token_data.claims.jti.is_empty() {
+        return Err(AuthError("Token validation failed: empty jti".into()));
+    }
     Ok(token_data.claims)
 }
 
@@ -154,6 +194,9 @@ mod tests {
             role: "admin".to_owned(),
             exp: past.timestamp() as usize,
             iat: (past - Duration::seconds(60)).timestamp() as usize,
+            jti: "j".to_owned(),
+            iss: JWT_ISSUER.to_owned(),
+            aud: JWT_AUDIENCE.to_owned(),
         };
 
         let token = encode(
@@ -397,6 +440,77 @@ mod tests {
 
         let result = validate_jwt(&tampered, "secret_key_at_least_32_bytes_long_xxxxxx");
         assert!(result.is_err());
+    }
+
+    // === Claim binding (iss / aud / alg / jti) ===
+
+    const SECRET: &str = "secret_key_at_least_32_bytes_long_xxxxxx";
+
+    fn sign(claims: &serde_json::Value, alg: Algorithm) -> String {
+        encode(
+            &Header::new(alg),
+            claims,
+            &EncodingKey::from_secret(SECRET.as_bytes()),
+        )
+        .unwrap()
+    }
+
+    fn base_claims() -> serde_json::Value {
+        let now = Utc::now().timestamp();
+        serde_json::json!({
+            "sub": "u", "user_id": 1, "role": "admin",
+            "exp": now + 3600, "iat": now, "jti": "abc",
+            "iss": JWT_ISSUER, "aud": JWT_AUDIENCE,
+        })
+    }
+
+    #[test]
+    fn test_jwt_carries_iss_aud_and_unique_jti() {
+        let (t1, c1) = issue_jwt(1, "u", "admin", SECRET, 60).unwrap();
+        let (_, c2) = issue_jwt(1, "u", "admin", SECRET, 60).unwrap();
+        assert_eq!(c1.iss, JWT_ISSUER);
+        assert_eq!(c1.aud, JWT_AUDIENCE);
+        assert!(!c1.jti.is_empty());
+        assert_ne!(c1.jti, c2.jti, "jti must be unique per token");
+        let v = validate_jwt(&t1, SECRET).unwrap();
+        assert_eq!(v.jti, c1.jti);
+    }
+
+    #[test]
+    fn test_jwt_rejects_wrong_audience() {
+        let mut c = base_claims();
+        c["aud"] = "someone-else".into();
+        assert!(validate_jwt(&sign(&c, Algorithm::HS256), SECRET).is_err());
+    }
+
+    #[test]
+    fn test_jwt_rejects_wrong_issuer() {
+        let mut c = base_claims();
+        c["iss"] = "evil".into();
+        assert!(validate_jwt(&sign(&c, Algorithm::HS256), SECRET).is_err());
+    }
+
+    #[test]
+    fn test_jwt_rejects_missing_iss_aud_or_jti() {
+        for field in ["iss", "aud", "jti"] {
+            let mut c = base_claims();
+            c.as_object_mut().unwrap().remove(field);
+            assert!(
+                validate_jwt(&sign(&c, Algorithm::HS256), SECRET).is_err(),
+                "token without {field} must be rejected"
+            );
+        }
+        let mut c = base_claims();
+        c["jti"] = "".into();
+        assert!(validate_jwt(&sign(&c, Algorithm::HS256), SECRET).is_err());
+    }
+
+    #[test]
+    fn test_jwt_rejects_other_hmac_algorithm() {
+        // Same secret, different algorithm: only HS256 is accepted.
+        let c = base_claims();
+        assert!(validate_jwt(&sign(&c, Algorithm::HS512), SECRET).is_err());
+        assert!(validate_jwt(&sign(&c, Algorithm::HS256), SECRET).is_ok());
     }
 
     // === AuthError Tests ===

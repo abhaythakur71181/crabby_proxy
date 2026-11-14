@@ -2,13 +2,14 @@ use super::models::{
     ApiError, ApiKeyResponse, CreateApiKeyRequest, CreateApiKeyResponse, UpdateUserRequest,
     UserResponse,
 };
-use crate::admin::auth::{CurrentUser, RootAdminUser};
+use crate::admin::auth::{AuthSession, CurrentUser, RootAdminUser};
 use crate::app_state::AppState;
-use crate::db::{api_keys_crud, models::Role, users};
+use crate::db::{api_keys_crud, models::Role, sessions, users};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Json},
+    Extension,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -57,6 +58,27 @@ fn authorize_admin_reset(caller: &Role, target: &Role) -> Result<(), String> {
 /// is excluded — it changes its own password via the admin-reset endpoint.
 fn self_reset_allowed(caller: &Role) -> bool {
     !matches!(caller, Role::RootAdmin)
+}
+
+/// Revoke `target_id`'s admin sessions after a credential change. When the
+/// caller changed its own account, the session it is using is kept (so the
+/// UI does not log itself out) and every other session is ended.
+async fn revoke_sessions(
+    state: &AppState,
+    target_id: i64,
+    caller_id: i64,
+    caller_session: Option<&AuthSession>,
+) -> Result<(), ApiError> {
+    let res = match caller_session {
+        Some(s) if target_id == caller_id => {
+            sessions::delete_user_sessions_except(&state.db_pool, target_id, &s.jti).await
+        }
+        _ => sessions::delete_user_sessions(&state.db_pool, target_id).await,
+    };
+    res.map(|_| ()).map_err(|e| {
+        tracing::error!("Failed to revoke sessions for user {}: {}", target_id, e);
+        ApiError::internal("Credential updated but failed to revoke sessions")
+    })
 }
 
 /// Create a new user (root_admin only)
@@ -155,6 +177,7 @@ pub async fn get_user(
 /// Update user (root_admin or self for limited fields)
 pub async fn update_user(
     current_user: CurrentUser,
+    session: Option<Extension<AuthSession>>,
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
     Json(request): Json<UpdateUserRequest>,
@@ -212,6 +235,11 @@ pub async fn update_user(
     state
         .invalidate_all_for_user(user_id, Some(&updated_user.username))
         .await;
+
+    // A password change or deactivation ends the account's other sessions.
+    if request.password.is_some() || request.is_active == Some(false) {
+        revoke_sessions(&state, user_id, current_user_id, session.as_deref()).await?;
+    }
 
     Ok(Json(UserResponse::from(updated_user)))
 }
@@ -357,6 +385,7 @@ pub async fn revoke_api_key(
 /// (it resets via the admin endpoint); available to `user` and `admin`.
 pub async fn change_own_password(
     current_user: CurrentUser,
+    session: Option<Extension<AuthSession>>,
     State(state): State<Arc<AppState>>,
     Json(request): Json<super::models::ChangeOwnPasswordRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -396,6 +425,7 @@ pub async fn change_own_password(
     state
         .invalidate_all_for_user(current_user_id, Some(&updated.username))
         .await;
+    revoke_sessions(&state, current_user_id, current_user_id, session.as_deref()).await?;
 
     let _ = crate::db::audit_log::log_action(
         &state.db_pool,
@@ -416,6 +446,7 @@ pub async fn change_own_password(
 /// regular users.
 pub async fn admin_reset_password(
     current_user: CurrentUser,
+    session: Option<Extension<AuthSession>>,
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
     Json(request): Json<super::models::AdminResetPasswordRequest>,
@@ -444,6 +475,7 @@ pub async fn admin_reset_password(
     state
         .invalidate_all_for_user(user_id, Some(&updated.username))
         .await;
+    revoke_sessions(&state, user_id, current_user_id, session.as_deref()).await?;
 
     let _ = crate::db::audit_log::log_action(
         &state.db_pool,

@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
 
-/// SHA-256 (hex) of a session bearer token. Tokens are high-entropy, so a fast
-/// cryptographic hash is sufficient — we only need the stored value to be
-/// non-reversible so a DB read cannot yield a usable token.
+/// SHA-256 (hex) of a session key. Admin sessions are keyed by the JWT `jti`
+/// (a random 128-bit id); keys are high-entropy, so a fast cryptographic hash
+/// is sufficient. We only need the stored value to be non-reversible.
 fn hash_token(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
@@ -15,8 +15,8 @@ fn hash_token(token: &str) -> String {
         .collect()
 }
 
-/// Active session info. `token_hash` is the SHA-256 of the bearer token; the raw
-/// token is never persisted or returned.
+/// Active session info. `token_hash` is the SHA-256 of the session key (the
+/// JWT `jti`); neither the key nor the token is persisted or returned.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: i64,
@@ -28,7 +28,8 @@ pub struct Session {
     pub user_agent: Option<String>,
 }
 
-/// Create a new session. `token` is the raw bearer token; only its hash is stored.
+/// Create a new session. `token` is the session key (the JWT `jti`); only its
+/// hash is stored.
 pub async fn create_session(
     pool: &SqlitePool,
     user_id: i64,
@@ -52,7 +53,7 @@ pub async fn create_session(
     Ok(result.last_insert_rowid())
 }
 
-/// Get session by raw token (looked up by its hash).
+/// Get a live (unexpired) session by its key (looked up by hash).
 pub async fn get_session_by_token(
     pool: &SqlitePool,
     token: &str,
@@ -110,6 +111,31 @@ pub async fn delete_session(pool: &SqlitePool, session_id: i64) -> Result<(), sq
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Delete the session with the given key (logout / revoke one token).
+pub async fn delete_session_by_token(pool: &SqlitePool, token: &str) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM sessions WHERE token_hash = ?")
+        .bind(hash_token(token))
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
+}
+
+/// Delete every session of `user_id` except the one with key `keep_token`
+/// (e.g. after a self-service password change: keep the caller signed in,
+/// sign out everywhere else).
+pub async fn delete_user_sessions_except(
+    pool: &SqlitePool,
+    user_id: i64,
+    keep_token: &str,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM sessions WHERE user_id = ? AND token_hash != ?")
+        .bind(user_id)
+        .bind(hash_token(keep_token))
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
 }
 
 /// Delete all sessions for a user (force logout everywhere)
@@ -197,6 +223,33 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_revoke_single_and_all_but_one() {
+        let pool = migrated_pool().await;
+        let expires = chrono::Utc::now().timestamp() + 3600;
+        for k in ["a", "b", "c"] {
+            create_session(&pool, 1, k, expires, None, None)
+                .await
+                .unwrap();
+        }
+        assert_eq!(delete_session_by_token(&pool, "a").await.unwrap(), 1);
+        assert!(get_session_by_token(&pool, "a").await.unwrap().is_none());
+        assert_eq!(delete_user_sessions_except(&pool, 1, "c").await.unwrap(), 1);
+        assert!(get_session_by_token(&pool, "b").await.unwrap().is_none());
+        assert!(get_session_by_token(&pool, "c").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_expired_session_is_not_returned() {
+        let pool = migrated_pool().await;
+        let past = chrono::Utc::now().timestamp() - 1;
+        create_session(&pool, 1, "old", past, None, None)
+            .await
+            .unwrap();
+        assert!(get_session_by_token(&pool, "old").await.unwrap().is_none());
+        assert_eq!(cleanup_expired_sessions(&pool).await.unwrap(), 1);
     }
 
     #[tokio::test]

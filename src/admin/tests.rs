@@ -217,3 +217,110 @@ async fn extractor_guards_enforce_roles() {
         .status();
     assert_eq!(s, 401);
 }
+
+// ─── #7 / #14: session-backed JWTs, logout and revocation ────────────────
+
+async fn logout(base: &str, token: &str) -> reqwest::StatusCode {
+    client()
+        .post(format!("{base}/api/logout"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+async fn login_session_logout_revokes_token() {
+    let state = test_state().await;
+    let uid = add_user(&state, "alice", Role::User).await;
+    let base = spawn(state).await;
+    let t1 = login_bearer(&base, "alice").await;
+    let t2 = login_bearer(&base, "alice").await;
+
+    let me: serde_json::Value = client()
+        .get(format!("{base}/api/session"))
+        .bearer_auth(&t1)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(me["user_id"], uid);
+    assert_eq!(me["username"], "alice");
+    assert!(me["expires_at"].as_i64().unwrap() > chrono::Utc::now().timestamp());
+
+    let sessions_path = format!("/api/users/{uid}/sessions");
+    let list: Vec<serde_json::Value> = client()
+        .get(format!("{base}{sessions_path}"))
+        .bearer_auth(&t1)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(list.len(), 2, "each login is a tracked session");
+
+    assert_eq!(logout(&base, &t1).await, 204);
+    assert_eq!(get_status(&base, &t1, "/api/session").await, 401);
+    assert_eq!(get_status(&base, &t2, "/api/session").await, 200);
+    // Idempotent: logging out again (or with garbage) is still 204.
+    assert_eq!(logout(&base, &t1).await, 204);
+    assert_eq!(logout(&base, "garbage").await, 204);
+
+    // "Sign out everywhere".
+    assert_eq!(delete_status(&base, &t2, &sessions_path).await, 200);
+    assert_eq!(get_status(&base, &t2, "/api/session").await, 401);
+}
+
+#[tokio::test]
+async fn validly_signed_token_without_session_is_rejected() {
+    let state = test_state().await;
+    let uid = add_user(&state, "alice", Role::User).await;
+    let secret = state.config.load().authentication.jwt_secret.clone();
+    let base = spawn(state).await;
+    let forged = crate::auth::jwt::create_jwt(uid, "alice", "user", &secret, 3600).unwrap();
+    assert_eq!(get_status(&base, &forged, "/api/session").await, 401);
+}
+
+#[tokio::test]
+async fn password_changes_revoke_sessions() {
+    let state = test_state().await;
+    let alice_id = add_user(&state, "alice", Role::User).await;
+    add_user(&state, "root", Role::RootAdmin).await;
+    let base = spawn(state).await;
+    let a1 = login_bearer(&base, "alice").await;
+    let a2 = login_bearer(&base, "alice").await;
+
+    // Self-service change keeps the calling session, ends the others.
+    let s = client()
+        .post(format!("{base}/api/users/me/password"))
+        .bearer_auth(&a1)
+        .json(&serde_json::json!({
+            "current_password": TEST_PASSWORD,
+            "new_password": "Another-Strong-Pass-42",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(s, 204);
+    assert_eq!(get_status(&base, &a1, "/api/session").await, 200);
+    assert_eq!(get_status(&base, &a2, "/api/session").await, 401);
+
+    // Admin reset ends every session of the target.
+    let root = login_bearer(&base, "root").await;
+    let s = client()
+        .post(format!("{base}/api/users/{alice_id}/password"))
+        .bearer_auth(&root)
+        .json(&serde_json::json!({"new_password": "Reset-By-Root-Pass-77"}))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(s, 204);
+    assert_eq!(get_status(&base, &a1, "/api/session").await, 401);
+    assert_eq!(get_status(&base, &root, "/api/session").await, 200);
+}
