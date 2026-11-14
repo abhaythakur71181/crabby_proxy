@@ -44,6 +44,14 @@ tunnel_port_start = 10000
 tunnel_port_end = 10999
 
 [state]
+# Where live connection state, pending approvals and counters are kept.
+#   "memory" (default): in-process. Correct for the supported topology, ONE
+#     proxy instance per SQLite database; nothing extra to run.
+#   "redis": shares that state through redis_url. This alone does NOT make the
+#     proxy horizontally scalable: rate limiting stays in-process, SQLite is a
+#     single-writer local file, and an unreachable Redis at boot silently falls
+#     back to "memory". Do not run more than one replica. See docs/RUNBOOK.md,
+#     "Scaling (single-instance constraint)".
 backend = "memory"
 redis_url = "redis://localhost:6379"
 redis_pool_size = 10

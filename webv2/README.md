@@ -2,11 +2,11 @@
 
 Next-generation admin console. Pure Vite SPA (no SSR) with React 19,
 TypeScript strict, Tailwind v4, TanStack Query, motion and a hand-built
-animated chart kit. Coexists with the legacy `web/` app during rollout —
-see [`docs/WEBV2_PLAN.md`](../docs/WEBV2_PLAN.md) for the full audit and
+animated chart kit. It replaced the legacy `web/` app (since removed) and is
+the only shipped admin UI — see [`docs/WEBV2_PLAN.md`](../docs/WEBV2_PLAN.md) for the full audit and
 design rationale.
 
-## Highlights over `web/`
+## Highlights over the legacy `web/` app
 
 - **Every backend endpoint integrated** — including `/api/metrics`,
   connection terminate, audit server-side filters/pagination, tunnel
