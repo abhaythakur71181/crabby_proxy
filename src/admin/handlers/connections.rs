@@ -83,9 +83,9 @@ pub async fn issue_live_ticket(
     _admin: AdminUser,
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
-    use rand::Rng;
-    let ticket: String = rand::thread_rng()
-        .sample_iter(&rand::distributions::Alphanumeric)
+    use rand::RngExt;
+    let ticket: String = rand::rng()
+        .sample_iter(&rand::distr::Alphanumeric)
         .take(32)
         .map(char::from)
         .collect();

@@ -225,24 +225,24 @@ pub async fn update_last_login(pool: &SqlitePool, user_id: i64) -> Result<(), sq
 
 /// Generate a secure random password with guaranteed character diversity
 fn generate_secure_password(length: usize) -> String {
-    use rand::Rng;
+    use rand::RngExt;
     const UPPERCASE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     const LOWERCASE: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
     const DIGITS: &[u8] = b"0123456789";
     const SPECIAL: &[u8] = b"!@#$%^&*";
     const ALL: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let length = length.max(4);
     let mut password: Vec<u8> = Vec::with_capacity(length);
-    password.push(UPPERCASE[rng.gen_range(0..UPPERCASE.len())]);
-    password.push(LOWERCASE[rng.gen_range(0..LOWERCASE.len())]);
-    password.push(DIGITS[rng.gen_range(0..DIGITS.len())]);
-    password.push(SPECIAL[rng.gen_range(0..SPECIAL.len())]);
+    password.push(UPPERCASE[rng.random_range(0..UPPERCASE.len())]);
+    password.push(LOWERCASE[rng.random_range(0..LOWERCASE.len())]);
+    password.push(DIGITS[rng.random_range(0..DIGITS.len())]);
+    password.push(SPECIAL[rng.random_range(0..SPECIAL.len())]);
     for _ in 4..length {
-        password.push(ALL[rng.gen_range(0..ALL.len())]);
+        password.push(ALL[rng.random_range(0..ALL.len())]);
     }
     for i in (1..password.len()).rev() {
-        let j = rng.gen_range(0..=i);
+        let j = rng.random_range(0..=i);
         password.swap(i, j);
     }
     String::from_utf8(password).unwrap_or_else(|_| "Fallback_P@ss1".to_string())

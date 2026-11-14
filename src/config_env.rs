@@ -57,9 +57,9 @@ impl ConfigEnvExt for Config {
             self.authentication.jwt_secret = env_secret;
         } else if is_placeholder_jwt_secret(&self.authentication.jwt_secret) {
             // INFO: Auto-generate a random secret instead of running with default
-            use rand::Rng;
-            let secret: String = rand::thread_rng()
-                .sample_iter(&rand::distributions::Alphanumeric)
+            use rand::RngExt;
+            let secret: String = rand::rng()
+                .sample_iter(&rand::distr::Alphanumeric)
                 .take(64)
                 .map(char::from)
                 .collect();
