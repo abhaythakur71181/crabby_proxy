@@ -6,6 +6,7 @@ use governor::{
 };
 use nonzero_ext::nonzero;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -24,19 +25,47 @@ fn normalize_ip(ip: IpAddr) -> IpAddr {
     }
 }
 
+/// One tracked IP: its token bucket plus when it was last used, so eviction
+/// can prefer entries that carry no state worth keeping.
+struct IpEntry {
+    limiter: GovernorRateLimiter<NotKeyed, InMemoryState, DefaultClock>,
+    /// Milliseconds since `IpRateLimiter::epoch` of the last check.
+    last_seen_ms: AtomicU64,
+    /// Logical use counter (from `IpRateLimiter::seq`) for LRU ordering;
+    /// unlike the millisecond clock it never ties.
+    last_use: AtomicU64,
+}
+
 /// Rate limiter for IP addresses (proxy layer)
 /// Uses DashMap for lock-free per-key access (no global write lock)
 #[derive(Clone)]
 pub struct IpRateLimiter {
-    limiters: Arc<DashMap<IpAddr, GovernorRateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
+    limiters: Arc<DashMap<IpAddr, IpEntry>>,
     quota: Quota,
-    /// Maximum number of tracked IPs before random eviction kicks in.
+    /// Maximum number of tracked IPs before eviction kicks in.
     /// Bounds memory so an attacker cannot exhaust RAM by spraying source IPs.
     max_entries: usize,
+    /// An entry untouched for this long has a fully refilled bucket, so it is
+    /// indistinguishable from a fresh limiter and can be dropped losslessly.
+    idle_after_ms: u64,
+    epoch: std::time::Instant,
+    /// Last idle sweep (ms since `epoch`), `u64::MAX` = never.
+    last_sweep_ms: Arc<AtomicU64>,
+    /// Last time a "lossy eviction" warning was logged (ms since `epoch`).
+    last_warn_ms: Arc<AtomicU64>,
+    /// Monotonic counter bumped on every check, used for LRU ordering.
+    seq: Arc<AtomicU64>,
 }
 
 /// Default cap on tracked IPs. ~100k entries × ~200 bytes ≈ 20 MB upper bound.
 pub const DEFAULT_MAX_TRACKED_IPS: usize = 100_000;
+
+/// Minimum spacing between full idle sweeps when the map is at its cap.
+const IP_SWEEP_INTERVAL_MS: u64 = 1_000;
+/// How many entries to sample when picking least-recently-used victims.
+const IP_EVICT_SAMPLE: usize = 64;
+/// How many of the sampled entries to evict per lossy eviction round.
+const IP_EVICT_BATCH: usize = 8;
 
 impl IpRateLimiter {
     /// Create new IP rate limiter with the default tracked-IP cap.
@@ -46,16 +75,26 @@ impl IpRateLimiter {
 
     /// Create new IP rate limiter with an explicit cap on tracked IPs.
     pub fn with_max_entries(requests_per_second: u32, burst_size: u32, max_entries: usize) -> Self {
-        let quota = Quota::per_second(
-            std::num::NonZeroU32::new(requests_per_second).unwrap_or(nonzero!(10u32)),
-        )
-        .allow_burst(std::num::NonZeroU32::new(burst_size).unwrap_or(nonzero!(20u32)));
+        let rps = std::num::NonZeroU32::new(requests_per_second).unwrap_or(nonzero!(10u32));
+        let burst = std::num::NonZeroU32::new(burst_size).unwrap_or(nonzero!(20u32));
+        let quota = Quota::per_second(rps).allow_burst(burst);
+        // Time for an empty bucket to refill completely: burst / rps seconds.
+        let idle_after_ms = (u64::from(burst.get()) * 1000).div_ceil(u64::from(rps.get()));
 
         Self {
             limiters: Arc::new(DashMap::new()),
             quota,
             max_entries: max_entries.max(1),
+            idle_after_ms: idle_after_ms.max(1),
+            epoch: std::time::Instant::now(),
+            last_sweep_ms: Arc::new(AtomicU64::new(u64::MAX)),
+            last_warn_ms: Arc::new(AtomicU64::new(u64::MAX)),
+            seq: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.epoch.elapsed().as_millis() as u64
     }
 
     /// Check if IP is allowed to make a request
@@ -63,37 +102,74 @@ impl IpRateLimiter {
     pub async fn check_ip(&self, ip: IpAddr) -> bool {
         // INFO: Normalize IPv4-mapped IPv6 (::ffff:x.x.x.x) to IPv4
         let ip = normalize_ip(ip);
+        let now = self.now_ms();
+        let use_seq = self.seq.fetch_add(1, Ordering::Relaxed);
 
-        // If we're at the cap and this IP is new, evict a small batch first.
-        // We check `contains_key` to avoid evicting on the hot path for IPs
-        // that already have a limiter. Eviction is opportunistic — random
-        // entries via DashMap iteration order, which is good enough to keep
-        // the map bounded under spray attacks.
+        // If we're at the cap and this IP is new, make room first. We check
+        // `contains_key` to avoid evicting on the hot path for IPs that
+        // already have a limiter.
         if self.limiters.len() >= self.max_entries && !self.limiters.contains_key(&ip) {
-            self.evict_some();
+            self.make_room(now);
         }
 
-        let limiter = self
-            .limiters
-            .entry(ip)
-            .or_insert_with(|| GovernorRateLimiter::direct(self.quota));
-        limiter.check().is_ok()
+        let entry = self.limiters.entry(ip).or_insert_with(|| IpEntry {
+            limiter: GovernorRateLimiter::direct(self.quota),
+            last_seen_ms: AtomicU64::new(now),
+            last_use: AtomicU64::new(use_seq),
+        });
+        entry.last_seen_ms.store(now, Ordering::Relaxed);
+        entry.last_use.store(use_seq, Ordering::Relaxed);
+        entry.limiter.check().is_ok()
     }
 
-    /// Evict ~8 arbitrary entries to make room. DashMap iteration order is
-    /// not deterministic, so this approximates random eviction without the
-    /// cost of maintaining LRU metadata on the hot path.
-    fn evict_some(&self) {
-        const EVICT_BATCH: usize = 8;
-        let victims: Vec<IpAddr> = self
+    /// Free space for a new IP.
+    ///
+    /// The old policy evicted 8 arbitrary entries, which let an IP-spraying
+    /// attacker both push out legitimate clients' state and reset its own
+    /// buckets (an evicted IP got a fresh full burst on reinsertion). Now:
+    ///
+    /// 1. Drop entries idle long enough that their bucket has fully refilled.
+    ///    Those are equivalent to a fresh limiter, so evicting them loses no
+    ///    rate-limit state at all.
+    /// 2. Only if that frees nothing, evict the least-recently-used entries
+    ///    from a sample. A client that is actively being throttled keeps
+    ///    touching its entry, so it is the last thing to go. These lossy
+    ///    evictions are what `IP_RATE_LIMIT_EVICTIONS` counts; a sustained
+    ///    non-zero rate means `max_tracked_ips` is too small for the traffic.
+    fn make_room(&self, now: u64) {
+        let last = self.last_sweep_ms.load(Ordering::Relaxed);
+        if last == u64::MAX || now.saturating_sub(last) >= IP_SWEEP_INTERVAL_MS {
+            self.last_sweep_ms.store(now, Ordering::Relaxed);
+            let idle_after = self.idle_after_ms;
+            self.limiters.retain(|_, e| {
+                now.saturating_sub(e.last_seen_ms.load(Ordering::Relaxed)) < idle_after
+            });
+            if self.limiters.len() < self.max_entries {
+                return;
+            }
+        }
+
+        let mut sample: Vec<(u64, IpAddr)> = self
             .limiters
             .iter()
-            .take(EVICT_BATCH)
-            .map(|e| *e.key())
+            .take(IP_EVICT_SAMPLE)
+            .map(|e| (e.last_use.load(Ordering::Relaxed), *e.key()))
             .collect();
-        for ip in victims {
-            self.limiters.remove(&ip);
-            crate::metrics::IP_RATE_LIMIT_EVICTIONS.inc();
+        sample.sort_unstable_by_key(|(used, _)| *used);
+        for (_, ip) in sample.into_iter().take(IP_EVICT_BATCH) {
+            if self.limiters.remove(&ip).is_some() {
+                crate::metrics::IP_RATE_LIMIT_EVICTIONS.inc();
+            }
+        }
+
+        let last_warn = self.last_warn_ms.load(Ordering::Relaxed);
+        if last_warn == u64::MAX || now.saturating_sub(last_warn) >= 60_000 {
+            self.last_warn_ms.store(now, Ordering::Relaxed);
+            tracing::warn!(
+                "IP rate limiter is full ({} active IPs); evicting least-recently-used entries. \
+                 Possible IP-spray attack, or rate_limiting.max_tracked_ips is too small.",
+                self.max_entries
+            );
         }
     }
 
@@ -552,6 +628,48 @@ mod tests {
             "expected <=16 entries after eviction, got {}",
             limiter.count().await
         );
+    }
+
+    #[tokio::test]
+    async fn test_ip_rate_limiter_prefers_idle_entries() {
+        // 1000 rps, burst 1: a bucket refills in 1 ms, so entries go idle fast.
+        let limiter = IpRateLimiter::with_max_entries(1000, 1, 16);
+        for i in 0..16u8 {
+            limiter
+                .check_ip(IpAddr::V4(Ipv4Addr::new(10, 1, 0, i)))
+                .await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let before = crate::metrics::IP_RATE_LIMIT_EVICTIONS.get();
+        limiter
+            .check_ip(IpAddr::V4(Ipv4Addr::new(10, 2, 0, 1)))
+            .await;
+        // All 16 idle entries were swept losslessly; only the new IP remains.
+        assert_eq!(limiter.count().await, 1);
+        assert_eq!(crate::metrics::IP_RATE_LIMIT_EVICTIONS.get(), before);
+    }
+
+    #[tokio::test]
+    async fn test_ip_rate_limiter_spray_does_not_reset_active_offender() {
+        // 1 rps, burst 1: once limited, an IP stays limited for ~1s.
+        let limiter = IpRateLimiter::with_max_entries(1, 1, 16);
+        let offender = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        assert!(limiter.check_ip(offender).await);
+        assert!(!limiter.check_ip(offender).await);
+
+        // Spray far more IPs than the cap. The offender keeps retrying, so it
+        // is always the most recently used entry and must never be evicted
+        // (which would hand it a fresh burst).
+        for i in 0..200u32 {
+            let ip = IpAddr::V4(Ipv4Addr::new(10, 3, (i / 256) as u8, (i % 256) as u8));
+            limiter.check_ip(ip).await;
+            assert!(
+                !limiter.check_ip(offender).await,
+                "offender bucket was reset after {} sprayed IPs",
+                i + 1
+            );
+        }
+        assert!(limiter.count().await <= 16);
     }
 
     // === New UserRateLimiter Tests ===
