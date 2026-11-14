@@ -5,11 +5,29 @@ Quick procedures for running Crabby Proxy in production. See
 
 ## Deploy / boot requirements
 
-Set these or the process refuses to start:
-- `CRABBY_JWT_SECRET` — ≥32 random bytes (boot panics if weaker).
-- `CRABBY_ADMIN_PASSWORD`, `CRABBY_BASIC_AUTH_PASSWORD` — non-default (boot
-  panics on the built-in defaults; set `CRABBY_ALLOW_DEFAULT_PASSWORDS=1` for
-  local dev only).
+The process refuses to start on an unsafe configuration: it prints one
+`error: ...` line to stderr (also logged) and exits with status 1. Causes
+include a JWT secret under 32 bytes or a published placeholder in
+`CRABBY_JWT_SECRET`, a weak or placeholder password (under 12 characters,
+`changeme`, `REPLACE_ME`, ...) on a credential that is in use, an
+unauthenticated admin API on a non-loopback bind, geo blocking without a
+GeoIP database, an invalid `features.webhook_url`, and `[state] backend =
+"redis"` with Redis unreachable.
+
+- `CRABBY_JWT_SECRET` — ≥32 random bytes. If unset and the config value is
+  empty, a random key is generated at boot (sessions end on restart).
+- `CRABBY_ADMIN_PASSWORD`, `CRABBY_BASIC_AUTH_PASSWORD` — static admin API and
+  proxy credentials. `config.example.toml` ships them empty, which disables
+  them; set these (or an Argon2 hash in the config) to enable them.
+  `CRABBY_ALLOW_DEFAULT_PASSWORDS=1` accepts weak values for local dev only.
+- First run creates a `root` (root_admin) database user. Its password is
+  `CRABBY_ROOT_PASSWORD` if set; otherwise it is generated and printed to the
+  terminal, or, when stderr is not a TTY (service, container), written to
+  `initial_root_password.txt` (mode 0600) in the working directory
+  (`/app/initial_root_password.txt` in the image; path override:
+  `CRABBY_ROOT_PASSWORD_FILE`). Save it and delete the file. The admin API
+  needs some admin credential: this user, another DB admin, or
+  `CRABBY_ADMIN_PASSWORD`.
 - `RUST_LOG` — log level, e.g. `info` or `crabby_proxy=debug,warn` (default `info`).
 
 The admin port (admin API + `/metrics`) binds to `127.0.0.1` on the host by

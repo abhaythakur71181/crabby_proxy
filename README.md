@@ -422,7 +422,21 @@ Default ports:
 - Proxy: `0.0.0.0:8080`
 - Admin API: `127.0.0.1:8081`
 
-A `root_admin` account is auto-created on first run if it doesn't exist.
+A `root_admin` account named `root` is auto-created on first run if it doesn't
+exist. Its password is `CRABBY_ROOT_PASSWORD` if set; otherwise one is generated
+and printed to the terminal, or, when stderr is not a TTY (service, container),
+written to `initial_root_password.txt` (mode 0600) in the working directory.
+
+`config.example.toml` ships with empty credentials: an empty
+`authentication.password` / `admin.admin_password` disables that static
+credential, and an empty `jwt_secret` is replaced by a random key at boot. Set
+`CRABBY_BASIC_AUTH_PASSWORD`, `CRABBY_ADMIN_PASSWORD` and `CRABBY_JWT_SECRET`
+(or put Argon2 hashes in the file) to enable them. The admin API needs some
+admin credential: the `root` user, another database admin, or the static one.
+
+An unsafe configuration (weak or placeholder password, short JWT secret,
+unauthenticated admin API on a public bind, ...) is refused at startup with a
+single `error: ...` line on stderr and exit status 1.
 
 ---
 

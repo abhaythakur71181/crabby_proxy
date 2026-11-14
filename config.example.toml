@@ -1,8 +1,20 @@
 # Example configuration baked into the Docker image as /app/config.toml.
-# Secrets here are PLACEHOLDERS — the boot guard (src/config_env.rs) refuses to
-# start on default credentials, so supply real values at runtime via env vars
-# (CRABBY_ADMIN_PASSWORD, CRABBY_JWT_SECRET, ...) or CLI flags. Never commit real
-# secrets to this file.
+#
+# Credentials ship EMPTY, so this file starts as-is:
+#   - an empty password disables that static credential (it never matches);
+#   - an empty jwt_secret makes the proxy generate a random one at boot.
+# Supply real values at runtime via env vars (CRABBY_BASIC_AUTH_PASSWORD,
+# CRABBY_ADMIN_PASSWORD, CRABBY_JWT_SECRET) or put an Argon2 hash here. Weak or
+# placeholder values (shorter than 12 characters, "changeme", "REPLACE_ME", ...)
+# are refused at boot. Never commit real secrets to this file.
+#
+# First run: a `root` (root_admin) user is created in the database. Its
+# password comes from CRABBY_ROOT_PASSWORD if set; otherwise one is generated
+# and printed to the terminal, or, when stderr is not a TTY (service,
+# container), written to initial_root_password.txt (mode 0600) in the working
+# directory (override with CRABBY_ROOT_PASSWORD_FILE). That user can log in to
+# the admin API and authenticate to the proxy even with the passwords below
+# left empty.
 
 [server]
 proxy_bind = "0.0.0.0:8080"
@@ -35,8 +47,14 @@ acquire_timeout_secs = 10
 enabled = true
 method = "basic"
 username = "admin"
-password = "REPLACE_ME"
-jwt_secret = "REPLACE_ME_WITH_A_32_BYTE_RANDOM_SECRET"
+# Static proxy credential for `username`. Empty = disabled (database users,
+# including root, still authenticate). Set CRABBY_BASIC_AUTH_PASSWORD, or an
+# Argon2 PHC hash ("$argon2id$..."), to enable it.
+password = ""
+# Signs admin API session tokens. Empty = random key generated at each boot
+# (sessions do not survive a restart). Set CRABBY_JWT_SECRET (>= 32 random
+# bytes, e.g. `openssl rand -hex 32`) for persistent sessions.
+jwt_secret = ""
 jwt_expiration = 86400
 
 [protocols]
@@ -144,7 +162,10 @@ update_interval = 10
 enabled = true
 auth_enabled = true
 admin_username = "admin"
-admin_password = "REPLACE_ME"
+# Static admin API credential for `admin_username`. Empty = disabled. The admin
+# API needs some admin credential: either this (via CRABBY_ADMIN_PASSWORD or an
+# Argon2 hash) or a database admin user such as the first-run `root` account.
+admin_password = ""
 websocket_enabled = true
 cors_enabled = true
 cors_origins = ["http://localhost:3000"]
