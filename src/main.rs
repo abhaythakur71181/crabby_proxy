@@ -227,7 +227,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Re-read in case config was reloaded.
                     let days = retention_state.config.load().database.usage_retention_days;
                     if days > 0 {
-                        match crate::db::usage::purge_old_usage(&retention_state.db_pool, days)
+                        match crate::db::usage::purge_old_usage(&retention_state.db_writer, days)
                             .await
                         {
                             Ok(n) if n > 0 => {

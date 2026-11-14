@@ -309,9 +309,10 @@ impl ProxyProtocol {
 
             if let Some((user_id, _)) = user {
                 // One indexed SHA-256 lookup (no Argon2; see db::api_keys).
-                let verified = api_keys::verify_api_key(&state.db_pool, user_id, password)
-                    .await
-                    .unwrap_or(false);
+                let verified =
+                    api_keys::verify_api_key(&state.db_pool, &state.db_writer, user_id, password)
+                        .await
+                        .unwrap_or(false);
                 if verified {
                     state.auth_cache.insert(cache_key, user_id);
                     return Some(user_id);

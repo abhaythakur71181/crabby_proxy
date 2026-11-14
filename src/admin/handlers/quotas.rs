@@ -107,7 +107,7 @@ pub async fn update_user_quota(
     if user.is_none() {
         return Err(ApiError::not_found(format!("User {} not found", user_id)));
     }
-    crate::db::quota::update_quota(&state.db_pool, user_id, payload.quota_bytes)
+    crate::db::quota::update_quota(&state.db_writer, user_id, payload.quota_bytes)
         .await
         .map_err(|e| {
             tracing::error!("Failed to update quota: {}", e);

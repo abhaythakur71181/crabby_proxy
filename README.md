@@ -364,7 +364,7 @@ Runtime reload is supported via `POST /api/config/reload`.
 | Section | Controls |
 |---------|----------|
 | `[server]` | Bind addresses, max connections, TLS cert/key paths |
-| `[database]` | SQLite path, connection pool size |
+| `[database]` | SQLite path, read-pool size (writes use one dedicated writer connection), lock/acquire timeouts, usage retention |
 | `[authentication]` | Enable/disable, method, credentials, JWT secret/expiration |
 | `[protocols]` | Enable/disable individual protocols, auto-detect toggle |
 | `[features]` | Connection approval, reverse tunnels, tunnel port range, webhook URL/events |

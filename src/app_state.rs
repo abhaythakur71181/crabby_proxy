@@ -29,8 +29,14 @@ pub struct AppState {
     // Pluggable state (memory or Redis)
     pub state: Arc<dyn StateBackend>,
 
-    // Database pool for user management
+    // Database pool for reads (and rare admin writes).
     pub db_pool: sqlx::SqlitePool,
+
+    // Dedicated one-connection writer pool for the same database (#34). All
+    // request-path writes go here so they queue FIFO for SQLite's single
+    // write lock instead of spinning in the busy handler on reader slots.
+    // For an in-memory database this is a clone of `db_pool`.
+    pub db_writer: sqlx::SqlitePool,
 
     // Tunnel manager for reverse tunnels
     pub tunnels: Arc<RwLock<TunnelManager>>,
@@ -313,11 +319,17 @@ impl AppState {
             _ => (ip_rate_limiter, user_rate_limiter, login_rate_limiter),
         };
 
+        let db_writer = crate::db::connection::writer_pool(
+            &db_pool,
+            std::time::Duration::from_secs(config.database.acquire_timeout_secs.max(1)),
+        );
+
         Ok(Self {
             global_conn_limit: crate::conn_limiter::ConnLimiter::new(config.server.max_connections),
             config: Arc::new(ArcSwap::from_pointee(config.clone())),
             state,
             db_pool: db_pool.clone(),
+            db_writer: db_writer.clone(),
             tunnels: Arc::new(RwLock::new(TunnelManager::new(
                 config.features.tunnel_port_start,
                 config.features.tunnel_port_end,
@@ -337,7 +349,7 @@ impl AppState {
                 config.advanced.dns_cache_ttl,
             )),
             shutdown_tx,
-            usage_writer: crate::usage_writer::UsageWriter::spawn(db_pool.clone()),
+            usage_writer: crate::usage_writer::UsageWriter::spawn(db_writer),
             quota_cache: Arc::new(dashmap::DashMap::new()),
             quota_trackers: Arc::new(crate::quota_tracker::QuotaTrackerRegistry::new()),
             approval_cache: Arc::new(dashmap::DashMap::new()),

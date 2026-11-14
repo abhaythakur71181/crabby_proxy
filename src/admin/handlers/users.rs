@@ -71,9 +71,9 @@ async fn revoke_sessions(
 ) -> Result<(), ApiError> {
     let res = match caller_session {
         Some(s) if target_id == caller_id => {
-            sessions::delete_user_sessions_except(&state.db_pool, target_id, &s.jti).await
+            sessions::delete_user_sessions_except(&state.db_writer, target_id, &s.jti).await
         }
-        _ => sessions::delete_user_sessions(&state.db_pool, target_id).await,
+        _ => sessions::delete_user_sessions(&state.db_writer, target_id).await,
     };
     res.map(|_| ()).map_err(|e| {
         tracing::error!("Failed to revoke sessions for user {}: {}", target_id, e);
@@ -106,7 +106,7 @@ pub async fn create_user(
         allowed_protocols: None,
         notes: None,
     };
-    let user_id = users::create_user(&state.db_pool, &db_request, Some(current_user_id))
+    let user_id = users::create_user(&state.db_writer, &db_request, Some(current_user_id))
         .await
         .map_err(|e| {
             if super::models::is_unique_violation(&e) {
@@ -228,7 +228,7 @@ pub async fn update_user(
     }
 
     let updated_user = users::update_user(
-        &state.db_pool,
+        &state.db_writer,
         user_id,
         request.password.as_deref(),
         request.role,
@@ -267,7 +267,7 @@ pub async fn delete_user(
     // Fetch username before deletion for cache invalidation
     let target_user = users::get_user_by_id(&state.db_pool, user_id).await?;
 
-    users::delete_user(&state.db_pool, user_id).await?;
+    users::delete_user(&state.db_writer, user_id).await?;
 
     // Invalidate all caches for the deleted user
     let username = target_user.map(|u| u.username).unwrap_or_default();
@@ -338,7 +338,7 @@ pub async fn create_api_key(
     }
 
     let (plaintext_key, api_key) =
-        api_keys_crud::create_api_key(&state.db_pool, user_id, Some(name), expires_in_days)
+        api_keys_crud::create_api_key(&state.db_writer, user_id, Some(name), expires_in_days)
             .await
             .map_err(|e| {
                 tracing::error!("Failed to create API key: {}", e);
@@ -376,7 +376,7 @@ pub async fn revoke_api_key(
     Path((user_id, key_id)): Path<(i64, i64)>,
 ) -> Result<impl IntoResponse, ApiError> {
     current_user.authorize_target(&state, user_id).await?;
-    api_keys_crud::revoke_api_key(&state.db_pool, key_id, user_id)
+    api_keys_crud::revoke_api_key(&state.db_writer, key_id, user_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to revoke API key: {}", e);
@@ -421,7 +421,7 @@ pub async fn change_own_password(
     crate::validation::validate_password(&request.new_password).map_err(ApiError::bad_request)?;
 
     let updated = users::update_user(
-        &state.db_pool,
+        &state.db_writer,
         current_user_id,
         Some(&request.new_password),
         None,
@@ -438,7 +438,7 @@ pub async fn change_own_password(
     state.broadcast_user_invalidated(current_user_id).await;
 
     let _ = crate::db::audit_log::log_action(
-        &state.db_pool,
+        &state.db_writer,
         current_user_id,
         "password_self_reset",
         Some("user"),
@@ -472,7 +472,7 @@ pub async fn admin_reset_password(
     crate::validation::validate_password(&request.new_password).map_err(ApiError::bad_request)?;
 
     let updated = users::update_user(
-        &state.db_pool,
+        &state.db_writer,
         user_id,
         Some(&request.new_password),
         None,
@@ -489,7 +489,7 @@ pub async fn admin_reset_password(
     state.broadcast_user_invalidated(user_id).await;
 
     let _ = crate::db::audit_log::log_action(
-        &state.db_pool,
+        &state.db_writer,
         current_user_id,
         "password_admin_reset",
         Some("user"),
