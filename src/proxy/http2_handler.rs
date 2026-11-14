@@ -288,6 +288,8 @@ async fn handle_h2_connect_validated(
         crate::metrics::STATE_BACKEND_ERRORS
             .with_label_values(&["set_connection"])
             .inc();
+    } else {
+        ctx.conn_tracked = true;
     }
     crate::metrics::ACTIVE_CONNECTIONS
         .with_label_values(&["HTTP2"])

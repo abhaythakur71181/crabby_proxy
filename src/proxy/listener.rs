@@ -393,6 +393,8 @@ async fn handle_client(
         crate::metrics::STATE_BACKEND_ERRORS
             .with_label_values(&["set_connection"])
             .inc();
+    } else {
+        ctx.conn_tracked = true;
     }
     crate::metrics::CONNECTION_SETUP_DURATION
         .with_label_values(&[proto_label])

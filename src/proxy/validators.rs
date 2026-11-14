@@ -296,6 +296,29 @@ pub async fn validate_quota(ctx: &ConnectionContext, state: &AppState) -> Verdic
     }
 }
 
+/// Per-user limit decision.
+///
+/// Callers insert the connection record *before* counting (reserve, then
+/// check). With a linearizable backend that cannot overshoot: of N racing
+/// connections, the k-th insert is visible to its own count, so it sees at
+/// least k and only the first `max` can pass. The race can at worst
+/// over-reject a burst, never over-admit (#46).
+///
+/// If the record could not be stored (`self_tracked == false`) the count does
+/// not include this connection, so compare with `>=`; the old unconditional
+/// `>` let one extra connection through whenever `set_connection` failed.
+pub(crate) fn exceeds_connection_limit(
+    active_count: usize,
+    max_connections: usize,
+    self_tracked: bool,
+) -> bool {
+    if self_tracked {
+        active_count > max_connections
+    } else {
+        active_count >= max_connections
+    }
+}
+
 /// Enforce per-user concurrent connection limit.
 pub async fn validate_connection_limit(ctx: &ConnectionContext, state: &AppState) -> Verdict {
     if ctx.is_admin {
@@ -338,13 +361,73 @@ pub async fn validate_connection_limit(ctx: &ConnectionContext, state: &AppState
             None => 100,
         },
     };
-    // Note: the current connection is already tracked in state before this
-    // check runs, so we use `>` (not `>=`) to allow exactly `max_connections`.
-    if active_count > max_connections {
+    if exceeds_connection_limit(active_count, max_connections, ctx.conn_tracked) {
         return Verdict::Deny(format!(
             "User {} has {} active connections (max {})",
             uid, active_count, max_connections
         ));
     }
     Verdict::Allow
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exceeds_connection_limit;
+    use crate::state::backend::{ConnectionInfo, StateBackend};
+    use crate::state::memory::MemoryBackend;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn limit_counts_self_only_when_tracked() {
+        // Tracked: the count includes this connection.
+        assert!(!exceeds_connection_limit(3, 3, true));
+        assert!(exceeds_connection_limit(4, 3, true));
+        // Untracked: the count excludes it, so 3 others already fill max=3.
+        assert!(!exceeds_connection_limit(2, 3, false));
+        assert!(exceeds_connection_limit(3, 3, false));
+    }
+
+    /// #46: the reserve-then-count protocol never admits more than `max`
+    /// concurrent connections, however the inserts and counts interleave.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reserve_then_count_never_overshoots() {
+        const MAX: usize = 5;
+        let backend = Arc::new(MemoryBackend::new());
+        let admitted_now = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for i in 0..200u16 {
+            let backend = backend.clone();
+            let admitted_now = admitted_now.clone();
+            let peak = peak.clone();
+            tasks.push(tokio::spawn(async move {
+                let id = uuid::Uuid::new_v4();
+                let info = ConnectionInfo {
+                    id,
+                    client_addr: ([127, 0, 0, 1], 1000 + i).into(),
+                    target_addr: "example.com:443".into(),
+                    protocol: crate::proxy::protocol::ProxyProtocol::HTTP,
+                    state: crate::connection::ConnectionState::Active,
+                    user_id: Some(7),
+                    bytes_sent: 0,
+                    bytes_received: 0,
+                    created_at: 0,
+                };
+                backend.set_connection(id, info).await.unwrap();
+                let count = backend.count_user_connections(7).await.unwrap();
+                if !exceeds_connection_limit(count, MAX, true) {
+                    let now = admitted_now.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    tokio::task::yield_now().await;
+                    admitted_now.fetch_sub(1, Ordering::SeqCst);
+                }
+                backend.delete_connection(id).await.unwrap();
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+        assert!(peak.load(Ordering::SeqCst) <= MAX);
+    }
 }
