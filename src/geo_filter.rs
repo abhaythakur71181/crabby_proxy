@@ -9,7 +9,7 @@ pub struct GeoFilter {
 
 impl GeoFilter {
     /// Load GeoIP database from file
-    pub fn new(path: &str) -> Result<Self, maxminddb::MaxMindDBError> {
+    pub fn new(path: &str) -> Result<Self, maxminddb::MaxMindDbError> {
         let reader = Reader::open_readfile(path)?;
         Ok(Self { reader })
     }
@@ -19,13 +19,9 @@ impl GeoFilter {
         // Canonicalise so a dual-stack client (`::ffff:a.b.c.d`) is looked up
         // by its IPv4 address (#52).
         let ip = crate::ip_filter::canonical_ip(ip);
-        match self.reader.lookup::<geoip2::Country>(ip) {
-            Ok(result) => result
-                .country
-                .and_then(|c| c.iso_code)
-                .map(|s| s.to_uppercase()),
-            Err(_) => None,
-        }
+        let result = self.reader.lookup(ip).ok()?;
+        let country: geoip2::Country = result.decode().ok()??;
+        country.country.iso_code.map(|s| s.to_uppercase())
     }
 
     /// Check if an IP is allowed based on country allow/blocklists

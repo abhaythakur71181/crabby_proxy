@@ -1,0 +1,38 @@
+# Weekly dependency PRs. Minor/patch bumps are grouped per ecosystem so they
+# land as one reviewable PR; majors arrive individually because they usually
+# need code changes. Security updates are not grouped and are raised as soon
+# as an advisory is published (enable "Dependabot security updates" in the
+# repository settings).
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      cargo-minor:
+        update-types: [minor, patch]
+
+  - package-ecosystem: bun
+    directory: /webv2
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      webv2-minor:
+        update-types: [minor, patch]
+
+  # Actions are pinned to commit SHAs; Dependabot bumps the SHA and the
+  # trailing version comment together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        update-types: [minor, patch]
+
+# Base images (rust/debian in Dockerfile, bun/nginx in webv2/Dockerfile) are
+# selected through build ARGs, which Dependabot cannot follow; bump those by
+# hand, keeping RUST_VERSION >= the highest rust-version in Cargo.lock.

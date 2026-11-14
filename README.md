@@ -366,7 +366,7 @@ Runtime reload is supported via `POST /api/config/reload`.
 | `[authentication]` | Enable/disable, method, credentials, JWT secret/expiration |
 | `[protocols]` | Enable/disable individual protocols, auto-detect toggle |
 | `[features]` | Connection approval, reverse tunnels, tunnel port range, webhook URL/events |
-| `[state]` | Backend (memory/redis), Redis URL/pool/prefix |
+| `[state]` | Backend (memory/redis), Redis URL/pool/prefix. Deployments are single-instance; see [RUNBOOK](docs/RUNBOOK.md#scaling-single-instance-constraint) |
 | `[rate_limiting]` | Global enable, RPS, burst, ban duration |
 | `[filtering]` | IP allowlist/blocklist, geo-blocking, target domain allow/blocklists, access schedule |
 | `[logging]` | Level, format (json/pretty), file logging |
