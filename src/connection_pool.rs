@@ -121,10 +121,7 @@ impl ConnectionPool {
     /// Return a connection to the pool for future reuse.
     /// Only call this if the connection closed cleanly (no errors).
     pub fn return_connection(&self, addr: &str, stream: TcpStream) {
-        let mut entry = self
-            .pools
-            .entry(addr.to_string())
-            .or_insert_with(VecDeque::new);
+        let mut entry = self.pools.entry(addr.to_string()).or_default();
         let queue = entry.value_mut();
 
         // Don't exceed max idle connections per host

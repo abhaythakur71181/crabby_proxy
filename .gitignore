@@ -4,6 +4,9 @@
 *.db-shm
 *.db-wal
 
+# SQLite backup snapshots (scripts/backup-sqlite.sh, compose `backup` profile)
+/backups/
+
 # Logs
 *.log
 /logs/

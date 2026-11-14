@@ -125,7 +125,7 @@ export function SidebarContent({
                       {!collapsed && <span className="relative truncate">{item.label}</span>}
                       {!collapsed && "live" in item && item.live && (
                         <span className="relative ml-auto flex items-center gap-1 text-[10px] font-semibold text-success">
-                          <span className="size-1.5 animate-pulse-dot rounded-full bg-success" aria-hidden />
+                          <span className="size-1.5 animate-pulse-dot rounded-full bg-success motion-reduce:animate-none" aria-hidden />
                           LIVE
                         </span>
                       )}
