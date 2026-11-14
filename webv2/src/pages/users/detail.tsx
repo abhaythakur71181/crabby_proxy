@@ -9,7 +9,7 @@ import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { adminResetPassword, deleteUser, updateUser } from "@/api/endpoints";
 import type { Role } from "@/api/types";
-import { downloadCsv } from "@/lib/download";
+import { downloadCsv } from "@/lib/utils";
 import { formatDateTime, formatRelative } from "@/lib/format";
 import { generatePassword } from "@/lib/password";
 import {
@@ -464,10 +464,7 @@ function ResetPasswordDialog({
               variant="secondary"
               size="sm"
               onClick={() =>
-                downloadCsv(`user-${username}.csv`, [
-                  ["username", "password"],
-                  [username, password],
-                ])
+                downloadCsv(`user-${username}.csv`, ["username", "password"], [[username, password]])
               }
             >
               Download CSV

@@ -8,7 +8,7 @@ import { toast } from "sonner";
 import { createUser } from "@/api/endpoints";
 import type { Role } from "@/api/types";
 import { isAdminRole } from "@/lib/auth";
-import { downloadCsv } from "@/lib/download";
+import { downloadCsv } from "@/lib/utils";
 import { formatRelative } from "@/lib/format";
 import { generatePassword } from "@/lib/password";
 import { useInvalidate, useSession, useUsers, keys } from "@/hooks/queries";
@@ -359,8 +359,7 @@ function CreateUserDialog({
               <Button
                 variant="secondary"
                 onClick={() =>
-                  downloadCsv(`user-${created.username}.csv`, [
-                    ["username", "password"],
+                  downloadCsv(`user-${created.username}.csv`, ["username", "password"], [
                     [created.username, created.password],
                   ])
                 }
