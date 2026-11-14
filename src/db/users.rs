@@ -87,7 +87,15 @@ pub async fn get_user_by_id(pool: &SqlitePool, id: i64) -> Result<Option<User>, 
     Ok(user)
 }
 
-/// Verify user password
+/// Verify user password.
+///
+/// Does the same Argon2 work whether or not the username exists: on the
+/// not-found path it verifies against a fixed dummy hash, so response timing
+/// does not reveal which usernames exist (the generic "invalid credentials"
+/// message would otherwise be undone by a measurable timing gap).
+///
+/// On success, a hash made with older or different Argon2 parameters is
+/// transparently re-hashed with the current ones.
 pub async fn verify_password(
     pool: &SqlitePool,
     username: &str,
@@ -95,15 +103,55 @@ pub async fn verify_password(
 ) -> Result<Option<User>, sqlx::Error> {
     let user = get_user_by_username(pool, username).await?;
 
-    if let Some(user) = user {
-        if verify_password_hash(password, &user.password_hash).await {
-            Ok(Some(user))
-        } else {
-            Ok(None)
-        }
-    } else {
-        Ok(None)
+    let Some(user) = user else {
+        let _ = verify_password_hash(password, dummy_password_hash().await).await;
+        return Ok(None);
+    };
+    if !verify_password_hash(password, &user.password_hash).await {
+        return Ok(None);
     }
+    if needs_rehash(&user.password_hash) {
+        upgrade_password_hash(pool, &user, password).await;
+    }
+    Ok(Some(user))
+}
+
+/// Re-hash a verified password with the current parameters. Best effort: a
+/// failure just leaves the old (still valid) hash in place. The `WHERE` on the
+/// old hash avoids clobbering a password change that raced with this login.
+async fn upgrade_password_hash(pool: &SqlitePool, user: &User, password: &str) {
+    let new_hash = match hash_password(password).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!("Password re-hash for user {} failed: {}", user.id, e);
+            return;
+        }
+    };
+    match sqlx::query("UPDATE users SET password_hash = ? WHERE id = ? AND password_hash = ?")
+        .bind(&new_hash)
+        .bind(user.id)
+        .bind(&user.password_hash)
+        .execute(pool)
+        .await
+    {
+        Ok(_) => tracing::info!("Upgraded password hash parameters for user {}", user.id),
+        Err(e) => tracing::warn!("Storing re-hashed password for {} failed: {}", user.id, e),
+    }
+}
+
+/// A valid Argon2 hash of a random, never-disclosed password, made with the
+/// current parameters. Used only to equalise timing on the user-not-found
+/// path; nothing can ever verify against it.
+async fn dummy_password_hash() -> &'static str {
+    static DUMMY: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
+    DUMMY
+        .get_or_init(|| async {
+            let secret = generate_secure_password(32);
+            hash_password(&secret)
+                .await
+                .unwrap_or_else(|_| String::from("$argon2id$v=19$m=19456,t=2,p=1$invalid"))
+        })
+        .await
 }
 
 /// Update last login time
@@ -185,20 +233,62 @@ pub async fn ensure_root_admin(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
 }
 
 // Password hashing helpers
-async fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
+//
+// Argon2 parameters are pinned explicitly rather than taken from
+// `Argon2::default()`, so a change of crate defaults can never silently
+// weaken (or change) hashing. Values are the OWASP-recommended Argon2id
+// baseline (19 MiB, 2 passes, 1 lane), which is also what the 0.5 crate
+// default was when existing hashes were created. Raising them later is safe:
+// `verify_password` re-hashes on the next successful login.
+
+/// Argon2id memory cost in KiB.
+pub(crate) const ARGON2_M_COST: u32 = 19 * 1024;
+/// Argon2id iterations.
+pub(crate) const ARGON2_T_COST: u32 = 2;
+/// Argon2id parallelism.
+pub(crate) const ARGON2_P_COST: u32 = 1;
+
+/// The Argon2id instance used for every new password hash.
+pub(crate) fn argon2_hasher() -> Argon2<'static> {
+    let params = argon2::Params::new(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST, None)
+        .expect("pinned Argon2 parameters are valid");
+    Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
+}
+
+/// True if `hash` is not an Argon2id v19 hash with exactly the current
+/// parameters (and should therefore be re-hashed once the password is known).
+pub(crate) fn needs_rehash(hash: &str) -> bool {
+    let Ok(parsed) = PasswordHash::new(hash) else {
+        return false; // not a PHC string; nothing we can upgrade
+    };
+    if parsed.algorithm != argon2::Algorithm::Argon2id.ident() || parsed.version != Some(0x13) {
+        return true;
+    }
+    match argon2::Params::try_from(&parsed) {
+        Ok(p) => {
+            p.m_cost() != ARGON2_M_COST
+                || p.t_cost() != ARGON2_T_COST
+                || p.p_cost() != ARGON2_P_COST
+        }
+        Err(_) => true,
+    }
+}
+
+pub(crate) async fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
     let password = password.to_string();
     tokio::task::spawn_blocking(move || {
         use argon2::password_hash::rand_core::OsRng;
         let salt = SaltString::generate(&mut OsRng);
-        let argon2 = Argon2::default();
-        let password_hash = argon2.hash_password(password.as_bytes(), &salt)?;
+        let password_hash = argon2_hasher().hash_password(password.as_bytes(), &salt)?;
         Ok(password_hash.to_string())
     })
     .await
     .map_err(|_| argon2::password_hash::Error::Password)?
 }
 
-async fn verify_password_hash(password: &str, hash: &str) -> bool {
+/// Verify `password` against a PHC-format Argon2 hash. The parameters are
+/// read from the hash itself, so older hashes keep verifying.
+pub(crate) async fn verify_password_hash(password: &str, hash: &str) -> bool {
     let password = password.to_string();
     let hash = hash.to_string();
     tokio::task::spawn_blocking(move || {
@@ -206,7 +296,7 @@ async fn verify_password_hash(password: &str, hash: &str) -> bool {
             Ok(h) => h,
             Err(_) => return false,
         };
-        Argon2::default()
+        argon2_hasher()
             .verify_password(password.as_bytes(), &parsed_hash)
             .is_ok()
     })
@@ -596,6 +686,86 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_dummy_hash_is_a_real_current_hash() {
+        // The not-found path must cost a full Argon2 verify, so the dummy has
+        // to be a parseable hash with the current parameters.
+        let dummy = dummy_password_hash().await;
+        assert!(PasswordHash::new(dummy).is_ok());
+        assert!(!needs_rehash(dummy));
+        assert!(!verify_password_hash("password123", dummy).await);
+    }
+
+    #[tokio::test]
+    async fn test_new_hashes_use_pinned_params() {
+        let hash = hash_password("pw").await.unwrap();
+        assert!(
+            hash.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"),
+            "{}",
+            hash
+        );
+        assert!(!needs_rehash(&hash));
+    }
+
+    #[test]
+    fn test_needs_rehash_detects_other_params() {
+        use argon2::password_hash::rand_core::OsRng;
+        let weak = Argon2::new(
+            argon2::Algorithm::Argon2id,
+            argon2::Version::V0x13,
+            argon2::Params::new(8 * 1024, 1, 1, None).unwrap(),
+        )
+        .hash_password(b"pw", &SaltString::generate(&mut OsRng))
+        .unwrap()
+        .to_string();
+        assert!(needs_rehash(&weak));
+        let argon2i = Argon2::new(
+            argon2::Algorithm::Argon2i,
+            argon2::Version::V0x13,
+            argon2::Params::new(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST, None).unwrap(),
+        )
+        .hash_password(b"pw", &SaltString::generate(&mut OsRng))
+        .unwrap()
+        .to_string();
+        assert!(needs_rehash(&argon2i));
+        assert!(!needs_rehash("not-a-phc-string"));
+    }
+
+    #[tokio::test]
+    async fn test_verify_password_rehashes_outdated_hash() {
+        use argon2::password_hash::rand_core::OsRng;
+        let pool = setup_test_db().await;
+        let req = test_create_user_request("rehash_user");
+        let id = create_user(&pool, &req, None).await.unwrap();
+        let weak = Argon2::new(
+            argon2::Algorithm::Argon2id,
+            argon2::Version::V0x13,
+            argon2::Params::new(8 * 1024, 1, 1, None).unwrap(),
+        )
+        .hash_password(b"TestPass123!", &SaltString::generate(&mut OsRng))
+        .unwrap()
+        .to_string();
+        sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
+            .bind(&weak)
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(verify_password(&pool, "rehash_user", "TestPass123!")
+            .await
+            .unwrap()
+            .is_some());
+        let stored = get_user_by_id(&pool, id).await.unwrap().unwrap();
+        assert_ne!(stored.password_hash, weak);
+        assert!(!needs_rehash(&stored.password_hash));
+        // And the upgraded hash still verifies.
+        assert!(verify_password(&pool, "rehash_user", "TestPass123!")
+            .await
+            .unwrap()
+            .is_some());
     }
 
     // === update_last_login Tests ===
