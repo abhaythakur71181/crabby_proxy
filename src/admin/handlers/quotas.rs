@@ -60,7 +60,7 @@ async fn overlay_with_tracker(
     // Seed the tracker if needed so future relays share the same counter.
     let live_used = match state
         .quota_trackers
-        .get_or_seed(&state.db_pool, user_id)
+        .get_for_admission(&state.db_pool, user_id)
         .await
     {
         Ok(t) => Some(t.used()),

@@ -195,6 +195,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    // Background: with shared (Redis) quotas, push local byte counts and pull
+    // the global ones every second (#30).
+    if state.quota_trackers.is_shared() {
+        let trackers = state.quota_trackers.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(crate::quota_tracker::SHARED_SYNC_INTERVAL).await;
+                trackers.sync_all().await;
+            }
+        });
+    }
+
     // Background: evict idle per-user quota trackers so the registry does not
     // grow with every user ever seen (#30).
     {
@@ -202,6 +214,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(crate::quota_tracker::EVICT_SWEEP_INTERVAL).await;
+                trackers.sync_all().await;
                 let n = trackers.evict_idle(crate::quota_tracker::IDLE_EVICT_SECS);
                 if n > 0 {
                     tracing::debug!("quota tracker sweep: evicted {} idle entries", n);
@@ -299,6 +312,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // allocated ports. Without this, tunnel listeners kept accepting/forwarding
     // past "drain complete" and were only killed abruptly at process exit.
     state.shutdown().await;
+    // Push the last counted bytes to the shared quota counter (no-op with the
+    // memory backend), so a rolling restart does not lose them.
+    state.quota_trackers.sync_all().await;
 
     tracing::info!("Graceful shutdown complete");
     Ok(())

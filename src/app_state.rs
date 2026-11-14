@@ -106,7 +106,8 @@ pub struct AppState {
 
     // Live per-user quota tracker. Atomic byte counters seeded from the
     // database, mutated on the relay hot path so connections that exceed
-    // the limit mid-stream are torn down within one buffer iteration.
+    // the limit mid-stream are torn down within one buffer iteration. With
+    // the Redis backend the counts are shared across replicas.
     pub quota_trackers: Arc<crate::quota_tracker::QuotaTrackerRegistry>,
 
     // Parsed access-schedule cache: user_id -> parsed schedule (or None if
@@ -319,6 +320,21 @@ impl AppState {
             _ => (ip_rate_limiter, user_rate_limiter, login_rate_limiter),
         };
 
+        // Quotas: shared through Redis under the same condition as the rate
+        // limits, otherwise per-process (#30).
+        let quota_trackers = match (config.state.backend.as_str(), cache.as_ref()) {
+            ("redis", Some(layer)) => {
+                tracing::info!("Bandwidth quotas are shared across instances via Redis");
+                crate::quota_tracker::QuotaTrackerRegistry::with_redis(
+                    crate::quota_tracker::SharedQuotaStore::new(
+                        layer.connection(),
+                        &config.state.redis_key_prefix,
+                    ),
+                )
+            }
+            _ => crate::quota_tracker::QuotaTrackerRegistry::new(),
+        };
+
         let db_writer = crate::db::connection::writer_pool(
             &db_pool,
             std::time::Duration::from_secs(config.database.acquire_timeout_secs.max(1)),
@@ -351,7 +367,7 @@ impl AppState {
             shutdown_tx,
             usage_writer: crate::usage_writer::UsageWriter::spawn(db_writer),
             quota_cache: Arc::new(dashmap::DashMap::new()),
-            quota_trackers: Arc::new(crate::quota_tracker::QuotaTrackerRegistry::new()),
+            quota_trackers: Arc::new(quota_trackers),
             approval_cache: Arc::new(dashmap::DashMap::new()),
             parsed_schedule_cache: Arc::new(dashmap::DashMap::new()),
             auth_cache: crate::auth_cache::AuthCache::default(),
