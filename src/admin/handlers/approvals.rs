@@ -59,7 +59,7 @@ pub async fn create_approval(
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     let id = approvals::create_approval(
-        &state.db_pool,
+        &state.db_writer,
         payload.user_id,
         &payload.client_ip,
         current_user_id,
@@ -77,7 +77,7 @@ pub async fn create_approval(
 
     // Audit log
     let _ = crate::db::audit_log::log_action(
-        &state.db_pool,
+        &state.db_writer,
         current_user_id,
         "approval_created",
         Some("approval"),
@@ -190,7 +190,7 @@ pub async fn terminate_approval(
     let current_user_id = current_user.id;
 
     let terminated_user = approvals::terminate_approval(
-        &state.db_pool,
+        &state.db_writer,
         approval_id,
         current_user_id,
         &payload.reason,
@@ -208,7 +208,7 @@ pub async fn terminate_approval(
         state.invalidate_approval_cache(approved_user_id).await;
         // Audit log
         let _ = crate::db::audit_log::log_action(
-            &state.db_pool,
+            &state.db_writer,
             current_user_id,
             "approval_terminated",
             Some("approval"),

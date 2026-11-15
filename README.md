@@ -107,11 +107,32 @@ Quota checks and user lookups go through a cache-aside hierarchy:
 2. **DashMap** (in-process) -- quota check results (30s TTL), rate limit configs (60s TTL)
 3. **SQLite** (source of truth)
 
-Redis is **optional** -- the proxy falls back gracefully to DB-only mode if Redis is unavailable.
+Redis is **optional** with the default `memory` state backend -- the proxy falls back gracefully to DB-only mode if Redis is unavailable. With `[state] backend = "redis"` it is required (startup fails without it).
+
+### Scaling
+
+One instance (`backend = "memory"`) is the default and needs nothing else. Several replicas are supported **on one host**: set `backend = "redis"` (shared connection state, rate limits, bandwidth quotas, cache invalidation over pub/sub), mount the same SQLite file on a local volume into every replica, and put a load balancer in front. SQLite cannot be shared across hosts, so multi-host deployments are not supported yet. Writes go through one dedicated writer connection per process. Details, limits and the Redis-outage behaviour: [RUNBOOK, Scaling](docs/RUNBOOK.md#scaling).
 
 ### Metrics (Prometheus)
 
-Exposed at `GET /metrics` in Prometheus text format:
+Exposed at `GET /metrics` on the admin port in Prometheus text format.
+
+Access is secure by default:
+
+- With `[metrics] scrape_token` set (or `PROXY__METRICS__SCRAPE_TOKEN`), the
+  scraper must send `Authorization: Bearer <token>`. In Prometheus:
+  `authorization: { credentials: <token> }`.
+- Without a token, `/metrics` is served only when `server.admin_bind` is a
+  loopback address. On any other bind (including `0.0.0.0` in the Docker
+  image) it answers `403` unless `[metrics] allow_unauthenticated = true`,
+  which is meant for an admin port that a firewall or private network
+  already restricts.
+
+> **Breaking change:** before this, `/metrics` was served without
+> credentials on every bind. Deployments that scrape a non-loopback admin
+> bind (the Docker image binds `0.0.0.0:8081` inside the container) must set
+> `scrape_token` (recommended) or `allow_unauthenticated = true`.
+
 
 | Metric | Type | Labels |
 |--------|------|--------|
@@ -364,11 +385,11 @@ Runtime reload is supported via `POST /api/config/reload`.
 | Section | Controls |
 |---------|----------|
 | `[server]` | Bind addresses, max connections, TLS cert/key paths |
-| `[database]` | SQLite path, connection pool size |
+| `[database]` | SQLite path, read-pool size (writes use one dedicated writer connection), lock/acquire timeouts, usage retention |
 | `[authentication]` | Enable/disable, method, credentials, JWT secret/expiration |
 | `[protocols]` | Enable/disable individual protocols, auto-detect toggle |
 | `[features]` | Connection approval, reverse tunnels, tunnel port range, webhook URL/events |
-| `[state]` | Backend (memory/redis), Redis URL/pool/prefix. Deployments are single-instance; see [RUNBOOK](docs/RUNBOOK.md#scaling-single-instance-constraint) |
+| `[state]` | Backend (memory/redis), Redis URL/pool/prefix. `redis` is required for more than one replica; see [RUNBOOK](docs/RUNBOOK.md#scaling) |
 | `[rate_limiting]` | Global enable, RPS, burst, ban duration |
 | `[filtering]` | IP allowlist/blocklist, geo-blocking, target domain allow/blocklists, access schedule |
 | `[logging]` | Level, format (json/pretty), file logging |
@@ -401,7 +422,21 @@ Default ports:
 - Proxy: `0.0.0.0:8080`
 - Admin API: `127.0.0.1:8081`
 
-A `root_admin` account is auto-created on first run if it doesn't exist.
+A `root_admin` account named `root` is auto-created on first run if it doesn't
+exist. Its password is `CRABBY_ROOT_PASSWORD` if set; otherwise one is generated
+and printed to the terminal, or, when stderr is not a TTY (service, container),
+written to `initial_root_password.txt` (mode 0600) in the working directory.
+
+`config.example.toml` ships with empty credentials: an empty
+`authentication.password` / `admin.admin_password` disables that static
+credential, and an empty `jwt_secret` is replaced by a random key at boot. Set
+`CRABBY_BASIC_AUTH_PASSWORD`, `CRABBY_ADMIN_PASSWORD` and `CRABBY_JWT_SECRET`
+(or put Argon2 hashes in the file) to enable them. The admin API needs some
+admin credential: the `root` user, another database admin, or the static one.
+
+An unsafe configuration (weak or placeholder password, short JWT secret,
+unauthenticated admin API on a public bind, ...) is refused at startup with a
+single `error: ...` line on stderr and exit status 1.
 
 ---
 

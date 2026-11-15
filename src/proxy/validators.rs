@@ -323,13 +323,15 @@ async fn check_access_schedule(ctx: &ConnectionContext, state: &AppState) -> Ver
 
 // ─── Phase 4: Post-Setup (connection tracked, metrics active) ───────────────
 
-/// Check bandwidth quota against the live in-process tracker.
+/// Check bandwidth quota against the live tracker.
 ///
 /// The tracker is the single source of truth for quota state — it is
 /// seeded once from the database (`get_quota_stats`) and then mutated
 /// atomically by the relay loop, so admission decisions and in-flight
 /// enforcement always agree. There is no per-connection SUM() and no
-/// 30s staleness window.
+/// 30s staleness window. With the Redis backend the admission check first
+/// syncs with the shared counter, so usage on other replicas counts too
+/// (see `quota_tracker` for the bounds and the Redis-down behaviour).
 pub async fn validate_quota(ctx: &ConnectionContext, state: &AppState) -> Verdict {
     ctx.apply_admin_bypass(pipeline::RULE_QUOTA, check_quota(ctx, state).await)
 }
@@ -339,7 +341,11 @@ async fn check_quota(ctx: &ConnectionContext, state: &AppState) -> Verdict {
         Some(uid) => uid,
         None => return Verdict::Allow,
     };
-    match state.quota_trackers.get_or_seed(&state.db_pool, uid).await {
+    match state
+        .quota_trackers
+        .get_for_admission(&state.db_pool, uid)
+        .await
+    {
         Ok(tracker) => {
             if tracker.is_over() {
                 return Verdict::Deny(format!(
@@ -361,24 +367,15 @@ async fn check_quota(ctx: &ConnectionContext, state: &AppState) -> Verdict {
 /// Per-user limit decision.
 ///
 /// Callers insert the connection record *before* counting (reserve, then
-/// check). With a linearizable backend that cannot overshoot: of N racing
-/// connections, the k-th insert is visible to its own count, so it sees at
-/// least k and only the first `max` can pass. The race can at worst
-/// over-reject a burst, never over-admit (#46).
-///
-/// If the record could not be stored (`self_tracked == false`) the count does
-/// not include this connection, so compare with `>=`; the old unconditional
-/// `>` let one extra connection through whenever `set_connection` failed.
-pub(crate) fn exceeds_connection_limit(
-    active_count: usize,
-    max_connections: usize,
-    self_tracked: bool,
-) -> bool {
-    if self_tracked {
-        active_count > max_connections
-    } else {
-        active_count >= max_connections
-    }
+/// check), so `active_count` includes this connection. With a linearizable
+/// backend that cannot overshoot: of N racing connections, the k-th insert is
+/// visible to its own count, so it sees at least k and only the first `max`
+/// can pass. The race can at worst over-reject a burst, never over-admit
+/// (#46). This holds for the memory backend (one lock) and for Redis (atomic
+/// MULTI insert on a single server), on every path that admits a connection:
+/// the HTTP/1 + SOCKS listener, h2 CONNECT streams and h2 forward requests.
+pub(crate) fn exceeds_connection_limit(active_count: usize, max_connections: usize) -> bool {
+    active_count > max_connections
 }
 
 /// Enforce per-user concurrent connection limit.
@@ -394,6 +391,14 @@ async fn check_connection_limit(ctx: &ConnectionContext, state: &AppState) -> Ve
         Some(uid) => uid,
         None => return Verdict::Allow,
     };
+    // A connection whose record could not be stored is invisible to every
+    // other connection's count for its whole lifetime, so any number of them
+    // could pass side by side (#46). Fail closed, like a failed count below.
+    if !ctx.conn_tracked {
+        return Verdict::Deny(
+            "Connection tracking failed; cannot enforce connection limit (fail-closed)".to_string(),
+        );
+    }
     let active_count = match state.state.count_user_connections(uid).await {
         Ok(count) => count,
         Err(e) => {
@@ -427,7 +432,7 @@ async fn check_connection_limit(ctx: &ConnectionContext, state: &AppState) -> Ve
             None => 100,
         },
     };
-    if exceeds_connection_limit(active_count, max_connections, ctx.conn_tracked) {
+    if exceeds_connection_limit(active_count, max_connections) {
         return Verdict::Deny(format!(
             "User {} has {} active connections (max {})",
             uid, active_count, max_connections
@@ -445,13 +450,9 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn limit_counts_self_only_when_tracked() {
-        // Tracked: the count includes this connection.
-        assert!(!exceeds_connection_limit(3, 3, true));
-        assert!(exceeds_connection_limit(4, 3, true));
-        // Untracked: the count excludes it, so 3 others already fill max=3.
-        assert!(!exceeds_connection_limit(2, 3, false));
-        assert!(exceeds_connection_limit(3, 3, false));
+    fn limit_counts_include_self() {
+        assert!(!exceeds_connection_limit(3, 3));
+        assert!(exceeds_connection_limit(4, 3));
     }
 
     /// #46: the reserve-then-count protocol never admits more than `max`
@@ -482,7 +483,7 @@ mod tests {
                 };
                 backend.set_connection(id, info).await.unwrap();
                 let count = backend.count_user_connections(7).await.unwrap();
-                if !exceeds_connection_limit(count, MAX, true) {
+                if !exceeds_connection_limit(count, MAX) {
                     let now = admitted_now.fetch_add(1, Ordering::SeqCst) + 1;
                     peak.fetch_max(now, Ordering::SeqCst);
                     tokio::task::yield_now().await;
@@ -495,5 +496,30 @@ mod tests {
             t.await.unwrap();
         }
         assert!(peak.load(Ordering::SeqCst) <= MAX);
+    }
+
+    /// #46: a connection whose record could not be stored is invisible to
+    /// every other count, so it must not be admitted for a limited user.
+    #[tokio::test]
+    async fn untracked_connection_fails_closed() {
+        use crate::admin::test_support::{add_user, test_state};
+        use crate::db::models::Role;
+        let state = test_state().await;
+        let uid = add_user(&state, "limited", Role::User).await;
+        let addr = "127.0.0.1:4000".parse().unwrap();
+        let mut ctx =
+            crate::proxy::pipeline::ConnectionContext::new(addr, uuid::Uuid::new_v4(), &state)
+                .await;
+        ctx.user_id = Some(uid);
+
+        ctx.conn_tracked = false;
+        assert!(super::validate_connection_limit(&ctx, &state)
+            .await
+            .is_denied());
+
+        ctx.conn_tracked = true;
+        assert!(!super::validate_connection_limit(&ctx, &state)
+            .await
+            .is_denied());
     }
 }

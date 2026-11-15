@@ -72,6 +72,71 @@ pub async fn create_pool_with(
     Ok(pool)
 }
 
+/// Build the dedicated writer pool for `reader`'s database (#34).
+///
+/// SQLite (WAL) admits one writer at a time. When every pooled connection may
+/// write, concurrent writers each grab a connection and then spin in SQLite's
+/// busy handler (sleep-and-retry, not FIFO) waiting for the lock, starving
+/// readers of pool slots and failing with SQLITE_BUSY once `busy_timeout`
+/// runs out. A one-connection writer pool turns that into an orderly FIFO
+/// queue on pool acquisition: at most one write holds the lock per process,
+/// and readers keep the whole read pool.
+///
+/// The writer shares the reader's connect options (WAL, foreign keys,
+/// busy_timeout). It is lazy, so building it never fails. An in-memory
+/// database is private to its connection, so there the reader pool is reused
+/// and nothing changes.
+pub fn writer_pool(reader: &SqlitePool, acquire_timeout: Duration) -> SqlitePool {
+    if is_in_memory(reader) {
+        return reader.clone();
+    }
+    SqlitePoolOptions::new()
+        .max_connections(1)
+        .min_connections(0)
+        .acquire_timeout(acquire_timeout)
+        .connect_lazy_with((*reader.connect_options()).clone())
+}
+
+fn is_in_memory(pool: &SqlitePool) -> bool {
+    let name = pool.connect_options().get_filename().as_os_str().to_owned();
+    name.is_empty() || name == ":memory:"
+}
+
+/// Begin a write transaction on the writer pool, recording how long the
+/// caller waited for the writer connection.
+pub async fn begin_write(
+    writer: &SqlitePool,
+) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>, sqlx::Error> {
+    let started = std::time::Instant::now();
+    let tx = writer.begin().await;
+    crate::metrics::DB_WRITE_ACQUIRE.observe(started.elapsed().as_secs_f64());
+    if let Err(ref e) = tx {
+        note_contention(e);
+    }
+    tx
+}
+
+/// Count SQLite lock contention and pool exhaustion so they show up in
+/// `/metrics` (`proxy_db_contention_errors_total`). Other errors are ignored.
+pub fn note_contention(e: &sqlx::Error) {
+    let kind = match e {
+        sqlx::Error::PoolTimedOut => "pool_timeout",
+        sqlx::Error::Database(db) => {
+            // SQLite primary codes 5 (BUSY) and 6 (LOCKED); extended codes
+            // keep the primary code in the low byte.
+            let code = db.code().and_then(|c| c.parse::<i32>().ok()).unwrap_or(0);
+            match code & 0xff {
+                5 | 6 => "busy",
+                _ => return,
+            }
+        }
+        _ => return,
+    };
+    crate::metrics::DB_CONTENTION_ERRORS
+        .with_label_values(&[kind])
+        .inc();
+}
+
 /// Apply pending migrations. Migrations are forward-only (see
 /// docs/adr/0007-forward-only-migrations.md), so before applying any pending
 /// migration to an existing on-disk database a consistent snapshot is taken
@@ -150,6 +215,108 @@ async fn snapshot_before_migrate(
         snapshot.display()
     );
     Ok(Some(snapshot))
+}
+
+#[cfg(test)]
+mod writer_tests {
+    use super::*;
+
+    /// An in-memory database is per-connection, so the writer must be the
+    /// reader pool itself; a file database gets its own one-connection pool.
+    #[tokio::test]
+    async fn writer_pool_shape() {
+        let mem = create_pool("sqlite::memory:", 1).await.unwrap();
+        let w = writer_pool(&mem, Duration::from_secs(1));
+        run_migrations(&mem).await.unwrap();
+        // Same database: a table created through the reader is visible.
+        sqlx::query("SELECT COUNT(*) FROM users")
+            .fetch_one(&w)
+            .await
+            .unwrap();
+
+        let dir = std::env::temp_dir().join(format!("crabby-writer-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let url = format!("sqlite:{}", dir.join("w.db").display());
+        let reader = create_pool(&url, 4).await.unwrap();
+        let writer = writer_pool(&reader, Duration::from_secs(10));
+        assert_eq!(writer.options().get_max_connections(), 1);
+        assert!(!is_in_memory(&reader));
+        reader.close().await;
+        writer.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// #34: many concurrent writers through the writer pool queue on pool
+    /// acquisition and all succeed, even with a busy_timeout far shorter than
+    /// the total time spent writing. Readers keep working meanwhile.
+    #[tokio::test]
+    async fn concurrent_writes_queue_instead_of_busy_erroring() {
+        let dir = std::env::temp_dir().join(format!("crabby-writer-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let url = format!("sqlite:{}", dir.join("w.db").display());
+        let reader = create_pool_with(
+            &url,
+            PoolSettings {
+                max_connections: 4,
+                busy_timeout: Duration::from_millis(1),
+                acquire_timeout: Duration::from_secs(30),
+            },
+        )
+        .await
+        .unwrap();
+        sqlx::query("CREATE TABLE t (id INTEGER PRIMARY KEY, v BLOB)")
+            .execute(&reader)
+            .await
+            .unwrap();
+        let writer = writer_pool(&reader, Duration::from_secs(30));
+
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let w = writer.clone();
+            tasks.push(tokio::spawn(async move {
+                for _ in 0..10 {
+                    let mut tx = begin_write(&w).await?;
+                    sqlx::query("INSERT INTO t (v) VALUES (zeroblob(4096))")
+                        .execute(&mut *tx)
+                        .await?;
+                    tx.commit().await?;
+                }
+                Ok::<_, sqlx::Error>(())
+            }));
+        }
+        for _ in 0..20 {
+            sqlx::query("SELECT COUNT(*) FROM t")
+                .fetch_one(&reader)
+                .await
+                .unwrap();
+        }
+        for t in tasks {
+            t.await.unwrap().unwrap();
+        }
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM t")
+            .fetch_one(&reader)
+            .await
+            .unwrap();
+        assert_eq!(n, 160);
+        reader.close().await;
+        writer.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pool_timeout_is_counted() {
+        let before = crate::metrics::DB_CONTENTION_ERRORS
+            .with_label_values(&["pool_timeout"])
+            .get();
+        note_contention(&sqlx::Error::PoolTimedOut);
+        note_contention(&sqlx::Error::RowNotFound);
+        assert_eq!(
+            crate::metrics::DB_CONTENTION_ERRORS
+                .with_label_values(&["pool_timeout"])
+                .get(),
+            before + 1
+        );
+    }
 }
 
 #[cfg(test)]

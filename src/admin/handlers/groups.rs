@@ -29,7 +29,7 @@ pub async fn create_group(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateGroupRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let id = groups::create_group(&state.db_pool, &req.name, req.description.as_deref())
+    let id = groups::create_group(&state.db_writer, &req.name, req.description.as_deref())
         .await
         .map_err(|e| {
             tracing::error!("Failed to create group: {}", e);
@@ -79,7 +79,7 @@ pub async fn delete_group(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, ApiError> {
-    groups::delete_group(&state.db_pool, id)
+    groups::delete_group(&state.db_writer, id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to delete group: {}", e);
@@ -95,7 +95,7 @@ pub async fn add_member(
     Path(group_id): Path<i64>,
     Json(req): Json<AddMemberRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    groups::add_user_to_group(&state.db_pool, req.user_id, group_id)
+    groups::add_user_to_group(&state.db_writer, req.user_id, group_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to add member: {}", e);
@@ -110,7 +110,7 @@ pub async fn remove_member(
     State(state): State<Arc<AppState>>,
     Path((group_id, user_id)): Path<(i64, i64)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    groups::remove_user_from_group(&state.db_pool, user_id, group_id)
+    groups::remove_user_from_group(&state.db_writer, user_id, group_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to remove member: {}", e);
