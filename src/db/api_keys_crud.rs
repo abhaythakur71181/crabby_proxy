@@ -1,8 +1,5 @@
+use crate::db::api_keys::api_key_digest;
 use crate::db::models::ApiKey;
-use argon2::{
-    password_hash::{PasswordHasher, SaltString},
-    Argon2,
-};
 use base64::Engine;
 use sqlx::SqlitePool;
 
@@ -24,9 +21,8 @@ pub async fn create_api_key(
         let full_key = format!("{}.{}", prefix, secret);
         (full_key, prefix)
     };
-    let key_hash = hash_api_key(&full_key)
-        .await
-        .map_err(|e| sqlx::Error::Protocol(format!("API key hashing failed: {}", e)))?;
+    // 256-bit random secret: a SHA-256 digest is enough (see db::api_keys).
+    let key_hash = api_key_digest(&full_key);
     let now = chrono::Utc::now().timestamp();
     let expires_at = expires_in_days.map(|days| now + (days * 86400));
     let result = sqlx::query(
@@ -52,14 +48,34 @@ pub async fn create_api_key(
 }
 
 /// List all API keys for a user
-pub async fn list_api_keys(pool: &SqlitePool, user_id: i64) -> Result<Vec<ApiKey>, sqlx::Error> {
+pub async fn list_api_keys(
+    pool: &SqlitePool,
+    user_id: i64,
+    page: crate::db::Page,
+) -> Result<Vec<ApiKey>, sqlx::Error> {
     let keys = sqlx::query_as::<_, ApiKey>(
-        "SELECT * FROM api_keys WHERE user_id = ? ORDER BY created_at DESC",
+        "SELECT * FROM api_keys WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
     )
     .bind(user_id)
+    .bind(page.limit)
+    .bind(page.offset)
     .fetch_all(pool)
     .await?;
     Ok(keys)
+}
+
+/// Count a user's usable API keys (active and not yet expired).
+pub async fn count_active_api_keys(pool: &SqlitePool, user_id: i64) -> Result<i64, sqlx::Error> {
+    let now = chrono::Utc::now().timestamp();
+    let (count,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM api_keys WHERE user_id = ? AND is_active = 1 \
+         AND (expires_at IS NULL OR expires_at > ?)",
+    )
+    .bind(user_id)
+    .bind(now)
+    .fetch_one(pool)
+    .await?;
+    Ok(count)
 }
 
 /// Revoke an API key (soft delete)
@@ -74,19 +90,6 @@ pub async fn revoke_api_key(
         .execute(pool)
         .await?;
     Ok(())
-}
-
-async fn hash_api_key(key: &str) -> Result<String, argon2::password_hash::Error> {
-    let key = key.to_string();
-    tokio::task::spawn_blocking(move || {
-        use argon2::password_hash::rand_core::OsRng;
-        let salt = SaltString::generate(&mut OsRng);
-        let argon2 = Argon2::default();
-        let key_hash = argon2.hash_password(key.as_bytes(), &salt)?;
-        Ok(key_hash.to_string())
-    })
-    .await
-    .map_err(|_| argon2::password_hash::Error::Password)?
 }
 
 #[cfg(test)]
@@ -226,7 +229,9 @@ mod tests {
     #[tokio::test]
     async fn test_list_api_keys_empty() {
         let pool = setup_test_db().await;
-        let keys = list_api_keys(&pool, 1).await.unwrap();
+        let keys = list_api_keys(&pool, 1, crate::db::Page::default())
+            .await
+            .unwrap();
         assert!(keys.is_empty());
     }
 
@@ -243,7 +248,9 @@ mod tests {
             .await
             .unwrap();
 
-        let keys = list_api_keys(&pool, 1).await.unwrap();
+        let keys = list_api_keys(&pool, 1, crate::db::Page::default())
+            .await
+            .unwrap();
         assert_eq!(keys.len(), 3);
     }
 
@@ -269,11 +276,15 @@ mod tests {
             .await
             .unwrap();
 
-        let user1_keys = list_api_keys(&pool, 1).await.unwrap();
+        let user1_keys = list_api_keys(&pool, 1, crate::db::Page::default())
+            .await
+            .unwrap();
         assert_eq!(user1_keys.len(), 1);
         assert_eq!(user1_keys[0].name, "user1key");
 
-        let user2_keys = list_api_keys(&pool, 2).await.unwrap();
+        let user2_keys = list_api_keys(&pool, 2, crate::db::Page::default())
+            .await
+            .unwrap();
         assert_eq!(user2_keys.len(), 1);
         assert_eq!(user2_keys[0].name, "user2key");
     }
@@ -289,7 +300,9 @@ mod tests {
 
         revoke_api_key(&pool, api_key.id, 1).await.unwrap();
 
-        let keys = list_api_keys(&pool, 1).await.unwrap();
+        let keys = list_api_keys(&pool, 1, crate::db::Page::default())
+            .await
+            .unwrap();
         let revoked = keys.iter().find(|k| k.id == api_key.id).unwrap();
         assert!(!revoked.is_active);
     }
@@ -305,25 +318,22 @@ mod tests {
         revoke_api_key(&pool, api_key.id, 999).await.unwrap();
 
         // Key should still be active
-        let keys = list_api_keys(&pool, 1).await.unwrap();
+        let keys = list_api_keys(&pool, 1, crate::db::Page::default())
+            .await
+            .unwrap();
         let key = keys.iter().find(|k| k.id == api_key.id).unwrap();
         assert!(key.is_active);
     }
 
-    // === hash_api_key Tests ===
+    // === stored hash ===
 
     #[tokio::test]
-    async fn test_hash_api_key_produces_argon2_hash() {
-        let hash = hash_api_key("test_key_value").await.unwrap();
-        assert!(hash.starts_with("$argon2"));
-        assert!(hash.len() > 50);
-    }
-
-    #[tokio::test]
-    async fn test_hash_api_key_different_hashes_for_same_input() {
-        let hash1 = hash_api_key("same_key").await.unwrap();
-        let hash2 = hash_api_key("same_key").await.unwrap();
-        // Different salts should produce different hashes
-        assert_ne!(hash1, hash2);
+    async fn test_create_api_key_stores_digest_not_plaintext() {
+        let pool = setup_test_db().await;
+        let (full_key, api_key) = create_api_key(&pool, 1, Some("d".to_string()), None)
+            .await
+            .unwrap();
+        assert_eq!(api_key.key_hash, api_key_digest(&full_key));
+        assert!(!api_key.key_hash.contains(&full_key));
     }
 }

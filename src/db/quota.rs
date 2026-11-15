@@ -5,8 +5,8 @@ use sqlx::SqlitePool;
 /// Quota window period for bandwidth tracking.
 ///
 /// Only `Monthly` is supported: the schema has no per-user period column,
-/// the admin UI exposes no period selector, and `bandwidth_limit_mb` /
-/// `monthly_bandwidth_quota` are both monthly by definition. Kept as an
+/// the admin UI exposes no period selector, and `monthly_bandwidth_quota`
+/// (surfaced in the API as `bandwidth_limit_mb`) is monthly by definition. Kept as an
 /// enum (single variant) so the JSON shape of `QuotaStats.period` stays
 /// stable for the dashboard, and so adding daily/weekly later is a
 /// schema-and-UI change rather than a type change.
@@ -47,24 +47,12 @@ pub struct QuotaStats {
 pub async fn get_quota_stats(pool: &SqlitePool, user_id: i64) -> Result<QuotaStats, sqlx::Error> {
     let period = QuotaPeriod::Monthly;
     let window_start = period.window_start();
-    // The limit lives in two places historically:
-    //   * `monthly_bandwidth_quota` (bytes, optional) — added by migration 006
-    //     and exposed via the dedicated PUT /api/users/:id/quota endpoint.
-    //   * `bandwidth_limit_mb` (megabytes, NOT NULL, default 1000) — set by
-    //     the create/update user form in the admin UI. A value of 0 means
-    //     "unlimited" in the UI.
-    //
-    // The two were never wired together: the UI writes only `bandwidth_limit_mb`
-    // while the quota tracker reads only `monthly_bandwidth_quota`, so users
-    // who set their limit through the normal admin UI ended up with an
-    // unenforceable quota. Resolve them by preferring the explicit byte value
-    // when set, and otherwise converting `bandwidth_limit_mb` to bytes
-    // (treating 0 as "no limit").
-    let row: (Option<i64>, i64, i64) = sqlx::query_as(
+    // `monthly_bandwidth_quota` (bytes, NULL = unlimited) is the single source
+    // of truth; migration 017 folded the legacy `bandwidth_limit_mb` into it.
+    let row: (Option<i64>, i64) = sqlx::query_as(
         r#"
         SELECT
-            monthly_bandwidth_quota as quota_bytes_explicit,
-            bandwidth_limit_mb as quota_mb_legacy,
+            monthly_bandwidth_quota,
             COALESCE((SELECT SUM(bytes_sent + bytes_received) FROM usage WHERE user_id = ? AND started_at >= ?), 0) as used_bytes
         FROM users
         WHERE id = ?
@@ -75,12 +63,8 @@ pub async fn get_quota_stats(pool: &SqlitePool, user_id: i64) -> Result<QuotaSta
     .bind(user_id)
     .fetch_one(pool)
     .await?;
-    let quota_bytes: Option<i64> = match row.0 {
-        Some(b) if b > 0 => Some(b),
-        _ if row.1 > 0 => Some(row.1.saturating_mul(1024 * 1024)),
-        _ => None, // 0 or NULL on both => unlimited
-    };
-    let used_bytes = row.2;
+    let quota_bytes = row.0.filter(|b| *b > 0);
+    let used_bytes = row.1;
     let remaining_bytes = quota_bytes.map(|q| (q - used_bytes).max(0));
     let percentage_used = quota_bytes.map(|q| {
         if q > 0 {
@@ -98,14 +82,14 @@ pub async fn get_quota_stats(pool: &SqlitePool, user_id: i64) -> Result<QuotaSta
     })
 }
 
-/// Update user's quota
+/// Update user's quota (bytes; `None` or a non-positive value = unlimited).
 pub async fn update_quota(
     pool: &SqlitePool,
     user_id: i64,
     quota_bytes: Option<i64>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE users SET monthly_bandwidth_quota = ? WHERE id = ?")
-        .bind(quota_bytes)
+        .bind(quota_bytes.filter(|b| *b > 0))
         .bind(user_id)
         .execute(pool)
         .await?;
@@ -124,7 +108,6 @@ mod tests {
             CREATE TABLE users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL UNIQUE,
-                bandwidth_limit_mb INTEGER NOT NULL DEFAULT 0,
                 monthly_bandwidth_quota INTEGER
             )
             "#,

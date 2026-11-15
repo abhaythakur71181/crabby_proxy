@@ -3,6 +3,47 @@ use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::str::FromStr;
 
+/// Canonicalise a client address: an IPv4-mapped IPv6 address
+/// (`::ffff:a.b.c.d`) is folded to its plain IPv4 form. On a dual-stack
+/// (`[::]`) listener every IPv4 client arrives in the mapped form; without
+/// this, IP / geo / approval rules keyed on the IPv4 address silently fail to
+/// match (#52). IPv4-compatible (`::a.b.c.d`, deprecated) addresses are left
+/// alone, matching `IpAddr::to_canonical`.
+pub fn canonical_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => ip,
+        },
+        IpAddr::V4(_) => ip,
+    }
+}
+
+/// Canonicalise the IP part of a socket address (port unchanged).
+pub fn canonical_socket_addr(addr: std::net::SocketAddr) -> std::net::SocketAddr {
+    std::net::SocketAddr::new(canonical_ip(addr.ip()), addr.port())
+}
+
+/// Family-tolerant CIDR membership. The address is canonicalised first; an
+/// IPv4 address additionally matches an IPv6 network written in mapped form
+/// (`::ffff:10.0.0.0/104`), so rules match whichever spelling the operator
+/// used. A general IPv6 network such as `::/0` does NOT capture IPv4 clients:
+/// only networks lying entirely inside `::ffff:0:0/96` do.
+pub fn net_contains(net: &IpNet, ip: IpAddr) -> bool {
+    let ip = canonical_ip(ip);
+    if net.contains(&ip) {
+        return true;
+    }
+    match (net, ip) {
+        (IpNet::V6(n6), IpAddr::V4(v4)) => {
+            n6.prefix_len() >= 96
+                && n6.network().to_ipv4_mapped().is_some()
+                && n6.contains(&v4.to_ipv6_mapped())
+        }
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
@@ -48,14 +89,14 @@ impl IpFilter {
         match self.mode {
             FilterMode::BlockList => {
                 // Block mode: deny if in block_list
-                !self.block_list.iter().any(|net| net.contains(&ip))
+                !self.block_list.iter().any(|net| net_contains(net, ip))
             }
             FilterMode::AllowList => {
                 // Allow mode: allow only if in allow_list.
                 // An empty allow-list denies all (fail-closed): allowlist mode
                 // means deny-by-default, so an unpopulated / wiped list must not
                 // silently allow every client.
-                self.allow_list.iter().any(|net| net.contains(&ip))
+                self.allow_list.iter().any(|net| net_contains(net, ip))
             }
         }
     }
@@ -440,5 +481,76 @@ mod tests {
         )
         .unwrap();
         assert!(filter.is_allowed("10.0.1.0".parse().unwrap()));
+    }
+
+    // === IPv4-mapped IPv6 normalisation (#52) ===
+
+    fn mapped(v4: &str) -> IpAddr {
+        let a: std::net::Ipv4Addr = v4.parse().unwrap();
+        IpAddr::V6(a.to_ipv6_mapped())
+    }
+
+    #[test]
+    fn test_canonical_ip_folds_mapped_only() {
+        assert_eq!(
+            canonical_ip(mapped("1.2.3.4")),
+            "1.2.3.4".parse::<IpAddr>().unwrap()
+        );
+        let v6: IpAddr = "2001:db8::1".parse().unwrap();
+        assert_eq!(canonical_ip(v6), v6);
+        let v4: IpAddr = "8.8.8.8".parse().unwrap();
+        assert_eq!(canonical_ip(v4), v4);
+        let sa: std::net::SocketAddr = "[::ffff:10.1.2.3]:4444".parse().unwrap();
+        assert_eq!(
+            canonical_socket_addr(sa),
+            "10.1.2.3:4444".parse::<std::net::SocketAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_block_list_matches_mapped_client() {
+        let filter = IpFilter::new(
+            FilterMode::BlockList,
+            vec!["192.168.1.0/24".to_string(), "10.0.0.5/32".to_string()],
+            vec![],
+        )
+        .unwrap();
+        assert!(!filter.is_allowed(mapped("192.168.1.100")));
+        assert!(!filter.is_allowed(mapped("10.0.0.5")));
+        assert!(filter.is_allowed(mapped("8.8.8.8")));
+    }
+
+    #[test]
+    fn test_allow_list_matches_mapped_client() {
+        let filter = IpFilter::new(
+            FilterMode::AllowList,
+            vec![],
+            vec!["10.0.0.0/8".to_string()],
+        )
+        .unwrap();
+        assert!(filter.is_allowed(mapped("10.9.9.9")));
+        assert!(!filter.is_allowed(mapped("11.0.0.1")));
+    }
+
+    #[test]
+    fn test_mapped_form_rule_matches_plain_v4_client() {
+        let filter = IpFilter::new(
+            FilterMode::BlockList,
+            vec!["::ffff:10.0.0.0/104".to_string()],
+            vec![],
+        )
+        .unwrap();
+        assert!(!filter.is_allowed("10.1.1.1".parse().unwrap()));
+        assert!(!filter.is_allowed(mapped("10.1.1.1")));
+        assert!(filter.is_allowed("11.1.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_generic_v6_net_does_not_capture_v4_clients() {
+        let filter =
+            IpFilter::new(FilterMode::BlockList, vec!["::/0".to_string()], vec![]).unwrap();
+        assert!(filter.is_allowed("8.8.8.8".parse().unwrap()));
+        assert!(filter.is_allowed(mapped("8.8.8.8")));
+        assert!(!filter.is_allowed("2001:db8::1".parse().unwrap()));
     }
 }

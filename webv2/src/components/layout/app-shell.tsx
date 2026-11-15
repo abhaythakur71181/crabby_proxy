@@ -2,11 +2,12 @@
 // page outlet with route transitions. Route guards live in app.tsx.
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { AnimatePresence, motion } from "motion/react";
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useState } from "react";
 import { Outlet, useLocation } from "react-router";
 import { cn } from "@/lib/utils";
 import { useNavChords } from "@/hooks/use-hotkeys";
 import { PageTransition } from "@/components/motion";
+import { PageErrorBoundary } from "@/components/ui/error-boundary";
 import { Skeleton } from "@/components/ui/states";
 import { CommandPalette } from "./command-palette";
 import { SidebarContent } from "./sidebar";
@@ -22,8 +23,13 @@ export function AppShell() {
   const [mobileOpen, setMobileOpen] = useState(false);
   useNavChords(true);
 
-  // Close the mobile sheet on navigation.
-  useEffect(() => setMobileOpen(false), [location.pathname]);
+  // Close the mobile sheet on navigation (state adjusted during render rather
+  // than in an effect, so the stale sheet never paints).
+  const [navPath, setNavPath] = useState(location.pathname);
+  if (navPath !== location.pathname) {
+    setNavPath(location.pathname);
+    setMobileOpen(false);
+  }
 
   const toggleCollapse = () => {
     setCollapsed((c) => {
@@ -80,22 +86,27 @@ export function AppShell() {
         <main className="mx-auto w-full max-w-[1400px] flex-1 px-4 py-6 md:px-6">
           <AnimatePresence mode="wait" initial={false}>
             <PageTransition key={location.pathname}>
-              {/* Suspense inside the shell: chrome stays put while a route
-                  chunk loads; the page area shows skeletons. */}
-              <Suspense
-                fallback={
-                  <div className="space-y-4" aria-busy>
-                    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-                      {[0, 1, 2, 3].map((i) => (
-                        <Skeleton key={i} className="h-24" />
-                      ))}
+              {/* A page that throws (or whose chunk fails to load) shows an
+                  error panel inside the shell instead of blanking the app;
+                  navigating elsewhere resets it. */}
+              <PageErrorBoundary resetKey={location.pathname}>
+                {/* Suspense inside the shell: chrome stays put while a route
+                    chunk loads; the page area shows skeletons. */}
+                <Suspense
+                  fallback={
+                    <div className="space-y-4" aria-busy>
+                      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                        {[0, 1, 2, 3].map((i) => (
+                          <Skeleton key={i} className="h-24" />
+                        ))}
+                      </div>
+                      <Skeleton className="h-64" />
                     </div>
-                    <Skeleton className="h-64" />
-                  </div>
-                }
-              >
-                <Outlet />
-              </Suspense>
+                  }
+                >
+                  <Outlet />
+                </Suspense>
+              </PageErrorBoundary>
             </PageTransition>
           </AnimatePresence>
         </main>

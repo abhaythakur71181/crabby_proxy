@@ -12,7 +12,7 @@ import {
   Users,
   Waypoints,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import { fillTimeseriesGaps } from "@/lib/utils";
 import { formatBytes, formatCompact, formatDuration, formatRelative, humanizeAction, splitHostPort } from "@/lib/format";
 import {
@@ -24,6 +24,7 @@ import {
   useUserDirectory,
 } from "@/hooks/queries";
 import { useLiveConnections } from "@/hooks/use-live-connections";
+import { useNow } from "@/hooks/use-now";
 import { AreaChart, BarList, Donut } from "@/components/charts";
 import { Stagger, StaggerItem } from "@/components/motion";
 import { Panel, PanelHeader } from "@/components/ui/card";
@@ -42,16 +43,11 @@ export function DashboardPage() {
   const resolveUser = useUserDirectory();
 
   // Uptime ticks locally between polls so it feels alive.
-  const [tick, setTick] = useState(0);
-  useEffect(() => {
-    const t = setInterval(() => setTick((v) => v + 1), 1000);
-    return () => clearInterval(t);
-  }, []);
+  const now = useNow(1000);
   const uptime =
     dash.data != null
-      ? dash.data.uptime_seconds + Math.floor((Date.now() - dash.dataUpdatedAt) / 1000)
+      ? dash.data.uptime_seconds + Math.max(0, Math.floor((now - dash.dataUpdatedAt) / 1000))
       : null;
-  void tick;
 
   const traffic = useMemo(() => {
     if (!ts.data) return [];

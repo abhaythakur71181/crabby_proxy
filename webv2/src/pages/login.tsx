@@ -6,7 +6,7 @@ import { Eye, EyeOff } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router";
 import { login } from "@/api/endpoints";
-import { isAdminRole, sessionFromToken, setSession } from "@/lib/auth";
+import { isAdminRole, sessionFromServer, setSession } from "@/lib/auth";
 import { useSession } from "@/hooks/queries";
 import { Field, Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -33,9 +33,8 @@ export function LoginPage() {
     setError(null);
     try {
       const res = await login(username.trim(), password);
-      const s = sessionFromToken(res.token, res.role);
-      if (!s) throw new Error("Received a malformed token");
-      setSession(s);
+      const s = sessionFromServer(res);
+      setSession(s, res.csrf_token ?? null);
       const from = (location.state as { from?: string } | null)?.from;
       navigate(from ?? (isAdminRole(s.role) ? "/dashboard" : "/account"), { replace: true });
     } catch (err) {

@@ -5,8 +5,10 @@ import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { closeTunnel, createTunnel } from "@/api/endpoints";
+import { ApiError } from "@/api/http";
 import type { TunnelInfo } from "@/api/types";
 import { formatBytes, formatRelative, serviceTypeLabel } from "@/lib/format";
+import { tunnelTargetError } from "@/lib/ip";
 import { keys, useConfig, useInvalidate, useTunnels } from "@/hooks/queries";
 import { Stagger, StaggerItem, AnimatedNumber } from "@/components/motion";
 import { ConfirmDialog, Modal } from "@/components/ui/dialog";
@@ -199,28 +201,47 @@ function CreateTunnelDialog({
   const [serviceType, setServiceType] = useState("web");
   const [port, setPort] = useState("");
   const [target, setTarget] = useState("");
+  const [targetTouched, setTargetTouched] = useState(false);
+  // The API's reason for refusing the tunnel (400: missing/invalid target,
+  // 403: internal target not in features.tunnel_allowed_targets).
+  const [apiError, setApiError] = useState<string | null>(null);
+  // Don't carry a previous attempt's refusal into a reopened dialog.
+  const [wasOpen, setWasOpen] = useState(open);
+  if (wasOpen !== open) {
+    setWasOpen(open);
+    if (open) setApiError(null);
+  }
 
   const portNum = port.trim() === "" ? undefined : Number(port);
   const portError =
     portNum !== undefined && (Number.isNaN(portNum) || portNum < 1024 || portNum > 65535)
       ? "Port must be 1024–65535 (or empty for auto-allocation)"
       : null;
+  const targetError = tunnelTargetError(target);
 
   const create = useMutation({
     mutationFn: () =>
       createTunnel({
         service_type: serviceType,
         port: portNum,
-        target_addr: target.trim() || undefined,
+        target_addr: target.trim(),
       }),
+    onMutate: () => setApiError(null),
     onSuccess: (t) => {
       toast.success(`Tunnel listening on :${t.listen_port}`);
       onOpenChange(false);
       setPort("");
       setTarget("");
+      setTargetTouched(false);
       onCreated();
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: (e: Error) => {
+      if (e instanceof ApiError && (e.status === 400 || e.status === 403)) {
+        setApiError(e.message);
+      } else {
+        toast.error(e.message);
+      }
+    },
   });
 
   return (
@@ -237,7 +258,7 @@ function CreateTunnelDialog({
           <Button
             variant="primary"
             loading={create.isPending}
-            disabled={!!portError}
+            disabled={!!portError || !!targetError}
             onClick={() => create.mutate()}
           >
             Create tunnel
@@ -270,16 +291,34 @@ function CreateTunnelDialog({
             />
           )}
         </Field>
-        <Field label="Target address" hint="host:port the tunnel forwards to">
+        <Field
+          label="Target address"
+          hint="ip:port the tunnel forwards to. Internal addresses must be listed in features.tunnel_allowed_targets."
+          error={targetTouched ? targetError : null}
+        >
           {(id) => (
             <Input
               id={id}
+              required
               value={target}
-              onChange={(e) => setTarget(e.target.value)}
-              placeholder="127.0.0.1:5432"
+              onChange={(e) => {
+                setTarget(e.target.value);
+                setApiError(null);
+              }}
+              onBlur={() => setTargetTouched(true)}
+              placeholder="203.0.113.10:5432"
+              aria-invalid={targetTouched && !!targetError}
             />
           )}
         </Field>
+        {apiError && (
+          <p
+            role="alert"
+            className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-[12.5px] text-danger"
+          >
+            {apiError}
+          </p>
+        )}
       </div>
     </Modal>
   );

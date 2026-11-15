@@ -41,6 +41,7 @@ reserved for the backend liveness endpoint (proxied).
 ```bash
 bun run build        # typecheck + production bundle → dist/
 bun run typecheck    # tsc only
+bun run test         # unit tests (bun test, *.test.ts)
 bun run preview      # serve dist/ locally
 ```
 
@@ -48,6 +49,20 @@ bun run preview      # serve dist/ locally
 cross-origin admin API; leave it empty and front the app with a proxy
 (the bundled nginx config does this) for a same-origin setup — no CORS
 configuration needed on the backend.
+
+### Sessions
+
+Sign-in uses an `HttpOnly; Secure; SameSite=Strict` cookie set by the
+admin API; the bundle never sees the session token, and state-changing
+requests carry a per-session `X-CSRF-Token`. Consequences for deployment:
+
+- Serve the console over HTTPS (or `http://localhost`). Browsers drop
+  `Secure` cookies on plain-HTTP origins; for a trusted plain-HTTP network
+  set `[admin] session_cookie_secure = false` on the backend.
+- With `VITE_API_BASE_URL`, the API must be on the same site as the
+  console (e.g. `admin.example.com` and `api.example.com`), because
+  `SameSite=Strict` cookies are not sent cross-site, and its origin must be
+  listed in `[admin] cors_origins`.
 
 ## Deploy
 

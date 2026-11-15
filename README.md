@@ -34,7 +34,9 @@ Three independent rate limiters, all using the `governor` crate:
 | **User** | Per authenticated user (configurable per-user) | `DashMap` + cached config | 10 rps / 20 burst |
 | **Login** | Per IP on `/api/login` | `RwLock<LruCache>` (bounded) | 5/min / 10 burst |
 
-IPv4-mapped IPv6 addresses (`::ffff:x.x.x.x`) are normalized to prevent bypass.
+IPv4-mapped IPv6 addresses (`::ffff:x.x.x.x`) are normalized to plain IPv4 once at
+connection ingress, so the IP filter, geo filter, connection approvals, rate limiters,
+access log and usage records all see the same address on a dual-stack (`[::]`) bind.
 
 ### IP Filtering
 
@@ -48,21 +50,24 @@ IPv4-mapped IPv6 addresses (`::ffff:x.x.x.x`) are normalized to prevent bypass.
 - **MaxMind GeoLite2** database integration via `maxminddb` crate
 - Country-level **allowlist** and **blocklist**
 - Configurable via `geoip_database_path` in `[filtering]`
-- Fail-open for unknown IPs (no GeoIP data = allowed)
+- IPs the database cannot classify are allowed in blocklist mode but denied when an `allowed_countries` allowlist is set
+- Fail-closed when misconfigured: with `geo_blocking_enabled = true` the proxy refuses to start if the database path is unset or unloadable (`proxy_geo_filter_loaded` gauge reports load state)
 
 ### Target Domain Filtering
 
 - **Global allowlist/blocklist** in config (glob patterns: `*.example.com`, `api.github.com`)
 - **Per-user allowlist/blocklist** in DB (JSON arrays)
 - **Union logic**: global blocklist → per-user blocklist → union(global + per-user allowlists)
-- Admins bypass all restrictions
+- A per-user list that is not a valid JSON array of strings denies the target (fail-closed)
+- Connections without a DB user (auth disabled / config-file credential) are still checked against the global lists
+- Admins bypass the filter if `target_filter` is in `admin_bypass_rules` (see [Admin bypass](#admin-bypass))
 
 ### Time-Based Access Control
 
 - **Per-user access schedules** (JSON: `{"days":["mon","tue"...],"start_hour":9,"end_hour":18}`)
 - **Global default schedule** in config as fallback
 - Supports overnight ranges (e.g., 22:00-06:00)
-- Admins bypass schedule restrictions
+- Admins bypass schedule restrictions if `access_schedule` is in `admin_bypass_rules`
 
 ### Quota & Usage Tracking
 
@@ -82,7 +87,17 @@ IPv4-mapped IPv6 addresses (`::ffff:x.x.x.x`) are normalized to prevent bypass.
 - IP-based approval grants for non-admin users
 - Time-limited approvals with termination tracking
 - Enforced in proxy flow when `connection_approval` is enabled
-- Admins bypass approval checks; fail-closed on DB errors
+- Admins bypass approval checks if `approval` is in `admin_bypass_rules`; fail-closed on DB errors
+
+### Admin bypass
+
+Connections authenticated as `admin` / `root_admin` may skip post-auth rules listed in
+`[filtering] admin_bypass_rules` (default: all of `socks4_disabled`, `allowed_protocols`,
+`approval`, `user_rate_limit`, `target_filter`, `access_schedule`, `quota`,
+`connection_limit`). The rules are still evaluated for admins; whenever one would have
+denied the connection the bypass is logged on the `audit` target and counted in
+`proxy_admin_bypass_total{rule}`. Remove a rule from the list to hold admins to it.
+Pre-auth rules (IP filter, geo, IP rate limit) and the SSRF egress guard always apply.
 
 ### Caching (Three-Tier)
 
@@ -92,11 +107,32 @@ Quota checks and user lookups go through a cache-aside hierarchy:
 2. **DashMap** (in-process) -- quota check results (30s TTL), rate limit configs (60s TTL)
 3. **SQLite** (source of truth)
 
-Redis is **optional** -- the proxy falls back gracefully to DB-only mode if Redis is unavailable.
+Redis is **optional** with the default `memory` state backend -- the proxy falls back gracefully to DB-only mode if Redis is unavailable. With `[state] backend = "redis"` it is required (startup fails without it).
+
+### Scaling
+
+One instance (`backend = "memory"`) is the default and needs nothing else. Several replicas are supported **on one host**: set `backend = "redis"` (shared connection state, rate limits, bandwidth quotas, cache invalidation over pub/sub), mount the same SQLite file on a local volume into every replica, and put a load balancer in front. SQLite cannot be shared across hosts, so multi-host deployments are not supported yet. Writes go through one dedicated writer connection per process. Details, limits and the Redis-outage behaviour: [RUNBOOK, Scaling](docs/RUNBOOK.md#scaling).
 
 ### Metrics (Prometheus)
 
-Exposed at `GET /metrics` in Prometheus text format:
+Exposed at `GET /metrics` on the admin port in Prometheus text format.
+
+Access is secure by default:
+
+- With `[metrics] scrape_token` set (or `PROXY__METRICS__SCRAPE_TOKEN`), the
+  scraper must send `Authorization: Bearer <token>`. In Prometheus:
+  `authorization: { credentials: <token> }`.
+- Without a token, `/metrics` is served only when `server.admin_bind` is a
+  loopback address. On any other bind (including `0.0.0.0` in the Docker
+  image) it answers `403` unless `[metrics] allow_unauthenticated = true`,
+  which is meant for an admin port that a firewall or private network
+  already restricts.
+
+> **Breaking change:** before this, `/metrics` was served without
+> credentials on every bind. Deployments that scrape a non-loopback admin
+> bind (the Docker image binds `0.0.0.0:8081` inside the container) must set
+> `scrape_token` (recommended) or `allow_unauthenticated = true`.
+
 
 | Metric | Type | Labels |
 |--------|------|--------|
@@ -125,7 +161,7 @@ Exposed at `GET /metrics` in Prometheus text format:
 
 ### Alerting Webhooks
 
-- Configurable webhook URL for event notifications
+- Configurable webhook URL for event notifications (https only; internal targets refused unless `webhook_allow_private_targets`; client IPs / destinations stripped unless `webhook_include_pii`; redirects not followed)
 - Fire-and-forget delivery via `reqwest` with 5s timeout
 - Event filtering: `quota_exceeded`, `rate_limit`, `auth_failure`, etc.
 
@@ -140,6 +176,14 @@ Exposed at `GET /metrics` in Prometheus text format:
 - Default: human-readable `tracing-subscriber` output
 - Production: `--log-format json` for structured JSON logs (ELK/Loki compatible)
 - Includes target module and thread IDs in JSON mode
+
+### Access Log & Privacy
+
+- One `access_log`-target event per proxied connection: client IP, destination `host:port`, protocol, user id, bytes, duration, status. This amounts to per-user browsing history, so treat it as personal data
+- `[logging] access_log_enabled = false` turns it off; `access_log_client_ip = "truncated"` (IPv4 /24, IPv6 /48) or `"omit"` reduces the client IP (default `"full"`)
+- Events share the process log output: drop or route them with `RUST_LOG` (e.g. `info,access_log=off`) or your collector, and set retention there
+- Security decisions (denials, admin bypasses, SSRF blocks) are logged separately on the `audit` target
+- Usage rows in SQLite also hold client IP + destination; they are purged after `[database] usage_retention_days` (default 90)
 
 ### Graceful Shutdown
 
@@ -209,7 +253,8 @@ Exposed at `GET /metrics` in Prometheus text format:
 |--------|------|-------------|
 | `GET` | `/health` | Health check (status, uptime, version) |
 | `GET` | `/metrics` | Prometheus metrics |
-| `POST` | `/api/login` | Login, returns JWT token |
+| `POST` | `/api/login` | Login, returns a session-backed JWT |
+| `POST` | `/api/logout` | Revoke the presented token's session (idempotent, 204) |
 
 ### Protected Endpoints (JWT Bearer or Basic auth)
 
@@ -217,6 +262,7 @@ Exposed at `GET /metrics` in Prometheus text format:
 
 | Method | Path | Description |
 |--------|------|-------------|
+| `GET` | `/api/session` | Identity behind the presented credentials |
 | `GET` | `/stats` | Uptime, active/total connections, bandwidth |
 | `GET` | `/api/dashboard` | Aggregate dashboard (connections, bandwidth, top users, tunnels) |
 | `GET` | `/api/config` | Current config (secrets redacted) |
@@ -339,11 +385,11 @@ Runtime reload is supported via `POST /api/config/reload`.
 | Section | Controls |
 |---------|----------|
 | `[server]` | Bind addresses, max connections, TLS cert/key paths |
-| `[database]` | SQLite path, connection pool size |
+| `[database]` | SQLite path, read-pool size (writes use one dedicated writer connection), lock/acquire timeouts, usage retention |
 | `[authentication]` | Enable/disable, method, credentials, JWT secret/expiration |
 | `[protocols]` | Enable/disable individual protocols, auto-detect toggle |
 | `[features]` | Connection approval, reverse tunnels, tunnel port range, webhook URL/events |
-| `[state]` | Backend (memory/redis), Redis URL/pool/prefix. Deployments are single-instance; see [RUNBOOK](docs/RUNBOOK.md#scaling-single-instance-constraint) |
+| `[state]` | Backend (memory/redis), Redis URL/pool/prefix. `redis` is required for more than one replica; see [RUNBOOK](docs/RUNBOOK.md#scaling) |
 | `[rate_limiting]` | Global enable, RPS, burst, ban duration |
 | `[filtering]` | IP allowlist/blocklist, geo-blocking, target domain allow/blocklists, access schedule |
 | `[logging]` | Level, format (json/pretty), file logging |
@@ -376,7 +422,21 @@ Default ports:
 - Proxy: `0.0.0.0:8080`
 - Admin API: `127.0.0.1:8081`
 
-A `root_admin` account is auto-created on first run if it doesn't exist.
+A `root_admin` account named `root` is auto-created on first run if it doesn't
+exist. Its password is `CRABBY_ROOT_PASSWORD` if set; otherwise one is generated
+and printed to the terminal, or, when stderr is not a TTY (service, container),
+written to `initial_root_password.txt` (mode 0600) in the working directory.
+
+`config.example.toml` ships with empty credentials: an empty
+`authentication.password` / `admin.admin_password` disables that static
+credential, and an empty `jwt_secret` is replaced by a random key at boot. Set
+`CRABBY_BASIC_AUTH_PASSWORD`, `CRABBY_ADMIN_PASSWORD` and `CRABBY_JWT_SECRET`
+(or put Argon2 hashes in the file) to enable them. The admin API needs some
+admin credential: the `root` user, another database admin, or the static one.
+
+An unsafe configuration (weak or placeholder password, short JWT secret,
+unauthenticated admin API on a public bind, ...) is refused at startup with a
+single `error: ...` line on stderr and exit status 1.
 
 ---
 

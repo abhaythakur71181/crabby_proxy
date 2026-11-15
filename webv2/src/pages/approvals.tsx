@@ -1,10 +1,11 @@
 // Approvals — request workflow + active grants, for both roles.
 // Users: request access, watch their own requests. Admins: decide with a
 // reason, create grants directly, terminate with a required reason.
-// The request dialog best-effort auto-fills the client IP via api.ipify.org;
-// the field stays editable and accepts wildcard/CIDR patterns.
+// The request dialog's client IP is entered by hand (exact, wildcard or CIDR).
+// It deliberately does not look the IP up via a third-party service: that
+// would leak the operator's IP and the fact they run Crabby Proxy (#67).
 import { CheckCircle2, Plus, ShieldCheck, XCircle } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useSearchParams } from "react-router";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -17,7 +18,6 @@ import {
 } from "@/api/endpoints";
 import type { ApprovalRequestResponse, ApprovalResponse } from "@/api/types";
 import { formatRelative } from "@/lib/format";
-import { isIpv4 } from "@/lib/ip";
 import {
   keys,
   useApprovalRequests,
@@ -27,6 +27,7 @@ import {
   useUserDirectory,
   useUsers,
 } from "@/hooks/queries";
+import { useNow } from "@/hooks/use-now";
 import { Modal } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/card";
@@ -67,11 +68,13 @@ export function ApprovalsPage() {
         .sort((a, b) => (b.decided_at ?? 0) - (a.decided_at ?? 0)),
     [requests.data],
   );
-  const now = Math.floor(Date.now() / 1000);
-  const activeGrants = useMemo(
-    () => (grants.data ?? []).filter((g) => g.expires_at > now).sort((a, b) => b.approved_at - a.approved_at),
-    [grants.data, now],
-  );
+  // The clock ticks once a minute, so grants drop off the active list shortly
+  // after they expire even without a refetch.
+  const nowMs = useNow(60_000);
+  const activeGrants = useMemo(() => {
+    const now = Math.floor(nowMs / 1000);
+    return (grants.data ?? []).filter((g) => g.expires_at > now).sort((a, b) => b.approved_at - a.approved_at);
+  }, [grants.data, nowMs]);
 
   const refresh = () => invalidate(keys.approvalRequests, keys.approvals);
 
@@ -300,23 +303,6 @@ function RequestAccessDialog({
   const [ip, setIp] = useState("");
   const [hours, setHours] = useState("24");
   const [reason, setReason] = useState("");
-
-  useEffect(() => {
-    if (!open) return;
-    const ac = new AbortController();
-    const t = setTimeout(() => ac.abort(), 3000);
-    fetch("https://api.ipify.org?format=json", { signal: ac.signal })
-      .then((r) => r.json())
-      .then((d: { ip?: string }) => {
-        if (d.ip && isIpv4(d.ip)) setIp((cur) => (cur.trim() ? cur : d.ip!));
-      })
-      .catch(() => {}) // best-effort; leave field empty on failure
-      .finally(() => clearTimeout(t));
-    return () => {
-      clearTimeout(t);
-      ac.abort();
-    };
-  }, [open]);
 
   const create = useMutation({
     mutationFn: () =>

@@ -5,7 +5,7 @@ use crate::stream::{BufferedClientStream, ClientStream};
 use crate::utils;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::io::{self, AsyncWriteExt};
+use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
@@ -33,7 +33,7 @@ pub async fn run_proxy_server(state: Arc<AppState>, addr: SocketAddr) {
     let mut shutdown_rx = state.shutdown_tx.subscribe();
     // Shared with the HTTP/2 handler so multiplexed h2 streams are counted
     // against the same global cap (#41), not just the per-TCP-accept permit.
-    let semaphore = state.global_conn_semaphore.clone();
+    let semaphore = state.global_conn_limit.semaphore();
     tracing::info!(
         "Proxy server listening on {} (max {} connections)",
         addr,
@@ -84,6 +84,11 @@ pub async fn run_proxy_server(state: Arc<AppState>, addr: SocketAddr) {
                         client_addr
                     }
                 };
+                // Canonicalise once at ingress (#52): on a dual-stack listener
+                // IPv4 clients arrive as `::ffff:a.b.c.d`, and every downstream
+                // consumer (IP filter, geo filter, approvals, rate limiting,
+                // access log, usage records) must see the plain IPv4 address.
+                let real_addr = crate::ip_filter::canonical_socket_addr(real_addr);
 
                 let state = state.clone();
                 tokio::spawn(async move {
@@ -122,12 +127,14 @@ pub async fn run_proxy_server(state: Arc<AppState>, addr: SocketAddr) {
 /// Invalid CIDR entries are skipped (logged once at parse). Returns false on an
 /// empty list, so an enabled-but-unconfigured PROXY protocol trusts nobody.
 fn peer_is_trusted_proxy(peer: std::net::IpAddr, trusted_cidrs: &[String]) -> bool {
+    use crate::ip_filter::{canonical_ip, net_contains};
+    let peer = canonical_ip(peer);
     trusted_cidrs.iter().any(|c| {
         match c.parse::<ipnet::IpNet>() {
-            Ok(net) => net.contains(&peer),
+            Ok(net) => net_contains(&net, peer),
             Err(_) => match c.parse::<std::net::IpAddr>() {
                 // Bare IP (no prefix) — exact match.
-                Ok(ip) => ip == peer,
+                Ok(ip) => canonical_ip(ip) == peer,
                 Err(_) => {
                     tracing::warn!("Invalid proxy_protocol_trusted_cidrs entry '{}'", c);
                     false
@@ -137,32 +144,123 @@ fn peer_is_trusted_proxy(peer: std::net::IpAddr, trusted_cidrs: &[String]) -> bo
     })
 }
 
-// Helper function to send error responses
+/// What the client is told when a connection is refused after protocol
+/// detection. The wire form depends on the protocol (see [`reply_bytes`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reply {
+    /// Malformed request / target (HTTP 400).
+    BadRequest,
+    /// Policy denial: validator or middleware said no (HTTP 403, SOCKS5 0x02).
+    Forbidden,
+    /// Quota or per-user connection limit reached (HTTP 429).
+    TooManyRequests,
+    /// Upstream failure: DNS, connect refused, SSRF egress block, self-loop (HTTP 502).
+    BadGateway,
+    /// Upstream or handshake timeout (HTTP 504).
+    GatewayTimeout,
+}
+
+impl Reply {
+    /// Reply for a relay-stage failure. `None` means nothing must be written:
+    /// a `Response` error means the success reply itself could not be written,
+    /// and a `Tunnel` error happens after the tunnel is established.
+    fn for_error(error_type: &ErrorType) -> Option<Reply> {
+        match error_type {
+            ErrorType::Handshake => Some(Reply::BadRequest),
+            ErrorType::Connection => Some(Reply::BadGateway),
+            ErrorType::Timeout => Some(Reply::GatewayTimeout),
+            ErrorType::QuotaExceeded => Some(Reply::TooManyRequests),
+            ErrorType::Response | ErrorType::Tunnel => None,
+        }
+    }
+}
+
+/// Wire bytes for `reply` on `protocol`, or `None` when the protocol has no
+/// way to express an error (raw TCP).
+///
+/// Outer-TLS HTTPS carries a decrypted HTTP proxy request, so it gets exactly
+/// the same status lines as plain HTTP (#100). Bodies are always empty and
+/// generic: the detailed reason is logged server-side only.
+fn reply_bytes(protocol: &ProxyProtocol, reply: Reply) -> Option<&'static [u8]> {
+    const SOCKS5_NOT_ALLOWED: &[u8] = &[0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+    const SOCKS5_FAILURE: &[u8] = &[0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+    const SOCKS4_REJECTED: &[u8] = &[0x00, 0x5b, 0, 0, 0, 0, 0, 0];
+    match protocol {
+        ProxyProtocol::HTTP | ProxyProtocol::HTTPS => Some(match reply {
+            Reply::BadRequest => {
+                b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            }
+            Reply::Forbidden => {
+                b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            }
+            Reply::TooManyRequests => {
+                b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            }
+            Reply::BadGateway => {
+                b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            }
+            Reply::GatewayTimeout => {
+                b"HTTP/1.1 504 Gateway Timeout\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            }
+        }),
+        // SOCKS4 has a single "request rejected or failed" code.
+        ProxyProtocol::SOCKS4 => Some(SOCKS4_REJECTED),
+        ProxyProtocol::SOCKS5 => Some(match reply {
+            // 0x02: connection not allowed by ruleset
+            Reply::Forbidden | Reply::TooManyRequests => SOCKS5_NOT_ALLOWED,
+            // 0x01: general SOCKS server failure
+            Reply::BadRequest | Reply::BadGateway | Reply::GatewayTimeout => SOCKS5_FAILURE,
+        }),
+        ProxyProtocol::TCP | ProxyProtocol::HTTP2 => None,
+    }
+}
+
+/// Upper bound on how long a refused connection is kept open while the
+/// client's unread request bytes are drained.
+const REPLY_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
+/// Upper bound on how many unread bytes are drained before giving up.
+const REPLY_DRAIN_MAX: usize = 64 * 1024;
+
+/// Write `reply`, flush it, and close the connection gracefully.
+///
+/// Flushing matters over TLS: `write_all` only queues into the rustls session
+/// buffer, so dropping the stream without a flush can lose the response. The
+/// half-close plus bounded drain matters for plain TCP: closing a socket that
+/// still has unread request bytes (e.g. headers that were only peeked during
+/// auth) makes the kernel send RST, and the client may then discard the reply
+/// before reading it.
+async fn reply_and_close<S>(protocol: &ProxyProtocol, stream: &mut S, reply: Reply)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let Some(bytes) = reply_bytes(protocol, reply) else {
+        return;
+    };
+    if stream.write_all(bytes).await.is_err() || stream.flush().await.is_err() {
+        return;
+    }
+    let _ = timeout(REPLY_DRAIN_TIMEOUT, async {
+        let _ = stream.shutdown().await;
+        let mut buf = [0u8; 4096];
+        let mut drained = 0usize;
+        while drained < REPLY_DRAIN_MAX {
+            match stream.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => drained += n,
+            }
+        }
+    })
+    .await;
+}
+
+/// Reply to a relay-stage failure (see [`Reply::for_error`]).
 async fn send_error_response(
     protocol: &ProxyProtocol,
     stream: &mut ClientStream,
     error_type: ErrorType,
-) -> io::Result<()> {
-    match (protocol, error_type) {
-        (ProxyProtocol::HTTP, ErrorType::Handshake) => {
-            stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").await
-        }
-        (ProxyProtocol::HTTP, ErrorType::Connection) => {
-            stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await
-        }
-        (ProxyProtocol::HTTP, ErrorType::Timeout) => {
-            stream
-                .write_all(b"HTTP/1.1 504 Gateway Timeout\r\n\r\n")
-                .await
-        }
-        (ProxyProtocol::HTTP, ErrorType::QuotaExceeded) => stream
-            .write_all(
-                b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 16\r\n\r\nQuota exceeded\r\n",
-            )
-            .await,
-        (ProxyProtocol::SOCKS4, _) => utils::send_socks4_response(stream, false).await,
-        (ProxyProtocol::SOCKS5, _) => utils::send_socks5_response(stream, false).await,
-        _ => Ok(()), // Unknown protocols don't send responses
+) {
+    if let Some(reply) = Reply::for_error(&error_type) {
+        reply_and_close(protocol, stream, reply).await;
     }
 }
 
@@ -271,6 +369,27 @@ async fn handle_client(
         }
     } else {
         tracing::debug!("Skipping authentication (--no-creds)");
+        // SOCKS5 still needs its method-selection exchange answered (with
+        // "no authentication") before the client sends the CONNECT request.
+        // SOCKS4 has no greeting, and HTTP needs nothing here.
+        if protocol == ProxyProtocol::SOCKS5 {
+            let negotiated = timeout(
+                crate::constants::HANDSHAKE_TIMEOUT,
+                ProxyProtocol::negotiate_socks5_without_auth(&mut buffered_stream),
+            )
+            .await;
+            match negotiated {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!("{}: SOCKS5 greeting rejected: {}", client_addr, e);
+                    return;
+                }
+                Err(_) => {
+                    tracing::warn!("{}: SOCKS5 greeting timed out", client_addr);
+                    return;
+                }
+            }
+        }
         None
     };
     // Update context with auth results
@@ -284,21 +403,21 @@ async fn handle_client(
             .unwrap_or(false);
     }
     // ── Phase 2: Post-Auth validators ───────────────────────────────────
-    if !ctx.is_admin {
-        for result in [
-            validators::validate_protocol_restriction(&ctx, state).await,
-            validators::validate_approval(&ctx, state).await,
-            validators::validate_user_rate_limit(&ctx, state).await,
-        ] {
-            if let Verdict::Deny(reason) = result {
-                tracing::warn!("{} denied: {}", client_addr, reason);
-                return;
-            }
+    for result in [
+        validators::validate_protocol_restriction(&ctx, state).await,
+        validators::validate_approval(&ctx, state).await,
+        validators::validate_user_rate_limit(&ctx, state).await,
+    ] {
+        if let Verdict::Deny(reason) = result {
+            tracing::warn!("{} denied: {}", client_addr, reason);
+            reply_and_close(&protocol, &mut buffered_stream, Reply::Forbidden).await;
+            return;
         }
     }
     // Run PostAuth plugin middleware
     if let Verdict::Deny(reason) = state.middleware.run(Phase::PostAuth, &ctx, state).await {
         tracing::warn!("{} denied by middleware: {}", client_addr, reason);
+        reply_and_close(&protocol, &mut buffered_stream, Reply::Forbidden).await;
         return;
     }
     // ── Processing: Parse target ────────────────────────────────────────
@@ -313,7 +432,7 @@ async fn handle_client(
             Ok(Ok(t)) => (t, buffered_stream.into_inner()),
             Ok(Err(e)) => {
                 tracing::error!("Failed to parse target: {}", e);
-                let _ = send_error_response(
+                send_error_response(
                     &protocol,
                     &mut buffered_stream.into_inner(),
                     ErrorType::Handshake,
@@ -323,7 +442,7 @@ async fn handle_client(
             }
             Err(_) => {
                 tracing::warn!("{}: target-parse timed out via {}", client_addr, protocol);
-                let _ = send_error_response(
+                send_error_response(
                     &protocol,
                     &mut buffered_stream.into_inner(),
                     ErrorType::Timeout,
@@ -348,7 +467,7 @@ async fn handle_client(
             Ok(t) => (t, stream),
             Err(e) => {
                 tracing::error!("Failed to parse target: {}", e);
-                let _ = send_error_response(&protocol, &mut stream, ErrorType::Handshake).await;
+                send_error_response(&protocol, &mut stream, ErrorType::Handshake).await;
                 return;
             }
         }
@@ -356,20 +475,20 @@ async fn handle_client(
     // Update context with target
     ctx.target_host = Some(target.host.clone());
     // ── Phase 3: Post-Target validators ─────────────────────────────────
-    if !ctx.is_admin {
-        for result in [
-            validators::validate_target_domain(&ctx, state).await,
-            validators::validate_access_schedule(&ctx, state).await,
-        ] {
-            if let Verdict::Deny(reason) = result {
-                tracing::warn!("{} denied: {}", client_addr, reason);
-                return;
-            }
+    for result in [
+        validators::validate_target_domain(&ctx, state).await,
+        validators::validate_access_schedule(&ctx, state).await,
+    ] {
+        if let Verdict::Deny(reason) = result {
+            tracing::warn!("{} denied: {}", client_addr, reason);
+            reply_and_close(&protocol, &mut stream, Reply::Forbidden).await;
+            return;
         }
     }
     // Run PostTarget plugin middleware
     if let Verdict::Deny(reason) = state.middleware.run(Phase::PostTarget, &ctx, state).await {
         tracing::warn!("{} denied by middleware: {}", client_addr, reason);
+        reply_and_close(&protocol, &mut stream, Reply::Forbidden).await;
         return;
     }
     // ── Connection tracking + metrics ───────────────────────────────────
@@ -393,6 +512,8 @@ async fn handle_client(
         crate::metrics::STATE_BACKEND_ERRORS
             .with_label_values(&["set_connection"])
             .inc();
+    } else {
+        ctx.conn_tracked = true;
     }
     crate::metrics::CONNECTION_SETUP_DURATION
         .with_label_values(&[proto_label])
@@ -404,24 +525,17 @@ async fn handle_client(
         .with_label_values(&[proto_label, "started"])
         .inc();
     // ── Phase 4: Post-Setup validators (quota + connection limit) ───────
-    if !ctx.is_admin {
-        for result in [
-            validators::validate_quota(&ctx, state).await,
-            validators::validate_connection_limit(&ctx, state).await,
-        ] {
-            if let Verdict::Deny(reason) = result {
-                tracing::warn!("{} denied: {}", client_addr, reason);
-                crate::metrics::ACTIVE_CONNECTIONS
-                    .with_label_values(&[proto_label])
-                    .dec();
-                let _ = send_error_response(
-                    ctx.protocol.as_ref().unwrap(),
-                    &mut stream,
-                    ErrorType::QuotaExceeded,
-                )
-                .await;
-                return;
-            }
+    for result in [
+        validators::validate_quota(&ctx, state).await,
+        validators::validate_connection_limit(&ctx, state).await,
+    ] {
+        if let Verdict::Deny(reason) = result {
+            tracing::warn!("{} denied: {}", client_addr, reason);
+            crate::metrics::ACTIVE_CONNECTIONS
+                .with_label_values(&[proto_label])
+                .dec();
+            send_error_response(&protocol, &mut stream, ErrorType::QuotaExceeded).await;
+            return;
         }
     }
     // ── Relay + record usage ────────────────────────────────────────────
@@ -443,14 +557,21 @@ async fn handle_client(
                 ErrorType::Connection,
             ))
         }
-        r = async_handle_client_with_target(
-            &mut stream,
-            client_addr,
-            &mut protocol,
-            target,
-            state,
-            ctx.user_id,
-            ctx.is_admin,
+        r = crate::state::backend::keep_record_alive(
+            &*state.state,
+            conn_id,
+            ctx.conn_tracked,
+            // Boxed: the relay future is large, and keeping it inline in
+            // the wrapper overflowed the worker stack in debug builds.
+            Box::pin(async_handle_client_with_target(
+                &mut stream,
+                client_addr,
+                &mut protocol,
+                target,
+                state,
+                ctx.user_id,
+                ctx.admin_bypasses(super::pipeline::RULE_QUOTA),
+            )),
         ) => r,
     };
     state.conn_cancel.remove(&conn_id);
@@ -497,19 +618,22 @@ async fn handle_client(
                 .with_label_values(&[proto_label, "success"])
                 .inc();
 
-            // Structured access log
-            tracing::info!(
-                target: "access_log",
-                client_ip = %client_addr.ip(),
-                target = %target_addr_str,
-                protocol = proto_label,
-                user_id = ?ctx.effective_uid(),
-                bytes_sent = bytes_sent,
-                bytes_received = bytes_received,
-                duration_ms = relay_start.elapsed().as_millis() as u64,
-                status = "success",
-                "connection completed"
-            );
+            // Structured access log (gated by logging.access_log_enabled;
+            // client IP rendered per logging.access_log_client_ip).
+            if ctx.config.access_log_enabled {
+                tracing::info!(
+                    target: "access_log",
+                    client_ip = %ctx.access_log_ip(),
+                    target = %target_addr_str,
+                    protocol = proto_label,
+                    user_id = ?ctx.effective_uid(),
+                    bytes_sent = bytes_sent,
+                    bytes_received = bytes_received,
+                    duration_ms = relay_start.elapsed().as_millis() as u64,
+                    status = "success",
+                    "connection completed"
+                );
+            }
         }
         Err((e, error_type)) => {
             // Map the failure to the canonical ConnectionStatus (single source
@@ -529,18 +653,20 @@ async fn handle_client(
                 .inc();
 
             // Structured access log
-            tracing::info!(
-                target: "access_log",
-                client_ip = %client_addr.ip(),
-                target = %target_addr_str,
-                protocol = proto_label,
-                user_id = ?ctx.effective_uid(),
-                duration_ms = relay_start.elapsed().as_millis() as u64,
-                status = "failed",
-                error_type = error_label,
-                error = %e,
-                "connection failed"
-            );
+            if ctx.config.access_log_enabled {
+                tracing::info!(
+                    target: "access_log",
+                    client_ip = %ctx.access_log_ip(),
+                    target = %target_addr_str,
+                    protocol = proto_label,
+                    user_id = ?ctx.effective_uid(),
+                    duration_ms = relay_start.elapsed().as_millis() as u64,
+                    status = "failed",
+                    error_type = error_label,
+                    error = %e,
+                    "connection failed"
+                );
+            }
             if let Some(uid) = ctx.effective_uid() {
                 state
                     .usage_writer
@@ -558,10 +684,41 @@ async fn handle_client(
                     })
                     .await;
             }
-            if error_type != ErrorType::Tunnel {
-                let _ = send_error_response(&protocol, &mut stream, error_type).await;
+            send_error_response(&protocol, &mut stream, error_type).await;
+        }
+    }
+}
+
+/// Resolve the per-user bandwidth throttler for a relay. Shared by the TCP
+/// relay and the HTTP/2 CONNECT bridge so both enforce the same limit.
+pub(crate) async fn resolve_user_throttler(
+    state: &AppState,
+    user_id: Option<i64>,
+    quota_tracker: Option<&Arc<crate::quota_tracker::UserQuotaTracker>>,
+) -> Option<crate::bandwidth::BandwidthThrottler> {
+    match (user_id, quota_tracker) {
+        (Some(uid), Some(tracker)) => {
+            // Fast path: throttler already cached on the tracker.
+            if let Some(t) = tracker.throttler_cached() {
+                t
+            } else {
+                // Cold path: resolve once and stash on the tracker. Subsequent
+                // connections in the same quota window hit the cached arm above.
+                let resolved = if let Some(user) = state.cached_user_by_id(uid).await {
+                    if user.bandwidth_rate_bps > 0 {
+                        state
+                            .bandwidth_throttlers
+                            .get_or_create(uid, user.bandwidth_rate_bps as u64)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                tracker.throttler_or_init(|| resolved.clone())
             }
         }
+        _ => None,
     }
 }
 
@@ -572,7 +729,7 @@ async fn async_handle_client_with_target(
     target: ProxyTarget,
     state: &AppState,
     user_id: Option<i64>,
-    is_admin: bool,
+    bypass_quota: bool,
 ) -> Result<(u64, u64), (io::Error, ErrorType)> {
     let target_addr = format!("{}:{}", target.host, target.port);
     let upstream_start = std::time::Instant::now();
@@ -635,61 +792,32 @@ async fn async_handle_client_with_target(
         }
     }
 
-    // Try the connection pool first so pool hits aren't counted in the
-    // "new connect" histogram (R2-20). On a fresh connect failure we also
-    // drop any other pooled idle sockets for this addr — the host is most
-    // likely down (R2-15).
-    let mut from_pool = false;
-    let target_stream = if let Some(ref pool) = state.connection_pool {
-        if let Some(s) = pool.try_get_pub(&target_addr).await {
-            from_pool = true;
-            s
-        } else {
-            pool.record_miss();
-            match timeout(Duration::from_secs(10), TcpStream::connect(resolved_addr)).await {
-                Ok(Ok(s)) => {
-                    let _ = s.set_nodelay(true);
-                    s
-                }
-                Ok(Err(e)) => {
-                    state.dns_cache.invalidate(&target.host, target.port);
-                    pool.invalidate_addr(&target_addr);
-                    return Err((e, ErrorType::Connection));
-                }
-                Err(_) => {
-                    state.dns_cache.invalidate(&target.host, target.port);
-                    pool.invalidate_addr(&target_addr);
-                    return Err((
-                        io::Error::new(io::ErrorKind::TimedOut, "Connection timeout"),
-                        ErrorType::Timeout,
-                    ));
-                }
-            }
-        }
-    } else {
-        // No connection pooling — direct connect
-        timeout(Duration::from_secs(10), TcpStream::connect(resolved_addr))
-            .await
-            .map_err(|_| {
-                state.dns_cache.invalidate(&target.host, target.port);
-                (
-                    io::Error::new(io::ErrorKind::TimedOut, "Connection timeout"),
-                    ErrorType::Timeout,
-                )
-            })?
-            .map_err(|e| {
-                state.dns_cache.invalidate(&target.host, target.port);
-                (e, ErrorType::Connection)
-            })?
-    };
-    if !from_pool {
-        crate::metrics::UPSTREAM_CONNECT_DURATION
-            .with_label_values(&[protocol.as_str()])
-            .observe(upstream_start.elapsed().as_secs_f64());
-    }
+    // Always a fresh upstream socket: a raw tunnel must never reuse a socket
+    // that carried another session's bytes (#45).
+    let target_stream = timeout(
+        crate::constants::UPSTREAM_CONNECT_TIMEOUT,
+        TcpStream::connect(resolved_addr),
+    )
+    .await
+    .map_err(|_| {
+        state.dns_cache.invalidate(&target.host, target.port);
+        (
+            io::Error::new(io::ErrorKind::TimedOut, "Connection timeout"),
+            ErrorType::Timeout,
+        )
+    })?
+    .map_err(|e| {
+        state.dns_cache.invalidate(&target.host, target.port);
+        (e, ErrorType::Connection)
+    })?;
+    crate::metrics::UPSTREAM_CONNECT_DURATION
+        .with_label_values(&[protocol.as_str()])
+        .observe(upstream_start.elapsed().as_secs_f64());
     let _ = target_stream.set_nodelay(true);
     utils::enable_tcp_keepalive(&target_stream);
-    tracing::info!(
+    // debug, not info: per-connection client+destination belongs in the
+    // (configurable) access log, not the default operational log (#59).
+    tracing::debug!(
         "[{}]: Connection established to {} by {}",
         &protocol,
         target_addr,
@@ -711,6 +839,11 @@ async fn async_handle_client_with_target(
         _ => Ok(()),
     }
     .map_err(|e| (e, ErrorType::Response))?;
+    // Push the success reply out of the rustls session buffer before relaying.
+    client_stream
+        .flush()
+        .await
+        .map_err(|e| (e, ErrorType::Response))?;
 
     let client_halves = io::split(client_stream);
     let target_halves = io::split(target_stream);
@@ -740,30 +873,7 @@ async fn async_handle_client_with_target(
     } else {
         None
     };
-    let throttler = match (user_id, quota_tracker.as_ref()) {
-        (Some(uid), Some(tracker)) => {
-            // Fast path: throttler already cached on the tracker.
-            if let Some(t) = tracker.throttler_cached() {
-                t
-            } else {
-                // Cold path: resolve once and stash on the tracker. Subsequent
-                // connections in the same quota window hit the cached arm above.
-                let resolved = if let Some(user) = state.cached_user_by_id(uid).await {
-                    if user.bandwidth_rate_bps > 0 {
-                        state
-                            .bandwidth_throttlers
-                            .get_or_create(uid, user.bandwidth_rate_bps as u64)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                tracker.throttler_or_init(|| resolved.clone())
-            }
-        }
-        _ => None,
-    };
+    let throttler = resolve_user_throttler(state, user_id, quota_tracker.as_ref()).await;
 
     // Idle timeout reaps half-open tunnels whose peer vanished without FIN/RST.
     // 0 in config disables it.
@@ -779,13 +889,13 @@ async fn async_handle_client_with_target(
         "t2c",
         throttler,
         quota_tracker,
-        !is_admin,
+        !bypass_quota,
         idle_timeout,
     )
     .await
     {
         Ok((c2t, t2c)) => {
-            tracing::info!(
+            tracing::debug!(
                 "[{}]: Closed tunnel {} <-> {} (sent: {}, received: {})",
                 &protocol,
                 client_addr,
@@ -799,6 +909,86 @@ async fn async_handle_client_with_target(
             tracing::warn!("[{}]: Tunnel error: {}", &protocol, e);
             Err((e, ErrorType::Tunnel))
         }
+    }
+}
+
+#[cfg(test)]
+mod reply_tests {
+    use super::*;
+
+    fn head(protocol: ProxyProtocol, reply: Reply) -> String {
+        String::from_utf8(reply_bytes(&protocol, reply).unwrap().to_vec()).unwrap()
+    }
+
+    #[test]
+    fn https_gets_same_status_lines_as_http() {
+        for reply in [
+            Reply::BadRequest,
+            Reply::Forbidden,
+            Reply::TooManyRequests,
+            Reply::BadGateway,
+            Reply::GatewayTimeout,
+        ] {
+            assert_eq!(
+                reply_bytes(&ProxyProtocol::HTTP, reply),
+                reply_bytes(&ProxyProtocol::HTTPS, reply)
+            );
+            let h = head(ProxyProtocol::HTTPS, reply);
+            assert!(h.ends_with("Content-Length: 0\r\nConnection: close\r\n\r\n"));
+        }
+        assert!(head(ProxyProtocol::HTTPS, Reply::Forbidden).starts_with("HTTP/1.1 403 "));
+        assert!(head(ProxyProtocol::HTTPS, Reply::BadGateway).starts_with("HTTP/1.1 502 "));
+        assert!(head(ProxyProtocol::HTTPS, Reply::GatewayTimeout).starts_with("HTTP/1.1 504 "));
+    }
+
+    #[test]
+    fn socks_denial_codes() {
+        let s5 = reply_bytes(&ProxyProtocol::SOCKS5, Reply::Forbidden).unwrap();
+        assert_eq!(&s5[..2], &[0x05, 0x02]);
+        let s5 = reply_bytes(&ProxyProtocol::SOCKS5, Reply::BadGateway).unwrap();
+        assert_eq!(&s5[..2], &[0x05, 0x01]);
+        let s4 = reply_bytes(&ProxyProtocol::SOCKS4, Reply::Forbidden).unwrap();
+        assert_eq!(s4, &[0x00, 0x5b, 0, 0, 0, 0, 0, 0]);
+        assert!(reply_bytes(&ProxyProtocol::TCP, Reply::Forbidden).is_none());
+    }
+
+    #[test]
+    fn relay_errors_map_to_replies() {
+        assert_eq!(
+            Reply::for_error(&ErrorType::Connection),
+            Some(Reply::BadGateway)
+        );
+        assert_eq!(
+            Reply::for_error(&ErrorType::Timeout),
+            Some(Reply::GatewayTimeout)
+        );
+        assert_eq!(
+            Reply::for_error(&ErrorType::Handshake),
+            Some(Reply::BadRequest)
+        );
+        assert_eq!(
+            Reply::for_error(&ErrorType::QuotaExceeded),
+            Some(Reply::TooManyRequests)
+        );
+        assert_eq!(Reply::for_error(&ErrorType::Tunnel), None);
+        assert_eq!(Reply::for_error(&ErrorType::Response), None);
+    }
+
+    #[tokio::test]
+    async fn reply_is_flushed_and_unread_input_drained() {
+        let (mut server, mut client) = tokio::io::duplex(64);
+        // Unread request bytes that would otherwise make close() an RST.
+        client.write_all(b"leftover headers\r\n\r\n").await.unwrap();
+        let writer = tokio::spawn(async move {
+            reply_and_close(&ProxyProtocol::HTTP, &mut server, Reply::Forbidden).await;
+        });
+        let mut got = Vec::new();
+        client.read_to_end(&mut got).await.unwrap();
+        assert!(String::from_utf8(got)
+            .unwrap()
+            .starts_with("HTTP/1.1 403 Forbidden\r\n"));
+        drop(client);
+        writer.await.unwrap();
     }
 }
 
@@ -823,6 +1013,14 @@ mod tests {
         assert!(peer_is_trusted_proxy(ip("192.168.1.5"), &cidrs)); // bare IP
         assert!(!peer_is_trusted_proxy(ip("192.168.1.6"), &cidrs));
         assert!(!peer_is_trusted_proxy(ip("8.8.8.8"), &cidrs));
+    }
+
+    #[test]
+    fn mapped_peer_matches_v4_trusted_cidr() {
+        let cidrs = vec!["10.0.0.0/8".to_string(), "192.168.1.5".to_string()];
+        assert!(peer_is_trusted_proxy(ip("::ffff:10.1.2.3"), &cidrs));
+        assert!(peer_is_trusted_proxy(ip("::ffff:192.168.1.5"), &cidrs));
+        assert!(!peer_is_trusted_proxy(ip("::ffff:8.8.8.8"), &cidrs));
     }
 
     #[test]

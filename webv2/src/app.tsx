@@ -1,10 +1,11 @@
 import { lazy, useEffect, type ReactNode } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router";
-import { registerUnauthorizedHandler } from "@/api/http";
-import { isAdminRole } from "@/lib/auth";
+import { refreshSession, registerUnauthorizedHandler } from "@/api/http";
+import { getSession, isAdminRole } from "@/lib/auth";
 import { useSession } from "@/hooks/queries";
 import { AppShell } from "@/components/layout/app-shell";
 import { LoginPage } from "@/pages/login";
+import { NotFoundPage } from "@/pages/not-found";
 
 // Route-level code splitting — the old app shipped one ~670 KB chunk.
 const DashboardPage = lazy(() => import("@/pages/dashboard").then((m) => ({ default: m.DashboardPage })));
@@ -47,6 +48,11 @@ export function App() {
     // Soft redirect on 401 — keeps SPA state and lets the toast render.
     registerUnauthorizedHandler(() => navigate("/login", { replace: true }));
   }, [navigate]);
+  useEffect(() => {
+    // Confirm the cookie session on boot: refreshes identity and recovers the
+    // in-memory CSRF token (lost on reload); clears a revoked/expired session.
+    if (getSession()) void refreshSession();
+  }, []);
 
   return (
     <Routes>
@@ -72,7 +78,7 @@ export function App() {
         <Route path="/system-health" element={<RequireAdmin><HealthPage /></RequireAdmin>} />
         <Route path="/config" element={<RequireAdmin><ConfigPage /></RequireAdmin>} />
         <Route path="/account" element={<AccountPage />} />
-        <Route path="*" element={<HomeRedirect />} />
+        <Route path="*" element={<NotFoundPage />} />
       </Route>
     </Routes>
   );

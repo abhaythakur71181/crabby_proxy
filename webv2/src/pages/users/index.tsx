@@ -1,14 +1,14 @@
 // Users directory — server-side pagination, search, role filter, create
 // dialog (root_admin). ?new=1 from the command palette opens the dialog.
 import { Plus, UsersRound } from "lucide-react";
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useMemo, useState, type FormEvent } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { createUser } from "@/api/endpoints";
 import type { Role } from "@/api/types";
 import { isAdminRole } from "@/lib/auth";
-import { downloadCsv } from "@/lib/download";
+import { downloadCsv } from "@/lib/utils";
 import { formatRelative } from "@/lib/format";
 import { generatePassword } from "@/lib/password";
 import { useInvalidate, useSession, useUsers, keys } from "@/hooks/queries";
@@ -201,12 +201,14 @@ function CreateUserDialog({
 
   // Re-roll the password (and reset the role to what the caller may grant)
   // each time the dialog is opened.
-  useEffect(() => {
+  const [wasOpen, setWasOpen] = useState(open);
+  if (wasOpen !== open) {
+    setWasOpen(open);
     if (open) {
       setPassword(generatePassword());
       if (!canGrantAdmin) setRole("user");
     }
-  }, [open, canGrantAdmin]);
+  }
 
   // Mirror backend rules so errors surface before the request.
   const usernameError =
@@ -359,8 +361,7 @@ function CreateUserDialog({
               <Button
                 variant="secondary"
                 onClick={() =>
-                  downloadCsv(`user-${created.username}.csv`, [
-                    ["username", "password"],
+                  downloadCsv(`user-${created.username}.csv`, ["username", "password"], [
                     [created.username, created.password],
                   ])
                 }

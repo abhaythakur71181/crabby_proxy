@@ -45,14 +45,19 @@ maxminddb = "0.27"
 futures-lite = "2"
 h2 = "0.4"
 http = "1"
+http-body = "1"
 bytes = "1"
 chrono-tz = "0.10.4"
 arc-swap = "1.9.0"
 sha2 = "0.10"
 hmac = "0.12"
+subtle = "2.6"
+hickory-resolver = "0.26"
 
 [dev-dependencies]
 serial_test = "3.1"
 toml = "0.9.11"
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"] }
 serde_json = "1"
+rcgen = "0.14"
+tokio = { version = "1", features = ["test-util"] }

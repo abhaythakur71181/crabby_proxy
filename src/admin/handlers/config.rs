@@ -1,5 +1,5 @@
 use super::models::ApiError;
-use crate::admin::auth::AdminUser;
+use crate::admin::auth::{AdminUser, RootAdminUser};
 use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
 
@@ -76,17 +76,11 @@ pub struct UpdateConfigRequest {
 /// file. Security-critical fields (binds, secrets, auth toggle) are NOT editable
 /// here — they require a restart by design.
 pub async fn update_config(
+    RootAdminUser(current_user): RootAdminUser,
     State(state): State<Arc<AppState>>,
-    axum::Extension(current_user_id): axum::Extension<i64>,
     Json(body): Json<UpdateConfigRequest>,
 ) -> Result<Json<ConfigResponse>, ApiError> {
-    let current_user =
-        crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
-    if current_user.role != "root_admin" {
-        return Err(ApiError::forbidden(
-            "Only root_admin can edit configuration",
-        ));
-    }
+    let current_user_id = current_user.id;
 
     let path = state
         .config_path
@@ -105,44 +99,114 @@ pub async fn update_config(
         }
     };
 
+    // Serialize concurrent updates: each one is a read-modify-write of the
+    // file, so two overlapping PUTs could otherwise lose one of the changes.
+    static CONFIG_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = CONFIG_WRITE_LOCK.lock().await;
+
     // Persist to the file: re-read from disk (so we don't write env-injected
-    // secrets that only live in memory), apply, write back.
-    let mut file_cfg = crate::config::Config::from_file(&path)
-        .map_err(|e| ApiError::internal(format!("read config: {e}")))?;
+    // secrets that only live in memory), apply, write back. File I/O runs on
+    // the blocking pool, and the write is atomic (temp file + rename) so a
+    // crash mid-write can never leave a truncated config behind.
+    let read_path = path.clone();
+    let mut file_cfg =
+        tokio::task::spawn_blocking(move || crate::config::Config::from_file(&read_path))
+            .await
+            .map_err(|e| ApiError::internal(format!("read config: {e}")))?
+            .map_err(|e| ApiError::internal(format!("read config: {e}")))?;
     apply(&mut file_cfg);
     let toml = toml::to_string_pretty(&file_cfg)
         .map_err(|e| ApiError::internal(format!("serialize config: {e}")))?;
-    std::fs::write(&path, toml).map_err(|e| ApiError::internal(format!("write config: {e}")))?;
+    let write_path = path.clone();
+    tokio::task::spawn_blocking(move || write_file_atomic(write_path.as_ref(), toml.as_bytes()))
+        .await
+        .map_err(|e| ApiError::internal(format!("write config: {e}")))?
+        .map_err(|e| ApiError::internal(format!("write config: {e}")))?;
 
     // Apply in-memory (preserves the running env-resolved secrets).
     let mut mem = (*state.config.load_full()).clone();
     apply(&mut mem);
     let resp = config_response(&mem);
+    let max_connections = mem.server.max_connections;
     state.config.store(Arc::new(mem));
+    state.global_conn_limit.resize(max_connections);
 
     tracing::info!(target: "audit", user_id = current_user_id, "configuration updated");
+    // Other replicas re-read the (shared) config file (#83).
+    state
+        .broadcast(&crate::event_bus::ProxyEvent::ConfigReloaded)
+        .await;
     Ok(Json(resp))
+}
+
+/// Atomically replace `path` with `contents`: write a sibling temp file, fsync
+/// it, copy the original file's permissions (the config may hold secrets and be
+/// mode 0600), then rename over the original and fsync the directory. A crash
+/// at any point leaves either the old or the new file, never a partial one.
+fn write_file_atomic(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("config path has no file name"))?
+        .to_string_lossy()
+        .into_owned();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = dir.join(format!(".{file_name}.tmp-{}-{nanos}", std::process::id()));
+
+    let result = (|| {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        if let Ok(meta) = std::fs::metadata(path) {
+            f.set_permissions(meta.permissions())?;
+        }
+        f.write_all(contents)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)?;
+        #[cfg(unix)]
+        if let Ok(d) = std::fs::File::open(&dir) {
+            let _ = d.sync_all();
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// Reload configuration from file
 pub async fn reload_config(
+    AdminUser(current_user): AdminUser,
     State(state): State<Arc<AppState>>,
-    axum::Extension(current_user_id): axum::Extension<i64>,
 ) -> Result<Json<ReloadResponse>, ApiError> {
-    let current_user =
-        crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
-    current_user.require_admin()?;
+    let current_user_id = current_user.id;
     tracing::info!(
         "Configuration reload requested by admin user {}",
         current_user_id
     );
 
-    match state.reload_config().await {
+    // Stringify the (non-Send) error before any further await.
+    let reloaded = state.reload_config().await.map_err(|e| e.to_string());
+    match reloaded {
         Ok(_) => {
             // Also reload TLS certificates if TLS is enabled
             if let Err(e) = state.reload_tls() {
                 tracing::warn!("Config reloaded but TLS cert reload failed: {}", e);
             }
+            state
+                .broadcast(&crate::event_bus::ProxyEvent::ConfigReloaded)
+                .await;
             Ok(Json(ReloadResponse {
                 success: true,
                 message: "Configuration and TLS certificates reloaded successfully".to_string(),
@@ -155,5 +219,47 @@ pub async fn reload_config(
             tracing::error!("Failed to reload configuration: {}", e);
             Err(ApiError::internal("Failed to reload configuration"))
         }
+    }
+}
+
+#[cfg(test)]
+mod atomic_write_tests {
+    use super::write_file_atomic;
+
+    #[test]
+    fn replaces_contents_and_leaves_no_temp_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "crabby-atomic-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "old = 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        write_file_atomic(&path, b"new = 2\n").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new = 2\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "permissions must be preserved");
+        }
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name() != "config.toml")
+            .collect();
+        assert!(leftovers.is_empty(), "temp file left behind");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -1,14 +1,18 @@
 use axum::{
-    extract::{Request, State},
+    extract::{ConnectInfo, Request, State},
     http::{header, StatusCode},
     middleware::Next,
     response::Response,
 };
 use base64::{engine::general_purpose, Engine};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
+use crate::admin::handlers::auth::extract_client_ip;
 use crate::app_state::AppState;
 use crate::auth::jwt;
+use crate::auth_cache::{credential_key, CredentialDomain};
+use crate::db::models::Role;
 use crate::db::users;
 
 pub async fn auth_middleware(
@@ -24,111 +28,326 @@ pub async fn auth_middleware(
         )
     };
     if !auth_enabled {
-        return Ok(next.run(request).await);
+        // Auth is off (only allowed on a loopback admin_bind; see
+        // config_env::validate_admin_exposure). Rather than pass requests
+        // through with no identity, which made identity-requiring handlers
+        // fail with 401/500, lost audit attribution, and would turn any
+        // future handler that forgets to require an identity into a silent
+        // bypass, attribute every request to the root_admin account
+        // explicitly so handlers and the audit log see a real user.
+        return match users::get_root_admin(&state.db_pool).await {
+            Ok(Some(root)) => {
+                request.extensions_mut().insert(root.id);
+                Ok(next.run(request).await)
+            }
+            Ok(None) => {
+                tracing::error!("admin.auth_enabled = false but no active root_admin exists");
+                Err(StatusCode::INTERNAL_SERVER_ERROR)
+            }
+            Err(e) => {
+                tracing::error!(
+                    "admin.auth_enabled = false: root_admin lookup failed: {}",
+                    e
+                );
+                Err(StatusCode::INTERNAL_SERVER_ERROR)
+            }
+        };
     }
     let auth_header = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok());
+    // Browser (webv2) sessions: no Authorization header, HttpOnly cookie.
+    // An explicit Authorization header always wins, so API/CLI clients are
+    // unaffected by any cookie the same browser profile may also hold.
+    if auth_header.is_none() {
+        if let Some(token) = session_cookie(request.headers()) {
+            let (user_id, mut session) = authenticate_token(&state, &token, &jwt_secret).await?;
+            session.via_cookie = true;
+            // Cookies are attached by the browser automatically, so every
+            // state-changing request must also prove it came from our UI by
+            // echoing the per-session CSRF token in a header.
+            if !request.method().is_safe() {
+                let presented = request
+                    .headers()
+                    .get(CSRF_HEADER)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                if !csrf_token_matches(&jwt_secret, &session.jti, presented) {
+                    tracing::warn!("Rejecting cookie-authenticated request: bad CSRF token");
+                    return Err(StatusCode::FORBIDDEN);
+                }
+            }
+            request.extensions_mut().insert(user_id);
+            request.extensions_mut().insert(session);
+            if let Err(e) = check_user_rate_limit(&state, user_id).await {
+                tracing::warn!("Rate limit exceeded for user {}: {}", user_id, e);
+                return Err(StatusCode::TOO_MANY_REQUESTS);
+            }
+            return Ok(next.run(request).await);
+        }
+    }
     match auth_header {
         Some(auth) if auth.starts_with("Bearer ") => {
             let token = auth.trim_start_matches("Bearer ");
-            match jwt::validate_jwt(token, &jwt_secret) {
-                Ok(claims) => {
-                    let user_id = claims.user_id;
-                    // Re-validate the account on every request (cache-aside, cheap).
-                    // A valid signature is not enough: a disabled or deleted user
-                    // must lose access immediately rather than keep a 24h token
-                    // working until natural expiry.
-                    match state.cached_user_role(user_id).await {
-                        Some(u) if u.is_active => {}
-                        Some(_) => {
-                            tracing::warn!("Rejecting token for disabled user {}", user_id);
-                            return Err(StatusCode::UNAUTHORIZED);
-                        }
-                        None => {
-                            tracing::warn!("Rejecting token for unknown user {}", user_id);
-                            return Err(StatusCode::UNAUTHORIZED);
-                        }
-                    }
-                    request.extensions_mut().insert(user_id);
-                    if let Err(e) = check_user_rate_limit(&state, user_id).await {
-                        tracing::warn!("Rate limit exceeded for user {}: {}", user_id, e);
-                        return Err(StatusCode::TOO_MANY_REQUESTS);
-                    }
-                    return Ok(next.run(request).await);
-                }
-                Err(_) => {
-                    return Err(StatusCode::UNAUTHORIZED);
-                }
+            let (user_id, session) = authenticate_token(&state, token, &jwt_secret).await?;
+            request.extensions_mut().insert(user_id);
+            request.extensions_mut().insert(session);
+            if let Err(e) = check_user_rate_limit(&state, user_id).await {
+                tracing::warn!("Rate limit exceeded for user {}: {}", user_id, e);
+                return Err(StatusCode::TOO_MANY_REQUESTS);
             }
+            return Ok(next.run(request).await);
         }
         Some(auth) if auth.starts_with("Basic ") => {
             let encoded = auth.trim_start_matches("Basic ");
-            if let Ok(decoded) = general_purpose::STANDARD.decode(encoded) {
-                let credentials = String::from_utf8_lossy(&decoded);
-                let parts: Vec<&str> = credentials.splitn(2, ':').collect();
-
-                if parts.len() == 2 {
-                    let (username, password) = (parts[0], parts[1]);
-                    match users::verify_password(&state.db_pool, username, password).await {
-                        Ok(Some(user)) => {
-                            // Attach user_id to request extensions
-                            let user_id = user.id;
-                            request.extensions_mut().insert(user_id);
-                            if let Err(e) = check_user_rate_limit(&state, user_id).await {
-                                tracing::warn!("Rate limit exceeded for user {}: {}", user_id, e);
-                                return Err(StatusCode::TOO_MANY_REQUESTS);
-                            }
-
-                            return Ok(next.run(request).await);
-                        }
-                        _ => {
-                            // Fallback to Config credentials
-                            let config = state.config.load();
-                            if username == config.admin.admin_username
-                                && password == config.admin.admin_password
-                            {
-                                // Look up root admin user from DB for an accurate
-                                // user_id. We refuse to fall back to a sentinel — a
-                                // negative id can confuse downstream code that does
-                                // `user_id > 0` checks and may quietly bypass per-user
-                                // accounting (quotas, audit logs, rate limits).
-                                match crate::db::users::get_user_by_username(
-                                    &state.db_pool,
-                                    "root_admin",
-                                )
-                                .await
-                                {
-                                    Ok(Some(user)) => {
-                                        request.extensions_mut().insert(user.id);
-                                        // Root admin bypasses rate limiting.
-                                        return Ok(next.run(request).await);
-                                    }
-                                    Ok(None) => {
-                                        tracing::error!(
-                                            "Config admin login succeeded but root_admin user is missing from database; rejecting to avoid sentinel user_id"
-                                        );
-                                        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "Config admin login: failed to look up root_admin: {}",
-                                            e
-                                        );
-                                        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+            let Ok(decoded) = general_purpose::STANDARD.decode(encoded) else {
+                return Err(StatusCode::UNAUTHORIZED);
+            };
+            let credentials = String::from_utf8_lossy(&decoded);
+            let Some((username, password)) = credentials.split_once(':') else {
+                return Err(StatusCode::UNAUTHORIZED);
+            };
+            let client_ip = request
+                .extensions()
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|ci| extract_client_ip(ci.0, request.headers()))
+                // No peer address (only possible outside axum::serve): share
+                // one strictly limited bucket rather than skip throttling.
+                .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+            let user_id = match authenticate_basic(&state, client_ip, username, password).await {
+                Ok(uid) => uid,
+                Err(status) => return Err(status),
+            };
+            request.extensions_mut().insert(user_id);
+            if let Err(e) = check_user_rate_limit(&state, user_id).await {
+                tracing::warn!("Rate limit exceeded for user {}: {}", user_id, e);
+                return Err(StatusCode::TOO_MANY_REQUESTS);
             }
+            return Ok(next.run(request).await);
         }
         _ => {}
     }
 
     Err(StatusCode::UNAUTHORIZED)
+}
+
+/// The server-side session behind an authenticated JWT request. Inserted into
+/// request extensions by `auth_middleware` (absent for Basic-auth requests and
+/// when admin auth is disabled).
+#[derive(Debug, Clone)]
+pub struct AuthSession {
+    /// JWT id; the key of the backing `sessions` row.
+    pub jti: String,
+    /// Unix seconds when the token expires.
+    pub expires_at: i64,
+    /// Authenticated via the browser session cookie (vs. Authorization header).
+    pub via_cookie: bool,
+}
+
+/// Name of the browser session cookie (HttpOnly; holds the session JWT).
+pub const SESSION_COOKIE: &str = "cbpx_session";
+/// Header carrying the CSRF token on cookie-authenticated unsafe requests.
+pub const CSRF_HEADER: &str = "x-csrf-token";
+
+/// Extract the session JWT from the `Cookie` header(s), if present.
+pub fn session_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .filter_map(|pair| pair.trim().split_once('='))
+        .find(|(name, value)| *name == SESSION_COOKIE && !value.is_empty())
+        .map(|(_, value)| value.to_string())
+}
+
+/// `Set-Cookie` value establishing the browser session.
+pub fn session_cookie_header(token: &str, max_age_secs: u64, secure: bool) -> String {
+    format!(
+        "{SESSION_COOKIE}={token}; Path=/; Max-Age={max_age_secs}; HttpOnly; SameSite=Strict{}",
+        if secure { "; Secure" } else { "" }
+    )
+}
+
+/// `Set-Cookie` value deleting the browser session cookie.
+pub fn clear_session_cookie_header(secure: bool) -> String {
+    session_cookie_header("", 0, secure)
+}
+
+/// CSRF token for a cookie session: HMAC-SHA256(jwt_secret, "csrf:" + jti),
+/// hex encoded. Bound to the session (a new login gets a new token) and
+/// stateless (recomputed per request, nothing stored). It is handed to the UI
+/// in the login / session response bodies, never in a cookie, so a cross-site
+/// page can neither read nor forge it.
+pub fn csrf_token(jwt_secret: &str, jti: &str) -> String {
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(jwt_secret.as_bytes())
+        .expect("HMAC accepts any key length");
+    mac.update(b"csrf:");
+    mac.update(jti.as_bytes());
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
+}
+
+/// Constant-time comparison of a presented CSRF token with the expected one.
+pub fn csrf_token_matches(jwt_secret: &str, jti: &str, presented: &str) -> bool {
+    let expected = csrf_token(jwt_secret, jti);
+    let (a, b) = (expected.as_bytes(), presented.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Validate an admin JWT and its backing session.
+///
+/// A valid signature is not enough:
+/// - the token's `jti` must still have a live row in `sessions`, so logout,
+///   "sign out everywhere" and credential resets revoke it immediately;
+/// - the account must still exist and be active (re-checked per request via
+///   the role cache) rather than keeping a token working until expiry.
+pub(crate) async fn authenticate_token(
+    state: &AppState,
+    token: &str,
+    jwt_secret: &str,
+) -> Result<(i64, AuthSession), StatusCode> {
+    let claims = jwt::validate_jwt(token, jwt_secret).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let user_id = claims.user_id;
+    match crate::db::sessions::get_session_by_token(&state.db_pool, &claims.jti).await {
+        Ok(Some(s)) if s.user_id == user_id => {}
+        Ok(_) => {
+            tracing::debug!("Rejecting revoked or unknown session for user {}", user_id);
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        Err(e) => {
+            tracing::error!("Session lookup failed: {}", e);
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    }
+    match state.cached_user_role(user_id).await {
+        Some(u) if u.is_active => {}
+        Some(_) => {
+            tracing::warn!("Rejecting token for disabled user {}", user_id);
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        None => {
+            tracing::warn!("Rejecting token for unknown user {}", user_id);
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
+    Ok((
+        user_id,
+        AuthSession {
+            jti: claims.jti,
+            expires_at: claims.exp as i64,
+            via_cookie: false,
+        },
+    ))
+}
+
+/// Authenticate an admin-API `Authorization: Basic` credential.
+///
+/// Every protected endpoint accepts Basic, so without throttling each one is
+/// an unthrottled password oracle, and each guess forces a memory-hard Argon2
+/// hash (a cheap request buying expensive server work). So:
+///
+/// 1. A recently verified credential is served from the auth cache (no
+///    Argon2, no limiter), so legitimate clients that send Basic on every
+///    request pay for one hash per cache TTL.
+/// 2. Otherwise the attempt must pass the same per-IP and per-(IP, username)
+///    login limiter as `/api/login` BEFORE any hashing happens.
+/// 3. Then the DB user is checked (active accounts only), then the static
+///    config credential (constant-time, optionally an Argon2 hash), which now
+///    goes through the same limiter instead of bypassing it.
+async fn authenticate_basic(
+    state: &AppState,
+    client_ip: IpAddr,
+    username: &str,
+    password: &str,
+) -> Result<i64, StatusCode> {
+    let cache_key = credential_key(CredentialDomain::AdminBasic, username, password);
+    if let Some(uid) = state.auth_cache.get(&cache_key) {
+        // Same per-request account re-validation as the Bearer path.
+        if matches!(state.cached_user_role(uid).await, Some(u) if u.is_active) {
+            return Ok(uid);
+        }
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    if !state
+        .login_rate_limiter
+        .check_user(client_ip, username)
+        .await
+    {
+        tracing::warn!(
+            "Admin Basic-auth rate limit exceeded for IP {} (user: {})",
+            client_ip,
+            username
+        );
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    match users::verify_password(&state.db_pool, username, password).await {
+        Ok(Some(user)) if user.is_active => {
+            state.auth_cache.insert(cache_key, user.id);
+            return Ok(user.id);
+        }
+        Ok(Some(user)) => {
+            tracing::warn!("Rejecting Basic auth for disabled user {}", user.id);
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::error!("Admin Basic auth: user lookup failed: {}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    let (expected_user, expected_secret) = {
+        let config = state.config.load();
+        (
+            config.admin.admin_username.clone(),
+            config.admin.admin_password.clone(),
+        )
+    };
+    if !crate::credentials::config_credential_matches(
+        &expected_user,
+        &expected_secret,
+        username,
+        password,
+    )
+    .await
+    {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    // The config credential maps to the real root_admin account. We refuse
+    // to fall back to a sentinel id: a negative id can confuse downstream
+    // code that does `user_id > 0` checks and quietly bypass per-user
+    // accounting (quotas, audit logs, rate limits).
+    match users::get_root_admin(&state.db_pool).await {
+        Ok(Some(user)) => {
+            state.auth_cache.insert(cache_key, user.id);
+            Ok(user.id)
+        }
+        Ok(None) => {
+            tracing::error!(
+                "Config admin credential matched but no active root_admin user exists; rejecting to avoid a sentinel user_id"
+            );
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+        Err(e) => {
+            tracing::error!(
+                "Config admin credential: failed to look up root_admin: {}",
+                e
+            );
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
 }
 
 /// Check if user has exceeded their rate limit (optimized with cache)
@@ -193,7 +412,72 @@ pub struct CurrentUser {
     pub role: String,
 }
 
+/// Authorize `caller` acting on credentials / sessions of another account
+/// (`target_id` with `target_role`). This is the single gate for any action
+/// that would let the caller obtain or control a credential for the target
+/// (API keys, sessions):
+///
+/// - anyone may act on themselves;
+/// - root_admin may act on anyone;
+/// - admin may act only on regular users (never on another admin or on
+///   root_admin, otherwise an admin could mint a key for root_admin and
+///   impersonate it);
+/// - a regular user may not act on anyone else.
+pub fn authorize_admin_target(
+    caller_id: i64,
+    caller_role: &Role,
+    target_id: i64,
+    target_role: &Role,
+) -> Result<(), String> {
+    if caller_id == target_id {
+        return Ok(());
+    }
+    match caller_role {
+        Role::RootAdmin => Ok(()),
+        Role::Admin if *target_role == Role::User => Ok(()),
+        Role::Admin => Err("Admins can only manage regular users".to_string()),
+        Role::User => Err("Cannot manage other users".to_string()),
+    }
+}
+
+fn parse_role(role: &str) -> Role {
+    match role {
+        "root_admin" => Role::RootAdmin,
+        "admin" => Role::Admin,
+        _ => Role::User,
+    }
+}
+
 impl CurrentUser {
+    /// Parsed role. Unknown role strings degrade to the least-privileged role.
+    pub fn role_enum(&self) -> Role {
+        parse_role(&self.role)
+    }
+
+    /// Resolve `target_id` and apply [`authorize_admin_target`]. Returns 404
+    /// for an unknown target, 403 when the caller may not manage it.
+    pub async fn authorize_target(
+        &self,
+        state: &AppState,
+        target_id: i64,
+    ) -> Result<(), super::handlers::models::ApiError> {
+        use super::handlers::models::ApiError;
+        if target_id == self.id {
+            return Ok(());
+        }
+        let target = state
+            .cached_user_role(target_id)
+            .await
+            .ok_or_else(|| ApiError::not_found(format!("User {} not found", target_id)))?;
+        authorize_admin_target(
+            self.id,
+            &self.role_enum(),
+            target_id,
+            &parse_role(&target.role),
+        )
+        .map_err(ApiError::forbidden)
+    }
+
     /// Check if user can access another user's data
     pub fn can_access_user(&self, target_user_id: i64) -> bool {
         // Admins can access all users
@@ -280,6 +564,149 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for AdminUser {
     }
 }
 
+/// Axum extractor: authenticated user that must be `root_admin`.
+pub struct RootAdminUser(pub CurrentUser);
+
+#[axum::async_trait]
+impl axum::extract::FromRequestParts<Arc<AppState>> for RootAdminUser {
+    type Rejection = super::handlers::models::ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let user = CurrentUser::from_request_parts(parts, state).await?;
+        if user.role_enum() != Role::RootAdmin {
+            return Err(super::handlers::models::ApiError::forbidden(
+                "root_admin access required",
+            ));
+        }
+        Ok(RootAdminUser(user))
+    }
+}
+
+#[cfg(test)]
+mod basic_auth_tests {
+    use super::*;
+    use crate::db::models::{CreateUserRequest, Role};
+
+    async fn test_state(admin_password: &str) -> AppState {
+        let mut config = crate::config::Config::default();
+        config.admin.admin_password = admin_password.to_string();
+        // Point Redis at a closed port so the test never shares state with
+        // a developer's local Redis.
+        config.state.redis_url = "redis://127.0.0.1:1".to_string();
+        let pool = crate::db::create_pool("sqlite::memory:", 1).await.unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        users::ensure_root_admin(&pool).await.unwrap();
+        AppState::new(config, None, pool).await.unwrap()
+    }
+
+    async fn add_user(state: &AppState, name: &str, password: &str) -> i64 {
+        users::create_user(
+            &state.db_pool,
+            &CreateUserRequest {
+                username: name.to_string(),
+                password: password.to_string(),
+                role: Role::User,
+                max_connections: None,
+                bandwidth_limit_mb: None,
+                rate_limit_enabled: Some(false),
+                rate_limit_rps: None,
+                allowed_protocols: None,
+                notes: None,
+            },
+            None,
+        )
+        .await
+        .unwrap()
+    }
+
+    fn ip(n: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(203, 0, 113, n))
+    }
+
+    #[tokio::test]
+    async fn failed_basic_attempts_are_throttled_before_hashing() {
+        let state = test_state("config-admin-password-123").await;
+        add_user(&state, "alice", "alice-password-1").await;
+
+        let mut statuses = Vec::new();
+        for _ in 0..8 {
+            statuses.push(
+                authenticate_basic(&state, ip(1), "alice", "wrong")
+                    .await
+                    .unwrap_err(),
+            );
+        }
+        // Per-(ip, username) burst is 5: then every attempt is refused
+        // without reaching Argon2.
+        assert!(statuses[..5].iter().all(|s| *s == StatusCode::UNAUTHORIZED));
+        assert!(statuses[5..]
+            .iter()
+            .all(|s| *s == StatusCode::TOO_MANY_REQUESTS));
+        // Even the right password is refused while throttled.
+        assert_eq!(
+            authenticate_basic(&state, ip(1), "alice", "alice-password-1").await,
+            Err(StatusCode::TOO_MANY_REQUESTS)
+        );
+        // A different client IP is unaffected.
+        assert!(
+            authenticate_basic(&state, ip(2), "alice", "alice-password-1")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn verified_basic_credential_is_cached() {
+        let state = test_state("config-admin-password-123").await;
+        let uid = add_user(&state, "bob", "bob-password-12").await;
+        // Many requests with a correct credential: only the first one is a
+        // limiter attempt; the rest are cache hits and never throttled.
+        for _ in 0..50 {
+            assert_eq!(
+                authenticate_basic(&state, ip(3), "bob", "bob-password-12").await,
+                Ok(uid)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn config_admin_credential_resolves_to_root_and_is_throttled() {
+        let state = test_state("config-admin-password-123").await;
+        let root = users::get_root_admin(&state.db_pool)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            authenticate_basic(&state, ip(4), "admin", "config-admin-password-123").await,
+            Ok(root.id)
+        );
+        // The config credential no longer bypasses the limiter.
+        let mut last = Ok(0);
+        for _ in 0..8 {
+            last = authenticate_basic(&state, ip(5), "admin", "guess").await;
+        }
+        assert_eq!(last, Err(StatusCode::TOO_MANY_REQUESTS));
+    }
+
+    #[tokio::test]
+    async fn config_admin_credential_accepts_argon2_hash() {
+        let hash = users::hash_password("hashed-admin-secret").await.unwrap();
+        let state = test_state(&hash).await;
+        assert!(
+            authenticate_basic(&state, ip(6), "admin", "hashed-admin-secret")
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            authenticate_basic(&state, ip(7), "admin", &hash).await,
+            Err(StatusCode::UNAUTHORIZED)
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,6 +765,96 @@ mod tests {
         assert!(!user.can_access_user(1));
         assert!(!user.can_access_user(11));
         assert!(!user.can_access_user(999));
+    }
+
+    // === authorize_admin_target (privilege-escalation gate, #16) ===
+
+    #[test]
+    fn test_admin_target_matrix() {
+        use Role::*;
+        // self is always allowed
+        for r in [RootAdmin, Admin, User] {
+            assert!(authorize_admin_target(5, &r, 5, &r).is_ok());
+        }
+        // root_admin may target anyone
+        for t in [RootAdmin, Admin, User] {
+            assert!(authorize_admin_target(1, &RootAdmin, 2, &t).is_ok());
+        }
+        // admin may target only regular users
+        assert!(authorize_admin_target(2, &Admin, 3, &User).is_ok());
+        assert!(authorize_admin_target(2, &Admin, 1, &RootAdmin).is_err());
+        assert!(authorize_admin_target(2, &Admin, 4, &Admin).is_err());
+        // a regular user may not target anyone else
+        for t in [RootAdmin, Admin, User] {
+            assert!(authorize_admin_target(3, &User, 9, &t).is_err());
+        }
+    }
+
+    #[test]
+    fn test_role_enum_parsing() {
+        assert_eq!(root_admin_user().role_enum(), Role::RootAdmin);
+        assert_eq!(admin_user().role_enum(), Role::Admin);
+        assert_eq!(regular_user(3).role_enum(), Role::User);
+        let odd = CurrentUser {
+            id: 1,
+            username: "x".into(),
+            role: "superuser".into(),
+        };
+        assert_eq!(odd.role_enum(), Role::User);
+    }
+
+    // === Session cookie / CSRF helpers ===
+
+    #[test]
+    fn test_session_cookie_parsing() {
+        let mut h = axum::http::HeaderMap::new();
+        assert_eq!(session_cookie(&h), None);
+        h.insert(
+            header::COOKIE,
+            "theme=dark; cbpx_session=abc.def.ghi; other=1"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(session_cookie(&h).as_deref(), Some("abc.def.ghi"));
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(header::COOKIE, "cbpx_session=".parse().unwrap());
+        assert_eq!(session_cookie(&h), None, "empty (cleared) cookie ignored");
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(header::COOKIE, "xcbpx_session=evil".parse().unwrap());
+        assert_eq!(session_cookie(&h), None, "name must match exactly");
+    }
+
+    #[test]
+    fn test_session_cookie_attributes() {
+        let c = session_cookie_header("tok", 3600, true);
+        for attr in [
+            "cbpx_session=tok",
+            "HttpOnly",
+            "SameSite=Strict",
+            "Secure",
+            "Path=/",
+            "Max-Age=3600",
+        ] {
+            assert!(c.contains(attr), "missing {attr} in {c}");
+        }
+        assert!(!session_cookie_header("tok", 1, false).contains("Secure"));
+        assert!(clear_session_cookie_header(true).contains("Max-Age=0"));
+    }
+
+    #[test]
+    fn test_csrf_token_bound_to_session_and_secret() {
+        let s = "secret_key_at_least_32_bytes_long_xxxxxx";
+        let t = csrf_token(s, "jti-1");
+        assert_eq!(t.len(), 64);
+        assert!(csrf_token_matches(s, "jti-1", &t));
+        assert!(!csrf_token_matches(s, "jti-2", &t));
+        assert!(!csrf_token_matches(
+            "another_secret_key_32_bytes_long_xxxxx",
+            "jti-1",
+            &t
+        ));
+        assert!(!csrf_token_matches(s, "jti-1", ""));
+        assert!(!csrf_token_matches(s, "jti-1", &t[..63]));
     }
 
     // === require_admin Tests ===

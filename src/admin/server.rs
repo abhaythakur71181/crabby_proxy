@@ -10,18 +10,16 @@ use tower_http::cors::{Any, CorsLayer};
 use super::handlers;
 use crate::app_state::AppState;
 
-pub async fn run_admin_server(
-    state: Arc<AppState>,
-    addr: SocketAddr,
-) -> Result<(), std::io::Error> {
-    tracing::info!("Starting admin API server on {}", addr);
-
+/// Build the admin API router (public + protected routes, auth middleware,
+/// CORS). Split out of `run_admin_server` so tests can drive the real stack.
+pub fn build_router(state: Arc<AppState>) -> Router {
     // Public routes (no auth required)
     let public_routes = Router::new()
         .route("/health", get(handlers::health::health_check))
         .route("/health/deep", get(handlers::health::deep_health_check))
         .route("/metrics", get(handlers::metrics::prometheus_metrics))
         .route("/api/login", post(handlers::auth::login))
+        .route("/api/logout", post(handlers::auth::logout))
         // Authorized by a one-time ticket (minted at /api/connections/live-ticket),
         // since a browser can't put a bearer on the WS handshake.
         .route(
@@ -32,6 +30,7 @@ pub async fn run_admin_server(
     // Protected routes (auth required)
     let protected_routes = Router::new()
         .route("/stats", get(handlers::health::stats))
+        .route("/api/session", get(handlers::auth::current_session))
         .route("/api/dashboard", get(handlers::health::dashboard))
         .route("/api/metrics", get(handlers::health::json_metrics))
         .route(
@@ -206,6 +205,7 @@ pub async fn run_admin_server(
             .allow_headers([
                 axum::http::header::AUTHORIZATION,
                 axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderName::from_static(super::auth::CSRF_HEADER),
             ])
     } else if cors_origins.iter().any(|o| o == "*") {
         // Explicit "*" still works but only without credentials, and we
@@ -244,15 +244,52 @@ pub async fn run_admin_server(
             .allow_headers([
                 axum::http::header::AUTHORIZATION,
                 axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderName::from_static(super::auth::CSRF_HEADER),
             ])
             .allow_credentials(true)
             .allow_origin(origins)
     };
-    let app = Router::new()
+    Router::new()
         .merge(public_routes)
         .merge(protected_routes)
         .layer(cors)
-        .with_state(state.clone());
+        .with_state(state)
+}
+
+pub async fn run_admin_server(
+    state: Arc<AppState>,
+    addr: SocketAddr,
+) -> Result<(), std::io::Error> {
+    tracing::info!("Starting admin API server on {}", addr);
+    let app = build_router(state.clone());
+    {
+        let config = state.config.load();
+        use handlers::metrics::{metrics_access, MetricsAccess};
+        match metrics_access(
+            &config.server.admin_bind,
+            config.metrics.scrape_token.as_deref(),
+            config.metrics.allow_unauthenticated,
+        ) {
+            MetricsAccess::Refused => tracing::warn!(
+                "/metrics will answer 403: the admin API is bound to {} (non-loopback) and no \
+                 [metrics] scrape_token is set. Set scrape_token (PROXY__METRICS__SCRAPE_TOKEN) \
+                 and have Prometheus send it as a bearer token, or set \
+                 [metrics] allow_unauthenticated = true if the admin port is otherwise restricted.",
+                config.server.admin_bind
+            ),
+            MetricsAccess::Open
+                if !crate::config_env::is_loopback_bind(&config.server.admin_bind) =>
+            {
+                tracing::warn!(
+                    "/metrics is unauthenticated on non-loopback admin bind {} \
+                     (allow_unauthenticated = true): operational metrics are readable by \
+                     anyone who can reach it.",
+                    config.server.admin_bind
+                )
+            }
+            _ => {}
+        }
+    }
 
     tracing::info!(
         "Admin API listening on {} with {} routes (health, metrics, login, stats, connections, tunnels, users, quota, config)",

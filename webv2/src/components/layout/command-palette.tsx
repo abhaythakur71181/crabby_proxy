@@ -21,35 +21,15 @@ import {
   UsersRound,
   Waypoints,
 } from "lucide-react";
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
 import { reloadConfig } from "@/api/endpoints";
-import { clearSession } from "@/lib/auth";
+import { signOut } from "@/api/http";
 import { useIsAdmin, useUsers } from "@/hooks/queries";
 import { useTheme } from "@/hooks/use-theme";
 import { RoleBadge } from "@/components/ui/badge";
-
-// Tiny external store so any component (topbar) can open the palette.
-let isOpen = false;
-const listeners = new Set<() => void>();
-export function openPalette() {
-  isOpen = true;
-  listeners.forEach((l) => l());
-}
-function setOpen(v: boolean) {
-  isOpen = v;
-  listeners.forEach((l) => l());
-}
-function usePaletteOpen() {
-  return useSyncExternalStore(
-    (l) => {
-      listeners.add(l);
-      return () => listeners.delete(l);
-    },
-    () => isOpen,
-  );
-}
+import { isPaletteOpen, setPaletteOpen, usePaletteOpen } from "./palette-store";
 
 const PAGES = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard, admin: true },
@@ -78,26 +58,29 @@ export function CommandPalette() {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
-        setOpen(!isOpen);
+        setPaletteOpen(!isPaletteOpen());
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  useEffect(() => {
+  // Clear the query whenever the palette closes.
+  const [wasOpen, setWasOpen] = useState(open);
+  if (wasOpen !== open) {
+    setWasOpen(open);
     if (!open) setQuery("");
-  }, [open]);
+  }
 
   const go = (fn: () => void) => {
-    setOpen(false);
+    setPaletteOpen(false);
     fn();
   };
 
   return (
     <Command.Dialog
       open={open}
-      onOpenChange={setOpen}
+      onOpenChange={setPaletteOpen}
       label="Command palette"
       className="fixed left-1/2 top-[18vh] z-[70] w-[min(600px,calc(100vw-2rem))] -translate-x-1/2 overflow-hidden rounded-xl border border-line glass shadow-pop"
       overlayClassName="fixed inset-0 z-[65] bg-black/40 backdrop-blur-[2px]"
@@ -158,7 +141,7 @@ export function CommandPalette() {
           <Item
             onSelect={() =>
               go(() => {
-                clearSession();
+                void signOut();
                 navigate("/login");
               })
             }

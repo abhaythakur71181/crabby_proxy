@@ -7,28 +7,14 @@ use tokio::io::{self, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
-/// Process-random key for the auth-cache HMAC. Generated once per process so
-/// cache keys are unforgeable, never stable across restarts, and reveal nothing
-/// about the credentials.
-static AUTH_CACHE_HMAC_KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
-
-/// Derive the opaque auth-cache key from credentials via HMAC-SHA256, so the
-/// in-memory cache never holds plaintext usernames/passwords as keys.
+/// Opaque auth-cache key for proxy credentials (HMAC-SHA256 under a
+/// process-random key, domain-separated from admin-API credentials).
 fn auth_cache_key(username: &str, password: &str) -> [u8; 32] {
-    use hmac::{Hmac, Mac};
-    use rand::RngCore;
-    use sha2::Sha256;
-
-    let key = AUTH_CACHE_HMAC_KEY.get_or_init(|| {
-        let mut k = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut k);
-        k
-    });
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
-    mac.update(username.as_bytes());
-    mac.update(&[0u8]); // domain separator so (a,b) != (ab,"")
-    mac.update(password.as_bytes());
-    mac.finalize().into_bytes().into()
+    crate::auth_cache::credential_key(
+        crate::auth_cache::CredentialDomain::Proxy,
+        username,
+        password,
+    )
 }
 
 // Variants are deliberately the wire protocol names (TCP/HTTP/HTTPS); they
@@ -80,6 +66,11 @@ impl std::fmt::Display for ProxyProtocol {
 }
 
 type AuthResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+const SOCKS5_VERSION: u8 = 0x05;
+const SOCKS5_METHOD_NO_AUTH: u8 = 0x00;
+const SOCKS5_METHOD_USER_PASS: u8 = 0x02;
+const SOCKS5_NO_ACCEPTABLE_METHODS: u8 = 0xFF;
 
 impl ProxyProtocol {
     /// Authenticate client based on the protocol
@@ -147,77 +138,117 @@ impl ProxyProtocol {
         Ok((false, None))
     }
 
+    /// Read a SOCKS5 greeting (RFC 1928 section 3): `VER NMETHODS METHODS...`.
+    /// Returns the offered method codes.
+    async fn read_socks5_greeting(client_stream: &mut BufferedClientStream) -> io::Result<Vec<u8>> {
+        let mut handshake_buf = [0u8; 2];
+        client_stream.read_exact(&mut handshake_buf).await?;
+        if handshake_buf[0] != SOCKS5_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid SOCKS version",
+            ));
+        }
+        let mut methods = vec![0u8; handshake_buf[1] as usize];
+        client_stream.read_exact(&mut methods).await?;
+        Ok(methods)
+    }
+
+    /// Read a username/password sub-negotiation request (RFC 1929).
+    async fn read_socks5_credentials(
+        client_stream: &mut BufferedClientStream,
+    ) -> AuthResult<(String, String)> {
+        let mut auth_buf = [0u8; 2];
+        client_stream.read_exact(&mut auth_buf).await?;
+        if auth_buf[0] != 0x01 {
+            return Err("Unsupported SOCKS5 auth version".into());
+        }
+
+        let mut username_buf = vec![0u8; auth_buf[1] as usize];
+        client_stream.read_exact(&mut username_buf).await?;
+
+        let mut pass_len_buf = [0u8; 1];
+        client_stream.read_exact(&mut pass_len_buf).await?;
+        let mut password_buf = vec![0u8; pass_len_buf[0] as usize];
+        client_stream.read_exact(&mut password_buf).await?;
+
+        Ok((
+            String::from_utf8(username_buf)?,
+            String::from_utf8(password_buf)?,
+        ))
+    }
+
+    /// SOCKS5 method selection when proxy authentication is disabled.
+    ///
+    /// The greeting has to be answered before the client sends its CONNECT
+    /// request; without this the listener went straight to parsing the
+    /// request, misread the greeting as one, and the client hung waiting for
+    /// a method-selection reply. Prefers "no authentication" (0x00). A client
+    /// that only offers username/password (0x02) is accepted too: its
+    /// credentials are read and acknowledged but not checked, since there is
+    /// nothing to check them against. Anything else gets `05 FF`.
+    pub async fn negotiate_socks5_without_auth(
+        client_stream: &mut BufferedClientStream,
+    ) -> AuthResult<()> {
+        let methods = Self::read_socks5_greeting(client_stream).await?;
+        if methods.contains(&SOCKS5_METHOD_NO_AUTH) {
+            client_stream
+                .write_all(&[SOCKS5_VERSION, SOCKS5_METHOD_NO_AUTH])
+                .await?;
+            client_stream.flush().await?;
+            Ok(())
+        } else if methods.contains(&SOCKS5_METHOD_USER_PASS) {
+            client_stream
+                .write_all(&[SOCKS5_VERSION, SOCKS5_METHOD_USER_PASS])
+                .await?;
+            client_stream.flush().await?;
+            Self::read_socks5_credentials(client_stream).await?;
+            client_stream.write_all(&[0x01, 0x00]).await?;
+            client_stream.flush().await?;
+            Ok(())
+        } else {
+            client_stream
+                .write_all(&[SOCKS5_VERSION, SOCKS5_NO_ACCEPTABLE_METHODS])
+                .await?;
+            client_stream.flush().await?;
+            Err("SOCKS5 client offered no acceptable authentication method".into())
+        }
+    }
+
+    /// SOCKS5 method selection when proxy authentication is required: only
+    /// username/password (0x02) is acceptable; a client that does not offer
+    /// it gets `05 FF` and the connection is refused.
     async fn authenticate_socks5(
         client_stream: &mut BufferedClientStream,
         state: &AppState,
     ) -> AuthResult<(bool, Option<i64>)> {
-        // Read SOCKS5 handshake
-        let mut handshake_buf = [0u8; 2];
-        client_stream.read_exact(&mut handshake_buf).await?;
+        let methods = Self::read_socks5_greeting(client_stream).await?;
 
-        let version = handshake_buf[0];
-        let num_methods = handshake_buf[1];
-
-        if version != 0x05 {
-            return Err("Invalid SOCKS version".into());
+        if !methods.contains(&SOCKS5_METHOD_USER_PASS) {
+            client_stream
+                .write_all(&[SOCKS5_VERSION, SOCKS5_NO_ACCEPTABLE_METHODS])
+                .await?;
+            client_stream.flush().await?;
+            return Err("SOCKS5 authentication required but not supported by client".into());
         }
 
-        let mut methods_buf = vec![0u8; num_methods as usize];
-        client_stream.read_exact(&mut methods_buf).await?;
+        client_stream
+            .write_all(&[SOCKS5_VERSION, SOCKS5_METHOD_USER_PASS])
+            .await?;
+        client_stream.flush().await?;
 
-        // Check if username/password auth is supported by client
-        let supports_auth = methods_buf.contains(&0x02);
+        let (username, password) = Self::read_socks5_credentials(client_stream).await?;
 
-        // Check if auth is enabled in config
-        let auth_enabled = {
-            let config = state.config.load();
-            config.authentication.enabled
-        };
-
-        if auth_enabled && supports_auth {
-            // Tell client to use username/password auth
-            client_stream.write_all(&[0x05, 0x02]).await?;
-
-            // Read auth request
-            let mut auth_buf = [0u8; 2];
-            client_stream.read_exact(&mut auth_buf).await?;
-
-            let auth_version = auth_buf[0];
-            if auth_version != 0x01 {
-                return Err("Unsupported SOCKS5 auth version".into());
-            }
-
-            let username_len = auth_buf[1] as usize;
-            let mut username_buf = vec![0u8; username_len];
-            client_stream.read_exact(&mut username_buf).await?;
-
-            let mut pass_len_buf = [0u8; 1];
-            client_stream.read_exact(&mut pass_len_buf).await?;
-            let password_len = pass_len_buf[0] as usize;
-
-            let mut password_buf = vec![0u8; password_len];
-            client_stream.read_exact(&mut password_buf).await?;
-
-            let username = String::from_utf8(username_buf)?;
-            let password = String::from_utf8(password_buf)?;
-
-            // Validate credentials and capture user_id
-            let user_id = Self::validate_credentials(&username, &password, state).await;
-            if user_id.is_some() {
-                client_stream.write_all(&[0x01, 0x00]).await?; // Success
-                Ok((true, user_id))
-            } else {
-                client_stream.write_all(&[0x01, 0x01]).await?; // Failure
-                Err("SOCKS5 authentication failed".into())
-            }
-        } else if auth_enabled {
-            // Client doesn't support auth but we require it
-            client_stream.write_all(&[0x05, 0xFF]).await?; // No acceptable methods
-            Err("SOCKS5 authentication required but not supported by client".into())
+        // Validate credentials and capture user_id
+        let user_id = Self::validate_credentials(&username, &password, state).await;
+        if user_id.is_some() {
+            client_stream.write_all(&[0x01, 0x00]).await?; // Success
+            client_stream.flush().await?;
+            Ok((true, user_id))
         } else {
-            // No auth required
-            client_stream.write_all(&[0x05, 0x00]).await?; // No authentication
-            Ok((false, None))
+            client_stream.write_all(&[0x01, 0x01]).await?; // Failure
+            client_stream.flush().await?;
+            Err("SOCKS5 authentication failed".into())
         }
     }
 
@@ -295,15 +326,11 @@ impl ProxyProtocol {
     /// root_admin id), None on failure. Never returns a sentinel id.
     async fn validate_credentials(username: &str, password: &str, state: &AppState) -> Option<i64> {
         // ── In-process auth cache (avoids DB + argon2 on repeat connections) ──
-        // Key = HMAC-SHA256(username, password) under a process-random key, so
-        // plaintext credentials never live as map keys, while the full 256-bit
-        // digest keeps it collision-safe. 60-second TTL.
+        // Bounded, TTL-evicted, and invalidated per user on credential changes
+        // (see crate::auth_cache).
         let cache_key = auth_cache_key(username, password);
-        if let Some(entry) = state.auth_cache.get(&cache_key) {
-            let (uid, cached_at) = entry.value();
-            if cached_at.elapsed() < std::time::Duration::from_secs(60) {
-                return Some(*uid);
-            }
+        if let Some(uid) = state.auth_cache.get(&cache_key) {
+            return Some(uid);
         }
         // Negative cache: short-circuit known-bad credentials for 5s so a
         // burst of bad attempts hits argon2 only once.
@@ -326,32 +353,13 @@ impl ProxyProtocol {
                 .map(|cu| (cu.id, cu.username.clone()));
 
             if let Some((user_id, _)) = user {
-                // Try API key verification cache
-                if let Some(ref cache) = state.cache {
-                    if let Some(verified) = cache.get_api_key_verified(user_id, password).await {
-                        if verified {
-                            state
-                                .auth_cache
-                                .insert(cache_key, (user_id, std::time::Instant::now()));
-                            return Some(user_id);
-                        } else {
-                            return None;
-                        }
-                    }
-                }
-                // Cache miss: verify via DB (expensive argon2)
-                let verified = api_keys::verify_api_key(&state.db_pool, user_id, password)
-                    .await
-                    .unwrap_or(false);
-                if let Some(ref cache) = state.cache {
-                    cache
-                        .set_api_key_verified(user_id, password, verified)
-                        .await;
-                }
+                // One indexed SHA-256 lookup (no Argon2; see db::api_keys).
+                let verified =
+                    api_keys::verify_api_key(&state.db_pool, &state.db_writer, user_id, password)
+                        .await
+                        .unwrap_or(false);
                 if verified {
-                    state
-                        .auth_cache
-                        .insert(cache_key, (user_id, std::time::Instant::now()));
+                    state.auth_cache.insert(cache_key, user_id);
                     return Some(user_id);
                 }
             }
@@ -362,19 +370,36 @@ impl ProxyProtocol {
             // is intentionally excluded from CachedUser for security).
             if let Ok(Some(user)) = users::verify_password(&state.db_pool, username, password).await
             {
+                // A correct password for a disabled account is still a
+                // failure (the API-key path already rejects these, because
+                // cached_user_by_username filters inactive users).
+                if !user.is_active {
+                    tracing::warn!("Proxy auth rejected for disabled user {}", user.id);
+                    return None;
+                }
                 state.populate_user_cache(&user).await;
-                state
-                    .auth_cache
-                    .insert(cache_key, (user.id, std::time::Instant::now()));
+                state.auth_cache.insert(cache_key, user.id);
                 return Some(user.id);
             }
         }
 
         // Fallback to Config credentials if enabled
-        let config_match = {
+        // Constant-time, optionally an Argon2 hash, and disabled when the
+        // configured password is empty (see crate::credentials).
+        let (expected_user, expected_secret) = {
             let config = state.config.load();
-            username == config.authentication.username && password == config.authentication.password
+            (
+                config.authentication.username.clone(),
+                config.authentication.password.clone(),
+            )
         };
+        let config_match = crate::credentials::config_credential_matches(
+            &expected_user,
+            &expected_secret,
+            username,
+            password,
+        )
+        .await;
         if config_match {
             // Config-based auth resolves to the real `root_admin` DB user — never
             // a sentinel. A negative/synthetic id is Some(_) to the validator
@@ -382,11 +407,9 @@ impl ProxyProtocol {
             // fail OPEN (target filter, connection limit), silently disabling
             // per-user controls. The admin HTTP path was already hardened the
             // same way; reject if root_admin is missing rather than bypass.
-            match users::get_user_by_username(&state.db_pool, "root_admin").await {
+            match users::get_root_admin(&state.db_pool).await {
                 Ok(Some(user)) => {
-                    state
-                        .auth_cache
-                        .insert(cache_key, (user.id, std::time::Instant::now()));
+                    state.auth_cache.insert(cache_key, user.id);
                     return Some(user.id);
                 }
                 Ok(None) => {
@@ -602,21 +625,27 @@ impl ProxyProtocol {
     }
 
     async fn parse_https_target_from_stream(stream: &mut ClientStream) -> io::Result<ProxyTarget> {
-        // For HTTPS, we need to parse SNI from TLS handshake
-        // This is a simplified version - you'd need full TLS parsing for production
-        let mut buf = vec![0u8; 512];
-        // Use peek equivalent for our stream type
-        let n = match stream {
-            ClientStream::Plain(stream) => stream.peek(&mut buf).await?,
-            ClientStream::Tls(stream) => {
-                // For TLS streams, we need to read instead of peek
-                // Note: This consumes data from the stream, but SNI extraction
-                // happens before we need to relay data, so it's acceptable
-                stream.read(&mut buf).await?
+        // SNI routing only makes sense on a raw (non-terminated) stream. On a
+        // terminated TLS stream the bytes are already-decrypted application
+        // data, and reading them here would consume bytes the relay needs
+        // (#44). The listener parses outer-TLS HTTPS via
+        // `parse_target_from_buffered` instead.
+        let tcp = match stream {
+            ClientStream::Plain(tcp) => tcp,
+            ClientStream::Tls(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "SNI cannot be read from an already-terminated TLS stream",
+                ))
             }
         };
+        let hello = timeout(crate::constants::PEEK_TIMEOUT, peek_tls_record(tcp))
+            .await
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::TimedOut, "TLS ClientHello peek timed out")
+            })??;
 
-        if let Some(sni) = Self::extract_sni_from_tls(&buf[..n]) {
+        if let Some(sni) = Self::extract_sni_from_tls(&hello) {
             Ok(ProxyTarget {
                 host: sni,
                 port: 443,
@@ -984,6 +1013,51 @@ impl ProxyProtocol {
         }
 
         None
+    }
+}
+
+/// Largest TLS plaintext record: 5-byte header + 2^14 bytes of payload.
+const MAX_TLS_RECORD_LEN: usize = 5 + 16 * 1024;
+
+/// Peek (never consume) one complete TLS record from a plain TCP stream.
+///
+/// A fixed 512-byte peek truncated modern ClientHellos (ALPN, GREASE, session
+/// tickets, ECH, post-quantum key shares), so SNI extraction failed (#44).
+/// Read the record-length header and keep peeking until the whole record is
+/// in the kernel buffer, capped at the TLS maximum. Bytes stay queued for the
+/// relay. Callers bound this with a timeout.
+async fn peek_tls_record(stream: &TcpStream) -> io::Result<Vec<u8>> {
+    let mut buf = vec![0u8; MAX_TLS_RECORD_LEN];
+    loop {
+        let n = stream.peek(&mut buf).await?;
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "client closed before sending a TLS ClientHello",
+            ));
+        }
+        if n >= 5 {
+            if buf[0] != 0x16 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "not a TLS handshake record",
+                ));
+            }
+            let want = 5 + u16::from_be_bytes([buf[3], buf[4]]) as usize;
+            if want > MAX_TLS_RECORD_LEN {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "TLS record exceeds the maximum length",
+                ));
+            }
+            if n >= want {
+                buf.truncate(want);
+                return Ok(buf);
+            }
+        }
+        // Partial record: peek returns immediately while any data is queued,
+        // so back off briefly instead of spinning until the rest arrives.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
 }
 
@@ -1396,6 +1470,95 @@ mod tests {
         assert_eq!(sni, Some("example.com".to_string()));
     }
 
+    /// Build a ClientHello whose SNI sits after `pad` bytes of padding
+    /// extension, so it lands well past the old 512-byte peek window.
+    fn client_hello_with_padding(host: &str, pad: usize) -> Vec<u8> {
+        let mut ext = Vec::new();
+        // padding extension (0x0015)
+        ext.extend_from_slice(&[0x00, 0x15]);
+        ext.extend_from_slice(&(pad as u16).to_be_bytes());
+        ext.extend(std::iter::repeat_n(0u8, pad));
+        // server_name extension (0x0000)
+        let h = host.as_bytes();
+        ext.extend_from_slice(&[0x00, 0x00]);
+        ext.extend_from_slice(&((h.len() + 5) as u16).to_be_bytes());
+        ext.extend_from_slice(&((h.len() + 3) as u16).to_be_bytes());
+        ext.push(0x00);
+        ext.extend_from_slice(&(h.len() as u16).to_be_bytes());
+        ext.extend_from_slice(h);
+
+        let mut body = vec![0x03, 0x03];
+        body.extend_from_slice(&[0u8; 32]); // random
+        body.push(0); // session id
+        body.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]); // one cipher suite
+        body.extend_from_slice(&[0x01, 0x00]); // null compression
+        body.extend_from_slice(&(ext.len() as u16).to_be_bytes());
+        body.extend_from_slice(&ext);
+
+        let mut hs = vec![0x01];
+        hs.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+        hs.extend_from_slice(&body);
+
+        let mut rec = vec![0x16, 0x03, 0x01];
+        rec.extend_from_slice(&(hs.len() as u16).to_be_bytes());
+        rec.extend_from_slice(&hs);
+        rec
+    }
+
+    /// #44: a large ClientHello that arrives in two segments is fully peeked,
+    /// SNI is found, and no bytes are consumed from the stream.
+    #[tokio::test]
+    async fn https_sni_parses_large_fragmented_hello_without_consuming() {
+        let hello = client_hello_with_padding("big.example.com", 1500);
+        assert!(hello.len() > 1500);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let to_send = hello.clone();
+        let client = tokio::spawn(async move {
+            let mut c = TcpStream::connect(addr).await.unwrap();
+            c.write_all(&to_send[..300]).await.unwrap();
+            c.flush().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            c.write_all(&to_send[300..]).await.unwrap();
+            c
+        });
+        let (server, _) = listener.accept().await.unwrap();
+        let mut stream = ClientStream::Plain(server);
+
+        let target = ProxyProtocol::HTTPS
+            .parse_target_from_stream(&mut stream)
+            .await
+            .unwrap();
+        assert_eq!(target.host, "big.example.com");
+        assert_eq!(target.port, 443);
+
+        // The whole ClientHello is still there for the relay.
+        let mut relayed = vec![0u8; hello.len()];
+        stream.read_exact(&mut relayed).await.unwrap();
+        assert_eq!(relayed, hello);
+        drop(client.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn https_sni_rejects_non_tls_bytes() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            let mut c = TcpStream::connect(addr).await.unwrap();
+            c.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+            c
+        });
+        let (server, _) = listener.accept().await.unwrap();
+        let mut stream = ClientStream::Plain(server);
+        let err = ProxyProtocol::HTTPS
+            .parse_target_from_stream(&mut stream)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        drop(client.await.unwrap());
+    }
+
     // === ProxyTarget Tests ===
 
     #[test]
@@ -1506,5 +1669,61 @@ mod tests {
         assert_eq!(http_target.port, https_target.port);
         assert_eq!(https_target.host, "example.com");
         assert_eq!(https_target.port, 8443);
+    }
+
+    // === SOCKS5 method selection with proxy auth disabled ===
+
+    /// Run `negotiate_socks5_without_auth` against `greeting` and return its
+    /// result plus every byte the server wrote back.
+    async fn negotiate_no_auth(greeting: &'static [u8]) -> (bool, Vec<u8>) {
+        use crate::stream::{BufferedClientStream, ClientStream};
+        use tokio::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            client.write_all(greeting).await.unwrap();
+            client.shutdown().await.unwrap();
+            let mut reply = Vec::new();
+            client.read_to_end(&mut reply).await.unwrap();
+            reply
+        });
+        let (server, _) = listener.accept().await.unwrap();
+        let mut buffered = BufferedClientStream::new(ClientStream::Plain(server));
+        let ok = ProxyProtocol::negotiate_socks5_without_auth(&mut buffered)
+            .await
+            .is_ok();
+        drop(buffered);
+        (ok, client.await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn socks5_no_auth_selects_method_zero() {
+        let (ok, reply) = negotiate_no_auth(&[0x05, 0x01, 0x00]).await;
+        assert!(ok);
+        assert_eq!(reply, [0x05, 0x00]);
+
+        // Preferred even when username/password is offered as well.
+        let (ok, reply) = negotiate_no_auth(&[0x05, 0x02, 0x02, 0x00]).await;
+        assert!(ok);
+        assert_eq!(reply, [0x05, 0x00]);
+    }
+
+    #[tokio::test]
+    async fn socks5_no_auth_accepts_user_pass_only_client() {
+        // Offers only 0x02, then sends a sub-negotiation (user "u", pass "p").
+        let (ok, reply) =
+            negotiate_no_auth(&[0x05, 0x01, 0x02, 0x01, 0x01, b'u', 0x01, b'p']).await;
+        assert!(ok);
+        assert_eq!(reply, [0x05, 0x02, 0x01, 0x00]);
+    }
+
+    #[tokio::test]
+    async fn socks5_no_auth_rejects_unsupported_methods() {
+        // GSSAPI only.
+        let (ok, reply) = negotiate_no_auth(&[0x05, 0x01, 0x01]).await;
+        assert!(!ok);
+        assert_eq!(reply, [0x05, 0xFF]);
     }
 }

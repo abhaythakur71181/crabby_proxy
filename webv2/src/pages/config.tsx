@@ -2,7 +2,7 @@
 // mutable fields (max_connections, connection_approval, reverse_tunnels)
 // with dirty-state tracking; reload re-reads the TOML + TLS certs.
 import { RefreshCw, RotateCcw, Save, Server, ShieldCheck, ToggleRight } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { reloadConfig, updateConfig } from "@/api/endpoints";
@@ -27,13 +27,14 @@ export function ConfigPage() {
   const [tunnels, setTunnels] = useState(false);
   const [reloadOpen, setReloadOpen] = useState(false);
 
-  useEffect(() => {
-    if (config.data) {
-      setMaxConns(String(config.data.server.max_connections));
-      setApproval(config.data.features.connection_approval);
-      setTunnels(config.data.features.reverse_tunnels);
-    }
-  }, [config.data]);
+  // Re-seed the form whenever fresh config arrives from the server.
+  const [seededFrom, setSeededFrom] = useState(config.data);
+  if (config.data && seededFrom !== config.data) {
+    setSeededFrom(config.data);
+    setMaxConns(String(config.data.server.max_connections));
+    setApproval(config.data.features.connection_approval);
+    setTunnels(config.data.features.reverse_tunnels);
+  }
 
   const dirty =
     config.data != null &&

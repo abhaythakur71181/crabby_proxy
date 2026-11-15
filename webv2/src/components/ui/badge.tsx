@@ -65,7 +65,7 @@ export function StatusPill({
     <Pill tone={tone}>
       <span
         aria-hidden
-        className={cn("size-1.5 rounded-full bg-current", pulse && "animate-pulse-dot")}
+        className={cn("size-1.5 rounded-full bg-current", pulse && "animate-pulse-dot motion-reduce:animate-none")}
       />
       {label}
     </Pill>

@@ -17,7 +17,7 @@ import {
 import { useMemo } from "react";
 import { useLocation, useNavigate } from "react-router";
 import { motion } from "motion/react";
-import { clearSession } from "@/lib/auth";
+import { signOut } from "@/api/http";
 import {
   useApprovalRequests,
   useDeepHealth,
@@ -26,9 +26,10 @@ import {
   useSession,
 } from "@/hooks/queries";
 import { useTheme, type Theme } from "@/hooks/use-theme";
+import { useNow } from "@/hooks/use-now";
 import { Kbd } from "@/components/ui/misc";
 import { StatusPill } from "@/components/ui/badge";
-import { openPalette } from "./command-palette";
+import { openPalette } from "./palette-store";
 import { cn } from "@/lib/utils";
 
 const TITLES: Record<string, string> = {
@@ -71,6 +72,7 @@ export function Topbar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
   const metrics = useJsonMetrics(isAdmin);
   const requests = useApprovalRequests(true);
 
+  const nowMs = useNow(60_000);
   const notices = useMemo<Notice[]>(() => {
     const out: Notice[] = [];
     if (health.data) {
@@ -110,7 +112,7 @@ export function Topbar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
         (r) => r.user_id === session?.userId && r.status !== "pending",
       );
       const latest = mine.sort((a, b) => (b.decided_at ?? 0) - (a.decided_at ?? 0))[0];
-      if (latest?.decided_at && Date.now() / 1000 - latest.decided_at < 86400) {
+      if (latest?.decided_at && nowMs / 1000 - latest.decided_at < 86400) {
         out.push({
           id: `decision-${latest.id}`,
           tone: latest.status === "approved" ? "info" : "warning",
@@ -121,7 +123,7 @@ export function Topbar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
       }
     }
     return out;
-  }, [health.data, metrics.data, requests.data, isAdmin, session?.userId]);
+  }, [health.data, metrics.data, requests.data, isAdmin, session?.userId, nowMs]);
 
   const overall: "ok" | "warn" | "down" = health.data
     ? health.data.status === "healthy"
@@ -290,7 +292,7 @@ export function Topbar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
               </DropdownMenu.Item>
               <DropdownMenu.Item
                 onSelect={() => {
-                  clearSession();
+                  void signOut();
                   navigate("/login");
                 }}
                 className="flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-[12.5px] text-danger outline-none data-[highlighted]:bg-danger-soft"

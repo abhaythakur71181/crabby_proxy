@@ -1,7 +1,7 @@
-use super::models::ApiError;
+use super::models::{ApiError, PageQuery};
 use crate::admin::auth::AdminUser;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
@@ -29,7 +29,7 @@ pub async fn create_group(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateGroupRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let id = groups::create_group(&state.db_pool, &req.name, req.description.as_deref())
+    let id = groups::create_group(&state.db_writer, &req.name, req.description.as_deref())
         .await
         .map_err(|e| {
             tracing::error!("Failed to create group: {}", e);
@@ -46,8 +46,9 @@ pub async fn create_group(
 pub async fn list_groups(
     _admin: AdminUser,
     State(state): State<Arc<AppState>>,
+    Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<groups::UserGroupWithCount>>, ApiError> {
-    groups::list_groups(&state.db_pool)
+    groups::list_groups(&state.db_pool, page.page())
         .await
         .map(Json)
         .map_err(|e| {
@@ -78,7 +79,7 @@ pub async fn delete_group(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, ApiError> {
-    groups::delete_group(&state.db_pool, id)
+    groups::delete_group(&state.db_writer, id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to delete group: {}", e);
@@ -94,7 +95,7 @@ pub async fn add_member(
     Path(group_id): Path<i64>,
     Json(req): Json<AddMemberRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    groups::add_user_to_group(&state.db_pool, req.user_id, group_id)
+    groups::add_user_to_group(&state.db_writer, req.user_id, group_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to add member: {}", e);
@@ -109,7 +110,7 @@ pub async fn remove_member(
     State(state): State<Arc<AppState>>,
     Path((group_id, user_id)): Path<(i64, i64)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    groups::remove_user_from_group(&state.db_pool, user_id, group_id)
+    groups::remove_user_from_group(&state.db_writer, user_id, group_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to remove member: {}", e);
@@ -123,8 +124,9 @@ pub async fn list_members(
     _admin: AdminUser,
     State(state): State<Arc<AppState>>,
     Path(group_id): Path<i64>,
+    Query(page): Query<PageQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let members = groups::get_group_members(&state.db_pool, group_id)
+    let members = groups::get_group_members(&state.db_pool, group_id, page.page())
         .await
         .map_err(|e| {
             tracing::error!("Failed to list members: {}", e);
@@ -144,8 +146,9 @@ pub async fn list_user_groups(
     _admin: AdminUser,
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
+    Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<groups::UserGroup>>, ApiError> {
-    groups::get_user_groups(&state.db_pool, user_id)
+    groups::get_user_groups(&state.db_pool, user_id, page.page())
         .await
         .map(Json)
         .map_err(|e| {

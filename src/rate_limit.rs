@@ -6,6 +6,7 @@ use governor::{
 };
 use nonzero_ext::nonzero;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -24,19 +25,51 @@ fn normalize_ip(ip: IpAddr) -> IpAddr {
     }
 }
 
+/// One tracked IP: its token bucket plus when it was last used, so eviction
+/// can prefer entries that carry no state worth keeping.
+struct IpEntry {
+    limiter: GovernorRateLimiter<NotKeyed, InMemoryState, DefaultClock>,
+    /// Milliseconds since `IpRateLimiter::epoch` of the last check.
+    last_seen_ms: AtomicU64,
+    /// Logical use counter (from `IpRateLimiter::seq`) for LRU ordering;
+    /// unlike the millisecond clock it never ties.
+    last_use: AtomicU64,
+}
+
 /// Rate limiter for IP addresses (proxy layer)
 /// Uses DashMap for lock-free per-key access (no global write lock)
 #[derive(Clone)]
 pub struct IpRateLimiter {
-    limiters: Arc<DashMap<IpAddr, GovernorRateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
+    limiters: Arc<DashMap<IpAddr, IpEntry>>,
     quota: Quota,
-    /// Maximum number of tracked IPs before random eviction kicks in.
+    /// Maximum number of tracked IPs before eviction kicks in.
     /// Bounds memory so an attacker cannot exhaust RAM by spraying source IPs.
     max_entries: usize,
+    /// An entry untouched for this long has a fully refilled bucket, so it is
+    /// indistinguishable from a fresh limiter and can be dropped losslessly.
+    idle_after_ms: u64,
+    epoch: std::time::Instant,
+    /// Last idle sweep (ms since `epoch`), `u64::MAX` = never.
+    last_sweep_ms: Arc<AtomicU64>,
+    /// Last time a "lossy eviction" warning was logged (ms since `epoch`).
+    last_warn_ms: Arc<AtomicU64>,
+    /// Monotonic counter bumped on every check, used for LRU ordering.
+    seq: Arc<AtomicU64>,
+    /// Raw (rps, burst), for the Redis limiter.
+    limits: (u32, u32),
+    /// Shared bucket across instances (state backend = redis).
+    distributed: Option<RedisRateLimiter>,
 }
 
 /// Default cap on tracked IPs. ~100k entries × ~200 bytes ≈ 20 MB upper bound.
 pub const DEFAULT_MAX_TRACKED_IPS: usize = 100_000;
+
+/// Minimum spacing between full idle sweeps when the map is at its cap.
+const IP_SWEEP_INTERVAL_MS: u64 = 1_000;
+/// How many entries to sample when picking least-recently-used victims.
+const IP_EVICT_SAMPLE: usize = 64;
+/// How many of the sampled entries to evict per lossy eviction round.
+const IP_EVICT_BATCH: usize = 8;
 
 impl IpRateLimiter {
     /// Create new IP rate limiter with the default tracked-IP cap.
@@ -46,16 +79,28 @@ impl IpRateLimiter {
 
     /// Create new IP rate limiter with an explicit cap on tracked IPs.
     pub fn with_max_entries(requests_per_second: u32, burst_size: u32, max_entries: usize) -> Self {
-        let quota = Quota::per_second(
-            std::num::NonZeroU32::new(requests_per_second).unwrap_or(nonzero!(10u32)),
-        )
-        .allow_burst(std::num::NonZeroU32::new(burst_size).unwrap_or(nonzero!(20u32)));
+        let rps = std::num::NonZeroU32::new(requests_per_second).unwrap_or(nonzero!(10u32));
+        let burst = std::num::NonZeroU32::new(burst_size).unwrap_or(nonzero!(20u32));
+        let quota = Quota::per_second(rps).allow_burst(burst);
+        // Time for an empty bucket to refill completely: burst / rps seconds.
+        let idle_after_ms = (u64::from(burst.get()) * 1000).div_ceil(u64::from(rps.get()));
 
         Self {
             limiters: Arc::new(DashMap::new()),
             quota,
             max_entries: max_entries.max(1),
+            idle_after_ms: idle_after_ms.max(1),
+            epoch: std::time::Instant::now(),
+            last_sweep_ms: Arc::new(AtomicU64::new(u64::MAX)),
+            last_warn_ms: Arc::new(AtomicU64::new(u64::MAX)),
+            seq: Arc::new(AtomicU64::new(0)),
+            limits: (rps.get(), burst.get()),
+            distributed: None,
         }
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.epoch.elapsed().as_millis() as u64
     }
 
     /// Check if IP is allowed to make a request
@@ -63,37 +108,93 @@ impl IpRateLimiter {
     pub async fn check_ip(&self, ip: IpAddr) -> bool {
         // INFO: Normalize IPv4-mapped IPv6 (::ffff:x.x.x.x) to IPv4
         let ip = normalize_ip(ip);
+        let now = self.now_ms();
+        let use_seq = self.seq.fetch_add(1, Ordering::Relaxed);
 
-        // If we're at the cap and this IP is new, evict a small batch first.
-        // We check `contains_key` to avoid evicting on the hot path for IPs
-        // that already have a limiter. Eviction is opportunistic — random
-        // entries via DashMap iteration order, which is good enough to keep
-        // the map bounded under spray attacks.
+        // If we're at the cap and this IP is new, make room first. We check
+        // `contains_key` to avoid evicting on the hot path for IPs that
+        // already have a limiter.
         if self.limiters.len() >= self.max_entries && !self.limiters.contains_key(&ip) {
-            self.evict_some();
+            self.make_room(now);
         }
 
-        let limiter = self
-            .limiters
-            .entry(ip)
-            .or_insert_with(|| GovernorRateLimiter::direct(self.quota));
-        limiter.check().is_ok()
+        let local_ok = {
+            let entry = self.limiters.entry(ip).or_insert_with(|| IpEntry {
+                limiter: GovernorRateLimiter::direct(self.quota),
+                last_seen_ms: AtomicU64::new(now),
+                last_use: AtomicU64::new(use_seq),
+            });
+            entry.last_seen_ms.store(now, Ordering::Relaxed);
+            entry.last_use.store(use_seq, Ordering::Relaxed);
+            entry.limiter.check().is_ok()
+        };
+        if !local_ok {
+            return false;
+        }
+        let (rps, burst) = self.limits;
+        distributed_allows(
+            &self.distributed,
+            &format!("ip:{}", ip),
+            per_second_emission_us(rps),
+            burst,
+        )
+        .await
     }
 
-    /// Evict ~8 arbitrary entries to make room. DashMap iteration order is
-    /// not deterministic, so this approximates random eviction without the
-    /// cost of maintaining LRU metadata on the hot path.
-    fn evict_some(&self) {
-        const EVICT_BATCH: usize = 8;
-        let victims: Vec<IpAddr> = self
+    /// Also enforce the per-IP limit in a bucket shared by every instance.
+    pub fn with_distributed(mut self, redis: RedisRateLimiter) -> Self {
+        self.distributed = Some(redis);
+        self
+    }
+
+    /// Free space for a new IP.
+    ///
+    /// The old policy evicted 8 arbitrary entries, which let an IP-spraying
+    /// attacker both push out legitimate clients' state and reset its own
+    /// buckets (an evicted IP got a fresh full burst on reinsertion). Now:
+    ///
+    /// 1. Drop entries idle long enough that their bucket has fully refilled.
+    ///    Those are equivalent to a fresh limiter, so evicting them loses no
+    ///    rate-limit state at all.
+    /// 2. Only if that frees nothing, evict the least-recently-used entries
+    ///    from a sample. A client that is actively being throttled keeps
+    ///    touching its entry, so it is the last thing to go. These lossy
+    ///    evictions are what `IP_RATE_LIMIT_EVICTIONS` counts; a sustained
+    ///    non-zero rate means `max_tracked_ips` is too small for the traffic.
+    fn make_room(&self, now: u64) {
+        let last = self.last_sweep_ms.load(Ordering::Relaxed);
+        if last == u64::MAX || now.saturating_sub(last) >= IP_SWEEP_INTERVAL_MS {
+            self.last_sweep_ms.store(now, Ordering::Relaxed);
+            let idle_after = self.idle_after_ms;
+            self.limiters.retain(|_, e| {
+                now.saturating_sub(e.last_seen_ms.load(Ordering::Relaxed)) < idle_after
+            });
+            if self.limiters.len() < self.max_entries {
+                return;
+            }
+        }
+
+        let mut sample: Vec<(u64, IpAddr)> = self
             .limiters
             .iter()
-            .take(EVICT_BATCH)
-            .map(|e| *e.key())
+            .take(IP_EVICT_SAMPLE)
+            .map(|e| (e.last_use.load(Ordering::Relaxed), *e.key()))
             .collect();
-        for ip in victims {
-            self.limiters.remove(&ip);
-            crate::metrics::IP_RATE_LIMIT_EVICTIONS.inc();
+        sample.sort_unstable_by_key(|(used, _)| *used);
+        for (_, ip) in sample.into_iter().take(IP_EVICT_BATCH) {
+            if self.limiters.remove(&ip).is_some() {
+                crate::metrics::IP_RATE_LIMIT_EVICTIONS.inc();
+            }
+        }
+
+        let last_warn = self.last_warn_ms.load(Ordering::Relaxed);
+        if last_warn == u64::MAX || now.saturating_sub(last_warn) >= 60_000 {
+            self.last_warn_ms.store(now, Ordering::Relaxed);
+            tracing::warn!(
+                "IP rate limiter is full ({} active IPs); evicting least-recently-used entries. \
+                 Possible IP-spray attack, or rate_limiting.max_tracked_ips is too small.",
+                self.max_entries
+            );
         }
     }
 
@@ -117,6 +218,8 @@ pub struct UserRateLimiter {
     // Cache user rate limit configs (user_id -> config)
     user_configs: Arc<DashMap<i64, UserRateLimitConfig>>,
     cache_ttl: std::time::Duration,
+    /// Shared bucket across instances (state backend = redis).
+    distributed: Option<RedisRateLimiter>,
 }
 
 #[derive(Clone, Debug)]
@@ -140,7 +243,14 @@ impl UserRateLimiter {
             limiters: Arc::new(DashMap::new()),
             user_configs: Arc::new(DashMap::new()),
             cache_ttl,
+            distributed: None,
         }
+    }
+
+    /// Also enforce per-user limits in a bucket shared by every instance.
+    pub fn with_distributed(mut self, redis: RedisRateLimiter) -> Self {
+        self.distributed = Some(redis);
+        self
     }
 
     /// Check if user is allowed to make a request (uses cached config)
@@ -148,25 +258,31 @@ impl UserRateLimiter {
         if !config.enabled {
             return true;
         }
-        let quota =
-            Quota::per_second(std::num::NonZeroU32::new(config.rps).unwrap_or(nonzero!(5u32)))
-                .allow_burst(std::num::NonZeroU32::new(config.burst).unwrap_or(nonzero!(10u32)));
-        let limiter = self
-            .limiters
-            .entry(user_id)
-            .or_insert_with(|| GovernorRateLimiter::direct(quota));
-        limiter.check().is_ok()
+        self.check_user(user_id, config.rps, config.burst).await
     }
 
     /// Check if user is allowed (legacy method)
     pub async fn check_user(&self, user_id: i64, rps: u32, burst: u32) -> bool {
-        let quota = Quota::per_second(std::num::NonZeroU32::new(rps).unwrap_or(nonzero!(5u32)))
-            .allow_burst(std::num::NonZeroU32::new(burst).unwrap_or(nonzero!(10u32)));
-        let limiter = self
-            .limiters
-            .entry(user_id)
-            .or_insert_with(|| GovernorRateLimiter::direct(quota));
-        limiter.check().is_ok()
+        let rps = std::num::NonZeroU32::new(rps).unwrap_or(nonzero!(5u32));
+        let burst = std::num::NonZeroU32::new(burst).unwrap_or(nonzero!(10u32));
+        let local_ok = {
+            let quota = Quota::per_second(rps).allow_burst(burst);
+            let limiter = self
+                .limiters
+                .entry(user_id)
+                .or_insert_with(|| GovernorRateLimiter::direct(quota));
+            limiter.check().is_ok()
+        };
+        if !local_ok {
+            return false;
+        }
+        distributed_allows(
+            &self.distributed,
+            &format!("user:{}", user_id),
+            per_second_emission_us(rps.get()),
+            burst.get(),
+        )
+        .await
     }
 
     /// Get cached user config or return None if expired/missing
@@ -259,7 +375,15 @@ pub struct LoginRateLimiter {
     >,
     quota: Quota,
     user_quota: Quota,
+    /// Raw (per-minute, burst) for the per-IP bucket, for the Redis limiter.
+    ip_limits: (u32, u32),
+    /// Shared bucket across instances (state backend = redis).
+    distributed: Option<RedisRateLimiter>,
 }
+
+/// Per-(ip, username) login limit: 3 per minute, burst 5.
+const LOGIN_USER_PER_MINUTE: u32 = 3;
+const LOGIN_USER_BURST: u32 = 5;
 
 impl LoginRateLimiter {
     /// Create new login rate limiter
@@ -270,52 +394,82 @@ impl LoginRateLimiter {
 
     /// Create login rate limiter with custom limits
     pub fn with_limits(attempts_per_minute: u32, burst: u32, max_ips: usize) -> Self {
-        let quota = Quota::per_minute(
-            std::num::NonZeroU32::new(attempts_per_minute).unwrap_or(nonzero!(5u32)),
-        )
-        .allow_burst(std::num::NonZeroU32::new(burst).unwrap_or(nonzero!(10u32)));
+        let per_minute = std::num::NonZeroU32::new(attempts_per_minute).unwrap_or(nonzero!(5u32));
+        let burst = std::num::NonZeroU32::new(burst).unwrap_or(nonzero!(10u32));
+        let quota = Quota::per_minute(per_minute).allow_burst(burst);
         // Per-(ip, username) is tighter — repeated targeted attempts for a
         // single user from one IP are almost always brute force.
-        let user_quota = Quota::per_minute(nonzero!(3u32)).allow_burst(nonzero!(5u32));
+        let user_quota = Quota::per_minute(nonzero!(LOGIN_USER_PER_MINUTE))
+            .allow_burst(nonzero!(LOGIN_USER_BURST));
+        let max_ips = std::num::NonZeroUsize::new(max_ips).unwrap_or(nonzero!(1usize));
         Self {
-            limiters: Arc::new(RwLock::new(lru::LruCache::new(
-                std::num::NonZeroUsize::new(max_ips).unwrap(),
-            ))),
-            user_limiters: Arc::new(RwLock::new(lru::LruCache::new(
-                std::num::NonZeroUsize::new(max_ips).unwrap(),
-            ))),
+            limiters: Arc::new(RwLock::new(lru::LruCache::new(max_ips))),
+            user_limiters: Arc::new(RwLock::new(lru::LruCache::new(max_ips))),
             quota,
             user_quota,
+            ip_limits: (per_minute.get(), burst.get()),
+            distributed: None,
         }
     }
 
-    /// Check if IP is allowed to attempt login (B15: use IpAddr to prevent string-key bypass)
-    pub async fn check(&self, ip: &str) -> bool {
-        // Parse to IpAddr for consistent keying; fall back to allow if unparseable
-        let ip_addr: IpAddr = match ip.parse() {
-            Ok(addr) => normalize_ip(addr), // normalize IPv4-mapped IPv6
-            Err(_) => return true,
+    /// Also enforce the limits in a bucket shared by every instance.
+    pub fn with_distributed(mut self, redis: RedisRateLimiter) -> Self {
+        self.distributed = Some(redis);
+        self
+    }
+
+    /// Check if IP is allowed to attempt login.
+    ///
+    /// Takes a typed `IpAddr` rather than a string so there is no "unparseable
+    /// input" branch: the old `&str` API failed OPEN (returned `true`) on any
+    /// value that did not parse, so a caller passing e.g. `"ip:port"` would
+    /// have silently disabled login throttling.
+    pub async fn check(&self, ip: IpAddr) -> bool {
+        let ip_addr = normalize_ip(ip);
+        let local_ok = {
+            let mut limiters = self.limiters.write().await;
+            let limiter =
+                limiters.get_or_insert(ip_addr, || GovernorRateLimiter::direct(self.quota));
+            limiter.check().is_ok()
         };
-        let mut limiters = self.limiters.write().await;
-        let limiter = limiters.get_or_insert(ip_addr, || GovernorRateLimiter::direct(self.quota));
-        limiter.check().is_ok()
+        if !local_ok {
+            return false;
+        }
+        let (per_minute, burst) = self.ip_limits;
+        distributed_allows(
+            &self.distributed,
+            &format!("login:ip:{}", ip_addr),
+            per_minute_emission_us(per_minute),
+            burst,
+        )
+        .await
     }
 
     /// Check both the per-IP and per-(IP, username) buckets. Both must
     /// allow the attempt. Use this on the login path so a single client
     /// can't enumerate users without burning its overall budget.
-    pub async fn check_user(&self, ip: &str, username: &str) -> bool {
+    pub async fn check_user(&self, ip: IpAddr, username: &str) -> bool {
         if !self.check(ip).await {
             return false;
         }
-        let ip_addr: IpAddr = match ip.parse() {
-            Ok(addr) => normalize_ip(addr),
-            Err(_) => return true,
+        let ip_addr = normalize_ip(ip);
+        let local_ok = {
+            let key = (ip_addr, username.to_string());
+            let mut limiters = self.user_limiters.write().await;
+            let limiter =
+                limiters.get_or_insert(key, || GovernorRateLimiter::direct(self.user_quota));
+            limiter.check().is_ok()
         };
-        let key = (ip_addr, username.to_string());
-        let mut limiters = self.user_limiters.write().await;
-        let limiter = limiters.get_or_insert(key, || GovernorRateLimiter::direct(self.user_quota));
-        limiter.check().is_ok()
+        if !local_ok {
+            return false;
+        }
+        distributed_allows(
+            &self.distributed,
+            &format!("login:ipuser:{}:{}", ip_addr, username_bucket_id(username)),
+            per_minute_emission_us(LOGIN_USER_PER_MINUTE),
+            LOGIN_USER_BURST,
+        )
+        .await
     }
 
     /// Get number of tracked IPs
@@ -336,87 +490,129 @@ impl Default for LoginRateLimiter {
     }
 }
 
-/// Redis-backed distributed rate limiter using fixed window counters.
-/// Suitable for multi-instance deployments where in-process rate limiters
-/// don't share state.
+/// GCRA (generic cell rate algorithm) in Lua. Equivalent to a token bucket of
+/// size `burst` refilled every `emission` microseconds, i.e. the same model as
+/// the in-process `governor` limiters, so a config value means the same thing
+/// in both backends. Unlike a fixed-window counter there is no 2x burst at
+/// window edges. Time comes from the Redis server clock so instances with
+/// skewed clocks still agree.
+const GCRA_SCRIPT: &str = r#"
+if redis.replicate_commands then pcall(redis.replicate_commands) end
+local emission = tonumber(ARGV[1])
+local burst = tonumber(ARGV[2])
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000000 + tonumber(t[2])
+local tat = tonumber(redis.call('GET', KEYS[1]))
+if (not tat) or tat < now then tat = now end
+local new_tat = tat + emission
+if new_tat - now > emission * burst then
+  return 0
+end
+local ttl_ms = math.ceil((new_tat - now) / 1000)
+if ttl_ms < 1 then ttl_ms = 1 end
+redis.call('SET', KEYS[1], string.format('%d', new_tat), 'PX', ttl_ms)
+return 1
+"#;
+
+/// Redis-backed distributed rate limiter (GCRA / token bucket).
 ///
-/// Uses INCR + EXPIRE for atomic increment-and-expire in a single round trip.
+/// In-process limiters only see the traffic that reaches their own instance,
+/// so with N instances behind a load balancer every per-IP / per-user /
+/// login limit is effectively N times larger. When the state backend is
+/// Redis, the IP, user and login limiters consult this shared bucket in
+/// addition to their local one.
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct RedisRateLimiter {
     conn: redis::aio::ConnectionManager,
     key_prefix: String,
-    window_secs: u64,
-    max_requests: u64,
+    script: Arc<redis::Script>,
 }
 
 impl RedisRateLimiter {
-    /// Create a new Redis-backed rate limiter.
-    ///
-    /// - `key_prefix`: e.g. "rl:ip:" or "rl:user:"
-    /// - `window_secs`: time window in seconds (e.g. 1 for per-second)
-    /// - `max_requests`: max allowed requests in the window
-    pub fn new(
-        conn: redis::aio::ConnectionManager,
-        key_prefix: &str,
-        window_secs: u64,
-        max_requests: u64,
-    ) -> Self {
+    /// `key_prefix` is prepended to every bucket key, e.g. `"crabby_proxy:"`.
+    pub fn new(conn: redis::aio::ConnectionManager, key_prefix: &str) -> Self {
         Self {
             conn,
             key_prefix: key_prefix.to_string(),
-            window_secs,
-            max_requests,
+            script: Arc::new(redis::Script::new(GCRA_SCRIPT)),
         }
     }
 
-    /// Check if a key (IP or user ID) is within the rate limit.
-    /// Returns true if allowed, false if rate limited.
-    ///
-    /// Uses a Lua script for atomic INCR + EXPIRE to avoid race conditions.
-    pub async fn check(&self, key: &str) -> bool {
-        let full_key = format!("{}{}", self.key_prefix, key);
+    /// Take one token from the bucket `key`. `emission_us` is the refill
+    /// interval per token in microseconds and `burst` the bucket size.
+    pub async fn check(
+        &self,
+        key: &str,
+        emission_us: u64,
+        burst: u32,
+    ) -> Result<bool, redis::RedisError> {
+        let full_key = format!("{}rl:{}", self.key_prefix, key);
         let mut conn = self.conn.clone();
-
-        // Lua script: atomically increment counter and set expiry if new
-        let script = redis::Script::new(
-            r#"
-            local current = redis.call('INCR', KEYS[1])
-            if current == 1 then
-                redis.call('EXPIRE', KEYS[1], ARGV[1])
-            end
-            return current
-            "#,
-        );
-
-        match script
+        let allowed: i64 = self
+            .script
             .key(&full_key)
-            .arg(self.window_secs)
-            .invoke_async::<i64>(&mut conn)
-            .await
-        {
-            Ok(count) => count <= self.max_requests as i64,
-            Err(e) => {
-                // Fail CLOSED: a distributed rate limiter that allows on error
-                // lets an attacker disable it by inducing Redis load/outage,
-                // enabling brute force / flooding. Deny instead.
-                tracing::warn!("Redis rate limit check failed (denying): {}", e);
-                false
+            .arg(emission_us.max(1))
+            .arg(burst.max(1))
+            .invoke_async(&mut conn)
+            .await?;
+        Ok(allowed == 1)
+    }
+}
+
+/// Microseconds per token for an N-per-second quota.
+fn per_second_emission_us(rps: u32) -> u64 {
+    1_000_000 / u64::from(rps.max(1))
+}
+
+/// Microseconds per token for an N-per-minute quota.
+fn per_minute_emission_us(per_minute: u32) -> u64 {
+    60_000_000 / u64::from(per_minute.max(1))
+}
+
+/// Consult the shared Redis bucket, if one is configured.
+///
+/// On a Redis error this returns `true`, leaving the local verdict (which the
+/// caller has already enforced) in charge, rather than failing closed: failing
+/// closed would turn any Redis blip into a full proxy / admin outage, while
+/// this still keeps the per-instance limit in force. Errors are logged at most
+/// once every 30 seconds.
+async fn distributed_allows(
+    redis: &Option<RedisRateLimiter>,
+    key: &str,
+    emission_us: u64,
+    burst: u32,
+) -> bool {
+    let Some(redis) = redis else {
+        return true;
+    };
+    match redis.check(key, emission_us, burst).await {
+        Ok(allowed) => allowed,
+        Err(e) => {
+            static LAST_WARN: AtomicU64 = AtomicU64::new(0);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if now.saturating_sub(LAST_WARN.load(Ordering::Relaxed)) >= 30 {
+                LAST_WARN.store(now, Ordering::Relaxed);
+                tracing::warn!(
+                    "Distributed rate limit check failed, using the per-instance limit only: {}",
+                    e
+                );
             }
+            true
         }
     }
+}
 
-    /// Get the current count for a key.
-    pub async fn get_count(&self, key: &str) -> u64 {
-        let full_key = format!("{}{}", self.key_prefix, key);
-        let mut conn = self.conn.clone();
-        redis::cmd("GET")
-            .arg(&full_key)
-            .query_async::<Option<u64>>(&mut conn)
-            .await
-            .unwrap_or(Some(0))
-            .unwrap_or(0)
-    }
+/// Stable, non-reversible bucket id for a username (usernames can contain
+/// any character, including the `:` used as a key separator).
+fn username_bucket_id(username: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(username.as_bytes())[..16]
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
 }
 
 #[cfg(test)]
@@ -555,6 +751,48 @@ mod tests {
             "expected <=16 entries after eviction, got {}",
             limiter.count().await
         );
+    }
+
+    #[tokio::test]
+    async fn test_ip_rate_limiter_prefers_idle_entries() {
+        // 1000 rps, burst 1: a bucket refills in 1 ms, so entries go idle fast.
+        let limiter = IpRateLimiter::with_max_entries(1000, 1, 16);
+        for i in 0..16u8 {
+            limiter
+                .check_ip(IpAddr::V4(Ipv4Addr::new(10, 1, 0, i)))
+                .await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let before = crate::metrics::IP_RATE_LIMIT_EVICTIONS.get();
+        limiter
+            .check_ip(IpAddr::V4(Ipv4Addr::new(10, 2, 0, 1)))
+            .await;
+        // All 16 idle entries were swept losslessly; only the new IP remains.
+        assert_eq!(limiter.count().await, 1);
+        assert_eq!(crate::metrics::IP_RATE_LIMIT_EVICTIONS.get(), before);
+    }
+
+    #[tokio::test]
+    async fn test_ip_rate_limiter_spray_does_not_reset_active_offender() {
+        // 1 rps, burst 1: once limited, an IP stays limited for ~1s.
+        let limiter = IpRateLimiter::with_max_entries(1, 1, 16);
+        let offender = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        assert!(limiter.check_ip(offender).await);
+        assert!(!limiter.check_ip(offender).await);
+
+        // Spray far more IPs than the cap. The offender keeps retrying, so it
+        // is always the most recently used entry and must never be evicted
+        // (which would hand it a fresh burst).
+        for i in 0..200u32 {
+            let ip = IpAddr::V4(Ipv4Addr::new(10, 3, (i / 256) as u8, (i % 256) as u8));
+            limiter.check_ip(ip).await;
+            assert!(
+                !limiter.check_ip(offender).await,
+                "offender bucket was reset after {} sprayed IPs",
+                i + 1
+            );
+        }
+        assert!(limiter.count().await <= 16);
     }
 
     // === New UserRateLimiter Tests ===
@@ -715,14 +953,14 @@ mod tests {
         let limiter = LoginRateLimiter::new();
         // Default: 5 per minute, burst 10
         for _ in 0..10 {
-            assert!(limiter.check("192.168.1.1").await);
+            assert!(limiter.check(v4(192, 168, 1, 1)).await);
         }
     }
 
     #[tokio::test]
     async fn test_login_rate_limiter_blocks_after_burst() {
         let limiter = LoginRateLimiter::with_limits(5, 5, 1000);
-        let ip = "10.0.0.1";
+        let ip = v4(10, 0, 0, 1);
 
         for _ in 0..5 {
             limiter.check(ip).await;
@@ -736,12 +974,12 @@ mod tests {
 
         // Exhaust ip1
         for _ in 0..3 {
-            limiter.check("1.1.1.1").await;
+            limiter.check(v4(1, 1, 1, 1)).await;
         }
-        assert!(!limiter.check("1.1.1.1").await);
+        assert!(!limiter.check(v4(1, 1, 1, 1)).await);
 
         // ip2 should still work
-        assert!(limiter.check("2.2.2.2").await);
+        assert!(limiter.check(v4(2, 2, 2, 2)).await);
     }
 
     #[tokio::test]
@@ -749,18 +987,18 @@ mod tests {
         let limiter = LoginRateLimiter::new();
         assert_eq!(limiter.count().await, 0);
 
-        limiter.check("1.1.1.1").await;
+        limiter.check(v4(1, 1, 1, 1)).await;
         assert_eq!(limiter.count().await, 1);
 
-        limiter.check("2.2.2.2").await;
+        limiter.check(v4(2, 2, 2, 2)).await;
         assert_eq!(limiter.count().await, 2);
     }
 
     #[tokio::test]
     async fn test_login_rate_limiter_clear() {
         let limiter = LoginRateLimiter::new();
-        limiter.check("1.1.1.1").await;
-        limiter.check("2.2.2.2").await;
+        limiter.check(v4(1, 1, 1, 1)).await;
+        limiter.check(v4(2, 2, 2, 2)).await;
 
         limiter.clear().await;
         assert_eq!(limiter.count().await, 0);
@@ -770,15 +1008,110 @@ mod tests {
     async fn test_login_rate_limiter_default() {
         let limiter = LoginRateLimiter::default();
         assert_eq!(limiter.count().await, 0);
-        assert!(limiter.check("test-ip").await);
+        assert!(limiter.check(v4(127, 0, 0, 1)).await);
     }
 
     #[tokio::test]
-    async fn test_login_rate_limiter_string_ip_formats() {
-        let limiter = LoginRateLimiter::new();
-        // Should work with various string formats
-        assert!(limiter.check("127.0.0.1").await);
-        assert!(limiter.check("::1").await);
-        assert!(limiter.check("10.0.0.1:8080").await); // With port as string
+    async fn test_login_rate_limiter_ipv4_mapped_shares_bucket() {
+        // ::ffff:10.0.0.9 and 10.0.0.9 are the same client and must share
+        // one bucket, otherwise the mapped form is a free second budget.
+        let limiter = LoginRateLimiter::with_limits(5, 2, 1000);
+        let mapped: IpAddr = "::ffff:10.0.0.9".parse().unwrap();
+        assert!(limiter.check(v4(10, 0, 0, 9)).await);
+        assert!(limiter.check(mapped).await);
+        assert!(!limiter.check(v4(10, 0, 0, 9)).await);
+        assert!(!limiter.check(mapped).await);
+    }
+
+    #[tokio::test]
+    async fn test_login_rate_limiter_per_user_bucket() {
+        let limiter = LoginRateLimiter::with_limits(1000, 1000, 1000);
+        let ip = v4(10, 0, 0, 1);
+        // Per-(ip, user) burst is 5.
+        for _ in 0..5 {
+            assert!(limiter.check_user(ip, "alice").await);
+        }
+        assert!(!limiter.check_user(ip, "alice").await);
+        // A different username from the same IP has its own bucket.
+        assert!(limiter.check_user(ip, "bob").await);
+    }
+
+    fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+    }
+
+    #[test]
+    fn test_emission_intervals() {
+        assert_eq!(per_second_emission_us(10), 100_000);
+        assert_eq!(per_second_emission_us(0), 1_000_000);
+        assert_eq!(per_minute_emission_us(3), 20_000_000);
+    }
+
+    #[test]
+    fn test_username_bucket_id_is_opaque_and_stable() {
+        let a = username_bucket_id("alice:with:colons");
+        assert_eq!(a, username_bucket_id("alice:with:colons"));
+        assert_ne!(a, username_bucket_id("bob"));
+        assert_eq!(a.len(), 32);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // === RedisRateLimiter (needs a live Redis) ===
+    //
+    // Skipped unless CRABBY_TEST_REDIS_URL is set, e.g.
+    //   CRABBY_TEST_REDIS_URL=redis://127.0.0.1:6379 cargo test rate_limit
+
+    async fn test_redis() -> Option<RedisRateLimiter> {
+        let url = std::env::var("CRABBY_TEST_REDIS_URL").ok()?;
+        let client = redis::Client::open(url).ok()?;
+        let conn = redis::aio::ConnectionManager::new(client).await.ok()?;
+        let prefix = format!("crabby_test:{}:", uuid::Uuid::new_v4());
+        Some(RedisRateLimiter::new(conn, &prefix))
+    }
+
+    #[tokio::test]
+    async fn test_redis_gcra_allows_burst_then_blocks() {
+        let Some(redis) = test_redis().await else {
+            return;
+        };
+        // 1 token per minute, burst 3.
+        for _ in 0..3 {
+            assert!(redis.check("k", 60_000_000, 3).await.unwrap());
+        }
+        assert!(!redis.check("k", 60_000_000, 3).await.unwrap());
+        // Independent key is unaffected.
+        assert!(redis.check("other", 60_000_000, 3).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_redis_gcra_refills() {
+        let Some(redis) = test_redis().await else {
+            return;
+        };
+        // 50 ms per token, burst 1.
+        assert!(redis.check("r", 50_000, 1).await.unwrap());
+        assert!(!redis.check("r", 50_000, 1).await.unwrap());
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        assert!(redis.check("r", 50_000, 1).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_login_limiter_shared_across_instances() {
+        let Some(redis) = test_redis().await else {
+            return;
+        };
+        // Two "instances" with their own local state but one shared bucket:
+        // together they must not exceed the single-instance burst.
+        let a = LoginRateLimiter::with_limits(5, 4, 100).with_distributed(redis.clone());
+        let b = LoginRateLimiter::with_limits(5, 4, 100).with_distributed(redis);
+        let ip = v4(198, 51, 100, 1);
+        let mut allowed = 0;
+        for i in 0..8 {
+            let l = if i % 2 == 0 { &a } else { &b };
+            if l.check(ip).await {
+                allowed += 1;
+            }
+        }
+        assert_eq!(allowed, 4);
     }
 }

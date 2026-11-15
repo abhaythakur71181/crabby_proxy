@@ -1,8 +1,9 @@
-use super::models::ApiError;
+use super::models::{ApiError, PageQuery};
+use crate::admin::auth::{AdminUser, CurrentUser};
 use crate::app_state::AppState;
 use crate::db::approvals;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
@@ -39,13 +40,11 @@ pub struct TerminateRequest {
 
 /// POST /api/approvals - Create a new approval (admin only)
 pub async fn create_approval(
+    AdminUser(current_user): AdminUser,
     State(state): State<Arc<AppState>>,
-    axum::Extension(current_user_id): axum::Extension<i64>,
     Json(payload): Json<CreateApprovalRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let current_user =
-        crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
-    current_user.require_admin()?;
+    let current_user_id = current_user.id;
 
     // Bound the grant duration: negative -> expires in the past; huge -> effectively
     // permanent. Cap at 1..=8760 hours (1 year).
@@ -60,7 +59,7 @@ pub async fn create_approval(
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     let id = approvals::create_approval(
-        &state.db_pool,
+        &state.db_writer,
         payload.user_id,
         &payload.client_ip,
         current_user_id,
@@ -78,7 +77,7 @@ pub async fn create_approval(
 
     // Audit log
     let _ = crate::db::audit_log::log_action(
-        &state.db_pool,
+        &state.db_writer,
         current_user_id,
         "approval_created",
         Some("approval"),
@@ -116,14 +115,11 @@ pub async fn create_approval(
 
 /// GET /api/approvals - List all active approvals (admin only)
 pub async fn list_approvals(
+    _admin: AdminUser,
     State(state): State<Arc<AppState>>,
-    axum::Extension(current_user_id): axum::Extension<i64>,
+    Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<ApprovalResponse>>, ApiError> {
-    let current_user =
-        crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
-    current_user.require_admin()?;
-
-    let records = approvals::list_all_approvals(&state.db_pool)
+    let records = approvals::list_all_approvals(&state.db_pool, page.page())
         .await
         .map_err(|e| {
             tracing::error!("Failed to list approvals: {}", e);
@@ -150,17 +146,16 @@ pub async fn list_approvals(
 
 /// GET /api/users/:id/approvals - List user's active approvals
 pub async fn list_user_approvals(
+    current_user: CurrentUser,
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<i64>,
-    axum::Extension(current_user_id): axum::Extension<i64>,
+    Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<ApprovalResponse>>, ApiError> {
-    let current_user =
-        crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
     if !current_user.can_access_user(user_id) {
         return Err(ApiError::forbidden("Cannot access other users' approvals"));
     }
 
-    let records = approvals::list_user_approvals(&state.db_pool, user_id)
+    let records = approvals::list_user_approvals(&state.db_pool, user_id, page.page())
         .await
         .map_err(|e| {
             tracing::error!("Failed to list user approvals: {}", e);
@@ -187,17 +182,15 @@ pub async fn list_user_approvals(
 
 /// DELETE /api/approvals/:id - Terminate an approval (admin only)
 pub async fn terminate_approval(
+    AdminUser(current_user): AdminUser,
     State(state): State<Arc<AppState>>,
     Path(approval_id): Path<i64>,
-    axum::Extension(current_user_id): axum::Extension<i64>,
     Json(payload): Json<TerminateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let current_user =
-        crate::admin::auth::CurrentUser::from_request_extensions(&state, current_user_id).await?;
-    current_user.require_admin()?;
+    let current_user_id = current_user.id;
 
     let terminated_user = approvals::terminate_approval(
-        &state.db_pool,
+        &state.db_writer,
         approval_id,
         current_user_id,
         &payload.reason,
@@ -215,7 +208,7 @@ pub async fn terminate_approval(
         state.invalidate_approval_cache(approved_user_id).await;
         // Audit log
         let _ = crate::db::audit_log::log_action(
-            &state.db_pool,
+            &state.db_writer,
             current_user_id,
             "approval_terminated",
             Some("approval"),
