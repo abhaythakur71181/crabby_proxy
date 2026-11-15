@@ -83,9 +83,9 @@ pub async fn issue_live_ticket(
     _admin: AdminUser,
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
-    use rand::Rng;
-    let ticket: String = rand::thread_rng()
-        .sample_iter(&rand::distributions::Alphanumeric)
+    use rand::RngExt;
+    let ticket: String = rand::rng()
+        .sample_iter(&rand::distr::Alphanumeric)
         .take(32)
         .map(char::from)
         .collect();
@@ -165,7 +165,7 @@ async fn handle_live_connections(mut socket: WebSocket, state: Arc<AppState>) {
                         "timestamp": chrono::Utc::now().timestamp(),
                     });
 
-                    if let Err(e) = socket.send(Message::Text(payload.to_string())).await {
+                    if let Err(e) = socket.send(Message::Text(payload.to_string().into())).await {
                         tracing::debug!("WebSocket send error (client disconnected?): {}", e);
                         break;
                     }

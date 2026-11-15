@@ -101,7 +101,7 @@ pub async fn get_user_by_username(
     username: &str,
 ) -> Result<Option<User>, sqlx::Error> {
     let sql = format!("SELECT {USER_COLUMNS_NO_HASH} FROM users WHERE username = ?");
-    sqlx::query_as::<_, User>(&sql)
+    sqlx::query_as::<_, User>(sqlx::AssertSqlSafe(sql))
         .bind(username)
         .fetch_optional(pool)
         .await
@@ -114,13 +114,15 @@ pub async fn get_root_admin(pool: &SqlitePool) -> Result<Option<User>, sqlx::Err
     let sql = format!(
         "SELECT {USER_COLUMNS_NO_HASH} FROM users WHERE role = 'root_admin' AND is_active = 1 ORDER BY id LIMIT 1"
     );
-    sqlx::query_as::<_, User>(&sql).fetch_optional(pool).await
+    sqlx::query_as::<_, User>(sqlx::AssertSqlSafe(sql))
+        .fetch_optional(pool)
+        .await
 }
 
 /// Get user by ID
 pub async fn get_user_by_id(pool: &SqlitePool, id: i64) -> Result<Option<User>, sqlx::Error> {
     let sql = format!("SELECT {USER_COLUMNS_NO_HASH} FROM users WHERE id = ?");
-    sqlx::query_as::<_, User>(&sql)
+    sqlx::query_as::<_, User>(sqlx::AssertSqlSafe(sql))
         .bind(id)
         .fetch_optional(pool)
         .await
@@ -141,7 +143,7 @@ pub async fn verify_password(
     password: &str,
 ) -> Result<Option<User>, sqlx::Error> {
     let sql = format!("SELECT {USER_COLUMNS_WITH_HASH} FROM users WHERE username = ?");
-    let user = sqlx::query_as::<_, User>(&sql)
+    let user = sqlx::query_as::<_, User>(sqlx::AssertSqlSafe(sql))
         .bind(username)
         .fetch_optional(pool)
         .await?;
@@ -223,24 +225,24 @@ pub async fn update_last_login(pool: &SqlitePool, user_id: i64) -> Result<(), sq
 
 /// Generate a secure random password with guaranteed character diversity
 fn generate_secure_password(length: usize) -> String {
-    use rand::Rng;
+    use rand::RngExt;
     const UPPERCASE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     const LOWERCASE: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
     const DIGITS: &[u8] = b"0123456789";
     const SPECIAL: &[u8] = b"!@#$%^&*";
     const ALL: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let length = length.max(4);
     let mut password: Vec<u8> = Vec::with_capacity(length);
-    password.push(UPPERCASE[rng.gen_range(0..UPPERCASE.len())]);
-    password.push(LOWERCASE[rng.gen_range(0..LOWERCASE.len())]);
-    password.push(DIGITS[rng.gen_range(0..DIGITS.len())]);
-    password.push(SPECIAL[rng.gen_range(0..SPECIAL.len())]);
+    password.push(UPPERCASE[rng.random_range(0..UPPERCASE.len())]);
+    password.push(LOWERCASE[rng.random_range(0..LOWERCASE.len())]);
+    password.push(DIGITS[rng.random_range(0..DIGITS.len())]);
+    password.push(SPECIAL[rng.random_range(0..SPECIAL.len())]);
     for _ in 4..length {
-        password.push(ALL[rng.gen_range(0..ALL.len())]);
+        password.push(ALL[rng.random_range(0..ALL.len())]);
     }
     for i in (1..password.len()).rev() {
-        let j = rng.gen_range(0..=i);
+        let j = rng.random_range(0..=i);
         password.swap(i, j);
     }
     String::from_utf8(password).unwrap_or_else(|_| "Fallback_P@ss1".to_string())
@@ -487,7 +489,7 @@ pub async fn update_user(
     }
 
     let sql = format!("SELECT {USER_COLUMNS_NO_HASH} FROM users WHERE id = ?");
-    let user = sqlx::query_as::<_, User>(&sql)
+    let user = sqlx::query_as::<_, User>(sqlx::AssertSqlSafe(sql))
         .bind(user_id)
         .fetch_one(&mut *tx)
         .await?;
@@ -531,7 +533,7 @@ pub async fn list_users_paginated(
     let sql = format!(
         "SELECT {USER_COLUMNS_NO_HASH} FROM users ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
     );
-    sqlx::query_as::<_, User>(&sql)
+    sqlx::query_as::<_, User>(sqlx::AssertSqlSafe(sql))
         .bind(limit)
         .bind(offset)
         .fetch_all(pool)
