@@ -10,7 +10,7 @@ anyhow = "1.0.98"
 argon2 = { version = "0.5.3", features = ["std"] }
 async-trait = "0.1.89"
 axum = { version = "0.8", features = ["macros", "ws"] }
-base64 = "0.22.1"
+base64 = "0.23.1"
 chrono = { version = "0.4.41", features = ["serde"] }
 clap = { version = "4.5.53", features = ["derive"] }
 config = "0.15.19"
@@ -25,7 +25,7 @@ sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite", "migrate", "u
 thiserror = "2.0.12"
 tokio = { version = "1.45.1", features = ["full"] }
 tokio-rustls = "0.26.4"
-toml = "0.9.11"
+toml = "1.2.1"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["json", "fmt", "env-filter"] }
@@ -54,7 +54,7 @@ hickory-resolver = "0.26"
 
 [dev-dependencies]
 serial_test = "4.0"
-toml = "0.9.11"
+toml = "1.2.1"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
 serde_json = "1"
 rcgen = "0.14"
