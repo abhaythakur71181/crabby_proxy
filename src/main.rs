@@ -48,6 +48,7 @@ use crate::config_env::ConfigEnvExt;
 use crate::proxy::listener::run_proxy_server;
 use clap::Parser;
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::Arc;
 use tokio::signal;
 
@@ -72,7 +73,7 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> ExitCode {
     let args = Args::parse();
 
     // Install the process-level rustls crypto provider before any TLS use
@@ -101,9 +102,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Startup failures (a configuration the proxy refuses to run with, an
+    // unreadable config file, a database that cannot be opened, ...) are
+    // reported as one `error: ...` line and exit status 1 — not a panic with
+    // a backtrace note, and not the `Error: "..."` Debug dump that returning
+    // the error from main would print.
+    match run(args).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            tracing::error!("{}", e);
+            eprintln!("error: {}", e);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut config = if args.config.exists() {
         tracing::info!("Loading configuration from: {}", args.config.display());
-        Config::from_file(&args.config)?
+        Config::from_file(&args.config)
+            .map_err(|e| format!("failed to load {}: {}", args.config.display(), e))?
     } else {
         tracing::warn!("Configuration file not found, using defaults");
         Config::default()
@@ -118,7 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Apply environment variable overrides for secrets
-    config.apply_env_overrides();
+    config.apply_env_overrides()?;
 
     tracing::info!("Configuration loaded successfully");
     tracing::info!("  Proxy: {}", config.server.proxy_bind);
@@ -151,8 +169,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(AppState::new(config.clone(), config_path, db_pool).await?);
 
     // Parse socket addresses
-    let proxy_addr = config.server.proxy_bind.parse()?;
-    let admin_addr = config.server.admin_bind.parse()?;
+    let proxy_addr: std::net::SocketAddr = config.server.proxy_bind.parse().map_err(|e| {
+        format!(
+            "server.proxy_bind {:?} is not a socket address: {}",
+            config.server.proxy_bind, e
+        )
+    })?;
+    let admin_addr: std::net::SocketAddr = config.server.admin_bind.parse().map_err(|e| {
+        format!(
+            "server.admin_bind {:?} is not a socket address: {}",
+            config.server.admin_bind, e
+        )
+    })?;
 
     tracing::info!("🚀 Starting Crabby Proxy");
     tracing::info!("  Proxy server: {}", proxy_addr);
@@ -195,6 +223,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    // Background: with shared (Redis) quotas, push local byte counts and pull
+    // the global ones every second (#30).
+    if state.quota_trackers.is_shared() {
+        let trackers = state.quota_trackers.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(crate::quota_tracker::SHARED_SYNC_INTERVAL).await;
+                trackers.sync_all().await;
+            }
+        });
+    }
+
     // Background: evict idle per-user quota trackers so the registry does not
     // grow with every user ever seen (#30).
     {
@@ -202,6 +242,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(crate::quota_tracker::EVICT_SWEEP_INTERVAL).await;
+                trackers.sync_all().await;
                 let n = trackers.evict_idle(crate::quota_tracker::IDLE_EVICT_SECS);
                 if n > 0 {
                     tracing::debug!("quota tracker sweep: evicted {} idle entries", n);
@@ -227,7 +268,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Re-read in case config was reloaded.
                     let days = retention_state.config.load().database.usage_retention_days;
                     if days > 0 {
-                        match crate::db::usage::purge_old_usage(&retention_state.db_pool, days)
+                        match crate::db::usage::purge_old_usage(&retention_state.db_writer, days)
                             .await
                         {
                             Ok(n) if n > 0 => {
@@ -299,6 +340,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // allocated ports. Without this, tunnel listeners kept accepting/forwarding
     // past "drain complete" and were only killed abruptly at process exit.
     state.shutdown().await;
+    // Push the last counted bytes to the shared quota counter (no-op with the
+    // memory backend), so a rolling restart does not lose them.
+    state.quota_trackers.sync_all().await;
 
     tracing::info!("Graceful shutdown complete");
     Ok(())

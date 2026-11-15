@@ -49,27 +49,32 @@ pub async fn count_connections(
 }
 
 /// DELETE /api/connections/:id - Terminate a live connection (admin).
-/// Signals the relay to tear down and removes the tracked record. Returns 404
-/// if the connection isn't currently active on this instance.
+/// Signals the relay to tear down and removes the tracked record. A connection
+/// relayed by another instance (visible through the shared Redis state) is
+/// terminated there via the event bus and answered with 202 Accepted (#83).
+/// Returns 404 if no instance is known to be relaying it.
 pub async fn terminate_connection(
     _admin: AdminUser,
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let known = state.conn_cancel.get(&id).map(|n| n.clone());
-    match known {
-        Some(notify) => {
-            notify.notify_waiters();
-            // Best-effort: drop the tracked record too (the relay also cleans up).
-            let _ = state.state.delete_connection(id).await;
-            tracing::info!(target: "audit", conn_id = %id, "admin terminated connection");
-            Ok(StatusCode::NO_CONTENT)
-        }
-        None => Err(ApiError::not_found(format!(
-            "Connection {} is not active on this instance",
-            id
-        ))),
+    if crate::event_bus::terminate_local(&state, id) {
+        // Best-effort: drop the tracked record too (the relay also cleans up).
+        let _ = state.state.delete_connection(id).await;
+        tracing::info!(target: "audit", conn_id = %id, "admin terminated connection");
+        return Ok(StatusCode::NO_CONTENT);
     }
+    if state.event_bus.is_some() && state.state.get_connection(id).await.is_ok() {
+        state
+            .broadcast(&crate::event_bus::ProxyEvent::TerminateConnection(id))
+            .await;
+        tracing::info!(target: "audit", conn_id = %id, "admin requested termination of a connection on another instance");
+        return Ok(StatusCode::ACCEPTED);
+    }
+    Err(ApiError::not_found(format!(
+        "Connection {} is not active on any reachable instance",
+        id
+    )))
 }
 
 /// POST /api/connections/live-ticket - Mint a short-lived single-use ticket
@@ -91,6 +96,12 @@ pub async fn issue_live_ticket(
     state
         .ws_tickets
         .insert(ticket.clone(), std::time::Instant::now());
+    // Also in Redis, so the WebSocket may land on another instance (#83).
+    if let Some(ref cache) = state.cache {
+        cache
+            .put_ws_ticket(&ticket, LIVE_TICKET_TTL.as_secs())
+            .await;
+    }
     Json(serde_json::json!({ "ticket": ticket, "expires_in": LIVE_TICKET_TTL.as_secs() }))
 }
 
@@ -109,11 +120,19 @@ pub async fn live_connections(
 ) -> impl IntoResponse {
     // Validate + consume the single-use ticket before upgrading.
     let valid = match q.ticket {
-        Some(t) => state
-            .ws_tickets
-            .remove(&t)
-            .map(|(_, issued)| issued.elapsed() < LIVE_TICKET_TTL)
-            .unwrap_or(false),
+        Some(t) => {
+            let local = state
+                .ws_tickets
+                .remove(&t)
+                .map(|(_, issued)| issued.elapsed() < LIVE_TICKET_TTL);
+            // Always consume the shared copy too, so the ticket stays
+            // single-use across instances.
+            let shared = match state.cache {
+                Some(ref cache) => cache.take_ws_ticket(&t).await,
+                None => false,
+            };
+            local.unwrap_or(shared)
+        }
         None => false,
     };
     if !valid {

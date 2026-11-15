@@ -89,6 +89,36 @@ impl CacheLayer {
         Some(value)
     }
 
+    // ─── Live-connections WebSocket tickets (#83) ──────────────────────
+    //
+    // A ticket minted on one instance must be redeemable on another behind a
+    // load balancer. Keys hold a digest, not the ticket itself.
+
+    fn ws_ticket_key(&self, ticket: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let digest: String = Sha256::digest(ticket.as_bytes())
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        format!("{}ws_ticket:{}", self.prefix, digest)
+    }
+
+    /// Store a single-use ticket for `ttl_secs`. Best effort.
+    pub async fn put_ws_ticket(&self, ticket: &str, ttl_secs: u64) {
+        let mut conn = self.conn.clone();
+        let _: Result<(), _> = conn
+            .set_ex(self.ws_ticket_key(ticket), 1u8, ttl_secs.max(1))
+            .await;
+    }
+
+    /// Consume a ticket. True only for the one caller whose `DEL` removed a
+    /// live (unexpired) key, so a ticket redeems once across all instances.
+    pub async fn take_ws_ticket(&self, ticket: &str) -> bool {
+        let mut conn = self.conn.clone();
+        let removed: Result<i64, _> = conn.del(self.ws_ticket_key(ticket)).await;
+        matches!(removed, Ok(1))
+    }
+
     // ─── User cache (kept for direct set/invalidate) ──────────────────
 
     pub async fn set_user_by_id(&self, user_id: i64, user: &CachedUser) {
