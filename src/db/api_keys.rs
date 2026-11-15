@@ -35,8 +35,12 @@ pub(crate) fn api_key_digest(key_value: &str) -> String {
     out
 }
 
+/// Verify `key_value` for `user_id`. Lookups use `pool` (readers); the
+/// `last_used_at` stamp and legacy-hash upgrade go to `writer`, the dedicated
+/// writer pool (#34). Pass the same pool twice when there is only one.
 pub async fn verify_api_key(
     pool: &SqlitePool,
+    writer: &SqlitePool,
     user_id: i64,
     key_value: &str,
 ) -> Result<bool, sqlx::Error> {
@@ -62,7 +66,7 @@ pub async fn verify_api_key(
         // The index lookup already matched; compare again in constant time so
         // correctness never depends on how the database compares strings.
         if bool::from(key.key_hash.as_bytes().ct_eq(digest.as_bytes())) {
-            let _ = update_last_used(pool, key.id).await;
+            spawn_touch_last_used(writer, key.id);
             return Ok(true);
         }
     }
@@ -96,26 +100,49 @@ pub async fn verify_api_key(
             if let Err(e) = sqlx::query("UPDATE api_keys SET key_hash = ? WHERE id = ?")
                 .bind(&digest)
                 .bind(key.id)
-                .execute(pool)
+                .execute(writer)
                 .await
             {
                 tracing::warn!("Failed to upgrade legacy API key {} hash: {}", key.id, e);
             }
-            let _ = update_last_used(pool, key.id).await;
+            spawn_touch_last_used(writer, key.id);
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-/// Update last used timestamp
+/// `last_used_at` is advisory, so it is written at most once a minute per key.
+const LAST_USED_RESOLUTION_SECS: i64 = 60;
+
+/// Stamp `last_used_at` in the background. This runs on every API-key proxy
+/// authentication, so the auth path must not wait for the write lock (#34);
+/// the `WHERE` clause makes repeat uses within a minute write nothing.
+fn spawn_touch_last_used(writer: &SqlitePool, key_id: i64) {
+    let writer = writer.clone();
+    tokio::spawn(async move {
+        if let Err(e) = update_last_used(&writer, key_id).await {
+            crate::db::connection::note_contention(&e);
+            tracing::debug!(
+                "Failed to update last_used_at for API key {}: {}",
+                key_id,
+                e
+            );
+        }
+    });
+}
+
+/// Update last used timestamp (throttled, see [`LAST_USED_RESOLUTION_SECS`]).
 async fn update_last_used(pool: &SqlitePool, key_id: i64) -> Result<(), sqlx::Error> {
     let now = chrono::Utc::now().timestamp();
-    sqlx::query("UPDATE api_keys SET last_used_at = ? WHERE id = ?")
-        .bind(now)
-        .bind(key_id)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE api_keys SET last_used_at = ? WHERE id = ? AND (last_used_at IS NULL OR last_used_at <= ?)",
+    )
+    .bind(now)
+    .bind(key_id)
+    .bind(now - LAST_USED_RESOLUTION_SECS)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -171,14 +198,16 @@ mod tests {
             .await
             .unwrap();
         assert!(model.key_hash.starts_with(DIGEST_PREFIX));
-        assert!(verify_api_key(&pool, 1, &key).await.unwrap());
+        assert!(verify_api_key(&pool, &pool, 1, &key).await.unwrap());
         // Wrong user, wrong secret, missing separator.
-        assert!(!verify_api_key(&pool, 2, &key).await.unwrap());
+        assert!(!verify_api_key(&pool, &pool, 2, &key).await.unwrap());
         let (prefix, _) = key.split_once('.').unwrap();
-        assert!(!verify_api_key(&pool, 1, &format!("{}.nope", prefix))
-            .await
-            .unwrap());
-        assert!(!verify_api_key(&pool, 1, "garbage").await.unwrap());
+        assert!(
+            !verify_api_key(&pool, &pool, 1, &format!("{}.nope", prefix))
+                .await
+                .unwrap()
+        );
+        assert!(!verify_api_key(&pool, &pool, 1, "garbage").await.unwrap());
     }
 
     #[tokio::test]
@@ -188,7 +217,7 @@ mod tests {
             .await
             .unwrap();
         revoke_api_key(&pool, model.id, 1).await.unwrap();
-        assert!(!verify_api_key(&pool, 1, &key).await.unwrap());
+        assert!(!verify_api_key(&pool, &pool, 1, &key).await.unwrap());
 
         let (key2, model2) = create_api_key(&pool, 1, Some("t2".into()), None)
             .await
@@ -198,7 +227,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        assert!(!verify_api_key(&pool, 1, &key2).await.unwrap());
+        assert!(!verify_api_key(&pool, &pool, 1, &key2).await.unwrap());
     }
 
     #[tokio::test]
@@ -218,8 +247,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(!verify_api_key(&pool, 1, "AbCd.wrong").await.unwrap());
-        assert!(verify_api_key(&pool, 1, key).await.unwrap());
+        assert!(!verify_api_key(&pool, &pool, 1, "AbCd.wrong").await.unwrap());
+        assert!(verify_api_key(&pool, &pool, 1, key).await.unwrap());
 
         let stored: (String,) =
             sqlx::query_as("SELECT key_hash FROM api_keys WHERE key_prefix = 'AbCd'")
@@ -228,6 +257,6 @@ mod tests {
                 .unwrap();
         assert_eq!(stored.0, api_key_digest(key));
         // Still verifies after the upgrade (now via the digest path).
-        assert!(verify_api_key(&pool, 1, key).await.unwrap());
+        assert!(verify_api_key(&pool, &pool, 1, key).await.unwrap());
     }
 }

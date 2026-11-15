@@ -132,6 +132,10 @@ pub async fn update_config(
     state.global_conn_limit.resize(max_connections);
 
     tracing::info!(target: "audit", user_id = current_user_id, "configuration updated");
+    // Other replicas re-read the (shared) config file (#83).
+    state
+        .broadcast(&crate::event_bus::ProxyEvent::ConfigReloaded)
+        .await;
     Ok(Json(resp))
 }
 
@@ -192,12 +196,17 @@ pub async fn reload_config(
         current_user_id
     );
 
-    match state.reload_config().await {
+    // Stringify the (non-Send) error before any further await.
+    let reloaded = state.reload_config().await.map_err(|e| e.to_string());
+    match reloaded {
         Ok(_) => {
             // Also reload TLS certificates if TLS is enabled
             if let Err(e) = state.reload_tls() {
                 tracing::warn!("Config reloaded but TLS cert reload failed: {}", e);
             }
+            state
+                .broadcast(&crate::event_bus::ProxyEvent::ConfigReloaded)
+                .await;
             Ok(Json(ReloadResponse {
                 success: true,
                 message: "Configuration and TLS certificates reloaded successfully".to_string(),

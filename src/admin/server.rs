@@ -264,16 +264,30 @@ pub async fn run_admin_server(
     let app = build_router(state.clone());
     {
         let config = state.config.load();
-        if handlers::metrics::metrics_exposed_without_auth(
+        use handlers::metrics::{metrics_access, MetricsAccess};
+        match metrics_access(
             &config.server.admin_bind,
             config.metrics.scrape_token.as_deref(),
+            config.metrics.allow_unauthenticated,
         ) {
-            tracing::warn!(
-                "/metrics is unauthenticated and the admin API is bound to {} (non-loopback): \
-                 operational metrics are readable by anyone who can reach it. Set \
-                 [metrics] scrape_token (or PROXY__METRICS__SCRAPE_TOKEN) to require a bearer token.",
+            MetricsAccess::Refused => tracing::warn!(
+                "/metrics will answer 403: the admin API is bound to {} (non-loopback) and no \
+                 [metrics] scrape_token is set. Set scrape_token (PROXY__METRICS__SCRAPE_TOKEN) \
+                 and have Prometheus send it as a bearer token, or set \
+                 [metrics] allow_unauthenticated = true if the admin port is otherwise restricted.",
                 config.server.admin_bind
-            );
+            ),
+            MetricsAccess::Open
+                if !crate::config_env::is_loopback_bind(&config.server.admin_bind) =>
+            {
+                tracing::warn!(
+                    "/metrics is unauthenticated on non-loopback admin bind {} \
+                     (allow_unauthenticated = true): operational metrics are readable by \
+                     anyone who can reach it.",
+                    config.server.admin_bind
+                )
+            }
+            _ => {}
         }
     }
 
