@@ -107,7 +107,7 @@ pub async fn delete_user_sessions(
     axum::extract::Path(user_id): axum::extract::Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     current_user.authorize_target(&state, user_id).await?;
-    let deleted = crate::db::sessions::delete_user_sessions(&state.db_pool, user_id)
+    let deleted = crate::db::sessions::delete_user_sessions(&state.db_writer, user_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to delete sessions: {}", e);
