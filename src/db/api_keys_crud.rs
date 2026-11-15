@@ -11,12 +11,12 @@ pub async fn create_api_key(
     name: Option<String>,
     expires_in_days: Option<i64>,
 ) -> Result<(String, ApiKey), sqlx::Error> {
-    use rand::Rng;
+    use rand::RngExt;
     let (full_key, prefix) = {
-        let mut rng = rand::thread_rng();
-        let random_bytes: Vec<u8> = (0..32).map(|_| rng.gen()).collect();
+        let mut rng = rand::rng();
+        let random_bytes: Vec<u8> = (0..32).map(|_| rng.random()).collect();
         let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&random_bytes);
-        let prefix_bytes: Vec<u8> = (0..4).map(|_| rng.gen()).collect();
+        let prefix_bytes: Vec<u8> = (0..4).map(|_| rng.random()).collect();
         let prefix = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&prefix_bytes);
         let full_key = format!("{}.{}", prefix, secret);
         (full_key, prefix)

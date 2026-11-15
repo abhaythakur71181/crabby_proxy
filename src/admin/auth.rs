@@ -528,7 +528,6 @@ impl CurrentUser {
 ///
 /// Resolves the `user_id` attached to request extensions by `auth_middleware`
 /// into a `CurrentUser` (which re-checks `is_active` via the role cache).
-#[axum::async_trait]
 impl axum::extract::FromRequestParts<Arc<AppState>> for CurrentUser {
     type Rejection = super::handlers::models::ApiError;
 
@@ -550,7 +549,6 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for CurrentUser {
 /// no way to forget the guard inside the handler body.
 pub struct AdminUser(#[allow(dead_code)] pub CurrentUser);
 
-#[axum::async_trait]
 impl axum::extract::FromRequestParts<Arc<AppState>> for AdminUser {
     type Rejection = super::handlers::models::ApiError;
 
@@ -567,7 +565,6 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for AdminUser {
 /// Axum extractor: authenticated user that must be `root_admin`.
 pub struct RootAdminUser(pub CurrentUser);
 
-#[axum::async_trait]
 impl axum::extract::FromRequestParts<Arc<AppState>> for RootAdminUser {
     type Rejection = super::handlers::models::ApiError;
 
