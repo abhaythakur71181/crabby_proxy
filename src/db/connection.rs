@@ -443,7 +443,7 @@ mod migration_tests {
         let count = |t: &'static str| {
             let pool = pool.clone();
             async move {
-                sqlx::query(&format!("SELECT COUNT(*) FROM {t}"))
+                sqlx::query(sqlx::AssertSqlSafe(format!("SELECT COUNT(*) FROM {t}")))
                     .fetch_one(&pool)
                     .await
                     .unwrap()

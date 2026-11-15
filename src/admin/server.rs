@@ -42,7 +42,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(handlers::connections::count_connections),
         )
         .route(
-            "/api/connections/:id",
+            "/api/connections/{id}",
             delete(handlers::connections::terminate_connection),
         )
         .route(
@@ -52,7 +52,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/tunnels", get(handlers::tunnels::list_tunnels))
         .route("/api/tunnels", post(handlers::tunnels::create_tunnel))
         .route(
-            "/api/tunnels/:port",
+            "/api/tunnels/{port}",
             delete(handlers::tunnels::close_tunnel),
         )
         .route("/api/config", get(handlers::config::get_config))
@@ -64,31 +64,31 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // User management routes
         .route("/api/users", post(handlers::users::create_user))
         .route("/api/users", get(handlers::users::list_users))
-        .route("/api/users/:id", get(handlers::users::get_user))
+        .route("/api/users/{id}", get(handlers::users::get_user))
         .route(
-            "/api/users/:id",
+            "/api/users/{id}",
             axum::routing::put(handlers::users::update_user),
         )
-        .route("/api/users/:id", delete(handlers::users::delete_user))
+        .route("/api/users/{id}", delete(handlers::users::delete_user))
         .route(
             "/api/users/me/password",
             post(handlers::users::change_own_password),
         )
         .route(
-            "/api/users/:id/password",
+            "/api/users/{id}/password",
             post(handlers::users::admin_reset_password),
         )
         // Usage tracking routes
         .route(
-            "/api/users/:id/usage",
+            "/api/users/{id}/usage",
             get(handlers::usage::get_user_usage_stats),
         )
         .route(
-            "/api/users/:id/usage/recent",
+            "/api/users/{id}/usage/recent",
             get(handlers::usage::get_recent_usage),
         )
         .route(
-            "/api/users/:id/usage/all-time",
+            "/api/users/{id}/usage/all-time",
             get(handlers::usage::get_all_time_usage),
         )
         // System-wide usage dashboard
@@ -102,35 +102,35 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         // Quota management routes
         .route(
-            "/api/users/:id/quota",
+            "/api/users/{id}/quota",
             get(handlers::quotas::get_user_quota),
         )
         .route(
-            "/api/users/:id/quota",
+            "/api/users/{id}/quota",
             axum::routing::put(handlers::quotas::update_user_quota),
         )
         // API key management routes
         .route(
-            "/api/users/:id/api-keys",
+            "/api/users/{id}/api-keys",
             post(handlers::users::create_api_key),
         )
         .route(
-            "/api/users/:id/api-keys",
+            "/api/users/{id}/api-keys",
             get(handlers::users::list_api_keys),
         )
         .route(
-            "/api/users/:id/api-keys/:key_id",
+            "/api/users/{id}/api-keys/{key_id}",
             delete(handlers::users::revoke_api_key),
         )
         // Approval management routes
         .route("/api/approvals", post(handlers::approvals::create_approval))
         .route("/api/approvals", get(handlers::approvals::list_approvals))
         .route(
-            "/api/approvals/:id",
+            "/api/approvals/{id}",
             delete(handlers::approvals::terminate_approval),
         )
         .route(
-            "/api/users/:id/approvals",
+            "/api/users/{id}/approvals",
             get(handlers::approvals::list_user_approvals),
         )
         // Approval request workflow routes
@@ -143,43 +143,43 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(handlers::approval_requests::list_requests),
         )
         .route(
-            "/api/approval-requests/:id/approve",
+            "/api/approval-requests/{id}/approve",
             post(handlers::approval_requests::approve_request),
         )
         .route(
-            "/api/approval-requests/:id/reject",
+            "/api/approval-requests/{id}/reject",
             post(handlers::approval_requests::reject_request),
         )
         // Audit log routes
         .route("/api/audit-log", get(handlers::audit::list_audit_log))
         // Session management routes
         .route(
-            "/api/users/:id/sessions",
+            "/api/users/{id}/sessions",
             get(handlers::audit::list_user_sessions),
         )
         .route(
-            "/api/users/:id/sessions",
+            "/api/users/{id}/sessions",
             delete(handlers::audit::delete_user_sessions),
         )
         // User group routes
         .route("/api/groups", post(handlers::groups::create_group))
         .route("/api/groups", get(handlers::groups::list_groups))
-        .route("/api/groups/:id", get(handlers::groups::get_group))
-        .route("/api/groups/:id", delete(handlers::groups::delete_group))
+        .route("/api/groups/{id}", get(handlers::groups::get_group))
+        .route("/api/groups/{id}", delete(handlers::groups::delete_group))
         .route(
-            "/api/groups/:id/members",
+            "/api/groups/{id}/members",
             post(handlers::groups::add_member),
         )
         .route(
-            "/api/groups/:id/members",
+            "/api/groups/{id}/members",
             get(handlers::groups::list_members),
         )
         .route(
-            "/api/groups/:id/members/:user_id",
+            "/api/groups/{id}/members/{user_id}",
             delete(handlers::groups::remove_member),
         )
         .route(
-            "/api/users/:id/groups",
+            "/api/users/{id}/groups",
             get(handlers::groups::list_user_groups),
         )
         .route_layer(axum::middleware::from_fn_with_state(
@@ -304,7 +304,7 @@ pub async fn run_admin_server(
     tracing::info!("  GET /api/connections - List connections");
     tracing::info!("  GET /api/tunnels - List tunnels");
     tracing::info!("  POST /api/tunnels - Create tunnel");
-    tracing::info!("  DELETE /api/tunnels/:port - Close tunnel");
+    tracing::info!("  DELETE /api/tunnels/{{port}} - Close tunnel");
     tracing::info!("  GET /api/config - View configuration");
     tracing::info!("  POST /api/config/reload - Reload configuration");
 

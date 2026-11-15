@@ -76,7 +76,7 @@ pub async fn get_audit_log(
         query.push_str(" AND action >= ? AND action < ?");
     }
     query.push_str(" ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?");
-    let mut q = sqlx::query(&query);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(query));
     if let Some(uid) = user_id_filter {
         q = q.bind(uid);
     }
@@ -114,7 +114,7 @@ pub async fn count_audit_entries(
     if action_filter.is_some() {
         query.push_str(" AND action >= ? AND action < ?");
     }
-    let mut q = sqlx::query(&query);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(query));
     if let Some(uid) = user_id_filter {
         q = q.bind(uid);
     }

@@ -313,8 +313,8 @@ impl SharedQuotaStore {
         // Admission waits on this; a hung Redis must not stall connections.
         match tokio::time::timeout(SHARED_SYNC_TIMEOUT, call).await {
             Ok(r) => r,
-            Err(_) => Err(redis::RedisError::from((
-                redis::ErrorKind::IoError,
+            Err(_) => Err(redis::RedisError::from(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
                 "shared quota sync timed out",
             ))),
         }

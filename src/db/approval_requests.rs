@@ -138,7 +138,7 @@ pub async fn list_all_requests(
          WHERE (?1 IS NULL OR r.status = ?1) \
          ORDER BY r.requested_at DESC, r.id DESC LIMIT ?2 OFFSET ?3"
     );
-    sqlx::query_as::<_, ApprovalRequestWithUser>(&sql)
+    sqlx::query_as::<_, ApprovalRequestWithUser>(sqlx::AssertSqlSafe(sql))
         .bind(status_filter)
         .bind(page.limit)
         .bind(page.offset)
@@ -156,7 +156,7 @@ pub async fn list_user_requests(
         "SELECT {LIST_COLUMNS} FROM approval_requests r LEFT JOIN users u ON u.id = r.user_id \
          WHERE r.user_id = ? ORDER BY r.requested_at DESC, r.id DESC LIMIT ? OFFSET ?"
     );
-    sqlx::query_as::<_, ApprovalRequestWithUser>(&sql)
+    sqlx::query_as::<_, ApprovalRequestWithUser>(sqlx::AssertSqlSafe(sql))
         .bind(user_id)
         .bind(page.limit)
         .bind(page.offset)
