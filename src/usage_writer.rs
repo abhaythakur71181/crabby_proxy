@@ -45,7 +45,8 @@ pub struct UsageWriter {
 }
 
 impl UsageWriter {
-    /// Spawn the background writer task and return a handle.
+    /// Spawn the background writer task and return a handle. `pool` should
+    /// be the dedicated writer pool (`AppState::db_writer`).
     pub fn spawn(pool: SqlitePool) -> Self {
         let (tx, mut rx) = mpsc::channel::<UsageRecord>(CHANNEL_CAPACITY);
         tokio::spawn(async move {
@@ -92,7 +93,7 @@ impl UsageWriter {
 /// batch is retried row-by-row so one bad row can't lose the rest.
 async fn write_batch(pool: &SqlitePool, batch: &mut Vec<UsageRecord>) {
     let result = async {
-        let mut tx = pool.begin().await?;
+        let mut tx = crate::db::connection::begin_write(pool).await?;
         for rec in batch.iter() {
             insert_usage(&mut tx, rec).await?;
         }
@@ -101,6 +102,7 @@ async fn write_batch(pool: &SqlitePool, batch: &mut Vec<UsageRecord>) {
     .await;
 
     if let Err(e) = result {
+        crate::db::connection::note_contention(&e);
         tracing::error!(
             "usage_writer: batch of {} failed ({}); retrying row-by-row",
             batch.len(),
@@ -122,6 +124,7 @@ async fn write_batch(pool: &SqlitePool, batch: &mut Vec<UsageRecord>) {
             )
             .await
             {
+                crate::db::connection::note_contention(&e);
                 crate::metrics::USAGE_RECORDS_DROPPED.inc();
                 tracing::error!(
                     "usage_writer: failed to record usage for user {}: {}",

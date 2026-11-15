@@ -93,10 +93,13 @@ pub async fn login(
             .get(header::USER_AGENT)
             .and_then(|v| v.to_str().ok())
             .map(|ua| ua.chars().take(256).collect::<String>());
+        // Session and last-login writes go through the single writer
+        // connection (#34) so concurrent logins queue instead of contending.
+        let writer = &state.db_writer;
         // Opportunistic cleanup keeps the table bounded without a timer.
-        let _ = sessions::cleanup_expired_sessions(pool).await;
+        let _ = sessions::cleanup_expired_sessions(writer).await;
         sessions::create_session(
-            pool,
+            writer,
             user.id,
             &claims.jti,
             claims.exp as i64,
@@ -111,7 +114,7 @@ pub async fn login(
                 "Failed to create session".to_string(),
             )
         })?;
-        let _ = users::update_last_login(pool, user.id).await;
+        let _ = users::update_last_login(writer, user.id).await;
         let mut body = LoginResponse {
             token: None,
             expires_in: expiration,
@@ -196,7 +199,7 @@ pub async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
         .or_else(|| admin_auth::session_cookie(&headers));
     if let Some(token) = token {
         if let Ok(claims) = jwt::validate_jwt(&token, &secret) {
-            if let Err(e) = sessions::delete_session_by_token(&state.db_pool, &claims.jti).await {
+            if let Err(e) = sessions::delete_session_by_token(&state.db_writer, &claims.jti).await {
                 tracing::error!("Logout: failed to delete session: {}", e);
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
