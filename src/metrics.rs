@@ -95,6 +95,33 @@ lazy_static! {
     )
     .unwrap();
 
+    /// Time spent waiting for the single SQLite writer connection (#34).
+    /// Rising tail latency here means writes are queueing behind each other.
+    pub static ref DB_WRITE_ACQUIRE: prometheus::Histogram = prometheus::register_histogram!(
+        "proxy_db_write_acquire_seconds",
+        "Time waiting to acquire the SQLite writer connection",
+        vec![0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 5.0, 10.0]
+    )
+    .unwrap();
+
+    /// SQLite contention errors, by kind: `busy` (SQLITE_BUSY/LOCKED after
+    /// busy_timeout) or `pool_timeout` (no pooled connection within
+    /// acquire_timeout).
+    pub static ref DB_CONTENTION_ERRORS: IntCounterVec = register_int_counter_vec!(
+        "proxy_db_contention_errors_total",
+        "SQLite busy/locked errors and pool acquire timeouts",
+        &["kind"]
+    )
+    .unwrap();
+
+    /// Redis quota-counter sync failures (#30). While non-zero and rising,
+    /// quotas are enforced from each instance's local view only.
+    pub static ref QUOTA_SYNC_ERRORS: prometheus::IntCounter = prometheus::register_int_counter!(
+        "proxy_quota_sync_errors_total",
+        "Failed syncs of the shared Redis quota counter (local enforcement in effect)"
+    )
+    .unwrap();
+
     /// Connection duration histogram (seconds)
     pub static ref CONNECTION_DURATION: HistogramVec = register_histogram_vec!(
         "proxy_connection_duration_seconds",
