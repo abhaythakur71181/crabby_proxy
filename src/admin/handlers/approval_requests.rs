@@ -85,7 +85,7 @@ pub async fn create_request(
 
     // User always requests for themselves
     let id = approval_requests::create_request(
-        &state.db_pool,
+        &state.db_writer,
         current_user_id,
         &payload.client_ip,
         payload.duration_hours,
@@ -108,7 +108,7 @@ pub async fn create_request(
         }
     );
     let _ = crate::db::audit_log::log_action(
-        &state.db_pool,
+        &state.db_writer,
         current_user_id,
         "approval_request_created",
         Some("approval_request"),
@@ -166,7 +166,7 @@ pub async fn approve_request(
     let current_user_id = current_user.id;
 
     let req = approval_requests::approve_request(
-        &state.db_pool,
+        &state.db_writer,
         request_id,
         current_user_id,
         payload.reason.as_deref(),
@@ -183,7 +183,7 @@ pub async fn approve_request(
             state.invalidate_approval_cache(r.user_id).await;
             // Audit log
             let _ = crate::db::audit_log::log_action(
-                &state.db_pool,
+                &state.db_writer,
                 current_user_id,
                 "approval_request_approved",
                 Some("approval_request"),
@@ -212,7 +212,7 @@ pub async fn reject_request(
     let current_user_id = current_user.id;
 
     let rejected = approval_requests::reject_request(
-        &state.db_pool,
+        &state.db_writer,
         request_id,
         current_user_id,
         payload.reason.as_deref(),
@@ -226,7 +226,7 @@ pub async fn reject_request(
     if rejected {
         // Audit log
         let _ = crate::db::audit_log::log_action(
-            &state.db_pool,
+            &state.db_writer,
             current_user_id,
             "approval_request_rejected",
             Some("approval_request"),
