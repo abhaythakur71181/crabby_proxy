@@ -55,12 +55,12 @@ static CACHE_HMAC_KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new(
 /// Derive the opaque cache key for a credential pair.
 pub fn credential_key(domain: CredentialDomain, username: &str, password: &str) -> [u8; 32] {
     use hmac::{Hmac, Mac};
-    use rand::RngCore;
+    use rand::Rng;
     use sha2::Sha256;
 
     let key = CACHE_HMAC_KEY.get_or_init(|| {
         let mut k = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut k);
+        rand::rng().fill_bytes(&mut k);
         k
     });
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");

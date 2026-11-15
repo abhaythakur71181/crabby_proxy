@@ -12,7 +12,7 @@ const BACKEND = process.env.CRABBY_BACKEND ?? "http://127.0.0.1:8081";
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
-    alias: { "@": path.resolve(__dirname, "src") },
+    alias: { "@": path.resolve(import.meta.dirname, "src") },
   },
   server: {
     port: 5174,
@@ -23,11 +23,18 @@ export default defineConfig({
   },
   build: {
     target: "es2022",
-    rollupOptions: {
+    // Vite 8 bundles with Rolldown, which has no object form of
+    // `manualChunks`; these groups keep the same vendor/motion split.
+    rolldownOptions: {
       output: {
-        manualChunks: {
-          vendor: ["react", "react-dom", "react-router", "@tanstack/react-query"],
-          motion: ["motion"],
+        codeSplitting: {
+          groups: [
+            {
+              name: "vendor",
+              test: /[\\/]node_modules[\\/](react|react-dom|react-router|@tanstack[\\/]react-query)[\\/]/,
+            },
+            { name: "motion", test: /[\\/]node_modules[\\/]motion[\\/]/ },
+          ],
         },
       },
     },

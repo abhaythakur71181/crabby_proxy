@@ -80,12 +80,10 @@ pub fn issue_jwt(
         iss: JWT_ISSUER.to_owned(),
         aud: JWT_AUDIENCE.to_owned(),
     };
-    let token = encode(
-        &Header::new(JWT_ALGORITHM),
-        &claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
-    )
-    .map_err(|e| AuthError(format!("Token creation failed: {}", e)))?;
+    let key = EncodingKey::from_secret(secret.as_bytes())
+        .map_err(|e| AuthError(format!("Token creation failed: {}", e)))?;
+    let token = encode(&Header::new(JWT_ALGORITHM), &claims, &key)
+        .map_err(|e| AuthError(format!("Token creation failed: {}", e)))?;
     Ok((token, claims))
 }
 
@@ -109,12 +107,10 @@ pub fn validate_jwt(token: &str, secret: &str) -> Result<Claims, AuthError> {
     validation.set_issuer(&[JWT_ISSUER]);
     validation.set_audience(&[JWT_AUDIENCE]);
     validation.set_required_spec_claims(&["exp", "iss", "aud"]);
-    let token_data = decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &validation,
-    )
-    .map_err(|e| AuthError(format!("Token validation failed: {}", e)))?;
+    let key = DecodingKey::from_secret(secret.as_bytes())
+        .map_err(|e| AuthError(format!("Token validation failed: {}", e)))?;
+    let token_data = decode::<Claims>(token, &key, &validation)
+        .map_err(|e| AuthError(format!("Token validation failed: {}", e)))?;
     if token_data.claims.jti.is_empty() {
         return Err(AuthError("Token validation failed: empty jti".into()));
     }
@@ -202,7 +198,7 @@ mod tests {
         let token = encode(
             &Header::default(),
             &claims,
-            &EncodingKey::from_secret("supersecret_key_at_least_32_bytes_long".as_bytes()),
+            &EncodingKey::from_secret("supersecret_key_at_least_32_bytes_long".as_bytes()).unwrap(),
         )
         .unwrap();
 
@@ -450,7 +446,7 @@ mod tests {
         encode(
             &Header::new(alg),
             claims,
-            &EncodingKey::from_secret(SECRET.as_bytes()),
+            &EncodingKey::from_secret(SECRET.as_bytes()).unwrap(),
         )
         .unwrap()
     }

@@ -15,10 +15,11 @@ ignore = [
     # (HMAC) is used, so the RSA code path is never exercised; no fixed rsa
     # release exists.
     { id = "RUSTSEC-2023-0071", reason = "RSA path unused (HS256 only); no fixed release" },
-    # Bundled SQLite < 3.54 (libsqlite3-sys 0.30 via sqlx 0.8). Needs a DB/-wal
+    # Bundled SQLite < 3.54 (libsqlite3-sys < 0.39, via sqlx). Needs a DB/-wal
     # pair written by a less-trusted party; proxy.db is private to the proxy.
-    # Remove with the sqlx 0.9 upgrade (libsqlite3-sys 0.39).
-    { id = "RUSTSEC-2026-0459", reason = "only exploitable via attacker-written DB/WAL files; fixed by sqlx 0.9" },
+    # sqlx 0.9.0 still caps libsqlite3-sys at < 0.38; remove this once a sqlx
+    # release allows libsqlite3-sys >= 0.39.
+    { id = "RUSTSEC-2026-0459", reason = "only exploitable via attacker-written DB/WAL files; no sqlx release allows the fixed libsqlite3-sys yet" },
 ]
 
 [licenses]
