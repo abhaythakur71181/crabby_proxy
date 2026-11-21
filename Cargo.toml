@@ -39,7 +39,7 @@ redis = { version = "1.8", features = ["tokio-comp", "connection-manager", "tls-
 lru = "0.19"
 dashmap = "6"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
-maxminddb = "0.32"
+maxminddb = "0.33"
 futures-lite = "2"
 h2 = "0.4"
 http = "1"
